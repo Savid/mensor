@@ -1,0 +1,7 @@
+# The SQLite built into the binary, without the parts the store never uses
+# (full-text search, R-trees, JSON functions, loadable extensions), which
+# takes 0.7 MB off it. The last three flags are ones SQLite recommends: no
+# statistics kept on every allocation, no shared cache, and no reading a
+# double-quoted string as text.
+[env]
+LIBSQLITE3_FLAGS = "-USQLITE_ENABLE_FTS3 -USQLITE_ENABLE_FTS3_PARENTHESIS -USQLITE_ENABLE_FTS5 -USQLITE_ENABLE_RTREE -USQLITE_ENABLE_DBSTAT_VTAB -USQLITE_ENABLE_STAT4 -USQLITE_ENABLE_LOAD_EXTENSION -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_OMIT_JSON -DSQLITE_OMIT_DEPRECATED -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_OMIT_SHARED_CACHE -DSQLITE_DQS=0"

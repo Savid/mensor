@@ -1,0 +1,17 @@
+name: Set up Rust
+description: >-
+  Installs the toolchain rust-toolchain.toml pins, and restores what earlier
+  runs of the job built: the dependencies, and the tools `make tools`
+  installs.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: rustup toolchain install
+    # A cache is keyed by its job, the compiler and the lockfile, and here by
+    # the Makefile too, which holds the tools' versions. Only master saves
+    # one, so a pull request reads a cache and never writes it.
+    - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      with:
+        key: ${{ hashFiles('Makefile') }}
+        save-if: ${{ github.ref == 'refs/heads/master' }}

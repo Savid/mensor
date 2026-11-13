@@ -1,0 +1,27 @@
+# mensor on Cloudflare Workers. Each pair is one Durable Object: its mind,
+# its body and its files, in the object's own SQLite database.
+name = "mensor"
+main = "build/index.js"
+compatibility_date = "2026-10-01"
+
+[build]
+command = "worker-build --release"
+
+[[durable_objects.bindings]]
+name = "PAIRS"
+class_name = "Pair"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Pair"]
+
+[vars]
+# The model every mind asks.
+MENSOR_MODEL = "claude-opus-5-5"
+
+# Secrets, set with `wrangler secret put <NAME>`:
+#   ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN   the model's credential
+#   MENSOR_TOKEN                                the bearer token every request must carry
+# Optional vars: ANTHROPIC_BASE_URL, MENSOR_EFFORT, MENSOR_SYSTEM,
+# MENSOR_FALLBACKS ("off" where the API has no fallback model) and
+# MENSOR_RECOVERY_MS (how soon an object stopped mid-work is woken: 30000).

@@ -1,0 +1,40 @@
+# What `make deny` holds every dependency to. cargo-deny reads this.
+
+[graph]
+all-features = true
+# The targets mensor is built and tested for. A new one is added here.
+targets = ["x86_64-unknown-linux-gnu", "wasm32-unknown-unknown"]
+
+[advisories]
+yanked = "deny"
+
+[licenses]
+# Every licence a dependency may be used under. All are permissive.
+allow = [
+  "Apache-2.0",
+  "BSD-3-Clause",
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "MIT",
+  "Unicode-3.0",
+  "Zlib",
+]
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+# The workspace's own crates name each other by path, with no version.
+allow-wildcard-paths = true
+# The older of two versions that dependencies force on the build. Each
+# entry goes when the crate named in its reason moves on; cargo-deny warns
+# about an entry that no longer matches anything.
+skip = [
+  { crate = "base64@0.22", reason = "axum 0.8 is on 0.22; reqwest and hyper-util are on 0.23" },
+  { crate = "getrandom@0.2", reason = "ring 0.17 is on 0.2; tungstenite 0.29 (through rand 0.9) is on 0.3, as this workspace is" },
+  { crate = "matchit@0.7", reason = "worker 0.9 is on 0.7; axum 0.8 is on 0.8" },
+  { crate = "syn@2", reason = "pin-project-internal, strum_macros and tracing-attributes are on syn 2" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

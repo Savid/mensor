@@ -1,0 +1,17 @@
+[package]
+name = "mensor-model"
+description = "Model APIs as requests to send and answers to read, with no I/O: Claude's Messages API, and Chat Completions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+mensor-mind.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,4 @@
+rules:
+  # actionlint rejects the $/ form of uses: that this audit asks for.
+  self-repository:
+    disable: true

@@ -1,0 +1,27 @@
+[package]
+name = "mensor-mind-host"
+description = "A server that hosts minds: one task each, an endpoint for bodies and an API"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+axum.workspace = true
+futures-util.workspace = true
+mensor-api.workspace = true
+mensor-model.workspace = true
+mensor-protocol.workspace = true
+mensor-mind.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
+tracing.workspace = true
+
+[lints]
+workspace = true

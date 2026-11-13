@@ -1,0 +1,65 @@
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "MIT"
+publish = false
+repository = "https://github.com/Savid/todo"
+
+[workspace.dependencies]
+mensor-api = { path = "crates/api" }
+mensor-body = { path = "crates/body" }
+mensor-body-host = { path = "crates/body-host" }
+mensor-model = { path = "crates/model" }
+mensor-mind = { path = "crates/mind" }
+mensor-mind-host = { path = "crates/mind-host" }
+mensor-object = { path = "crates/object" }
+mensor-protocol = { path = "crates/protocol" }
+mensor-store-sqlite = { path = "crates/store-sqlite" }
+
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio", "ws"] }
+clap = { version = "4", features = ["derive", "env"] }
+futures-channel = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+getrandom = "0.3"
+nix = { version = "0.31", default-features = false, features = ["signal"] }
+# No crypto of its own: a host installs ring, as the body does, which is a
+# third the size of the default.
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
+rusqlite = { version = "0.42", features = ["bundled"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1.54", default-features = false }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake", "rustls-tls-native-roots"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["ansi", "fmt"] }
+worker = "0.9"
+
+[workspace.lints.rust]
+# Refused everywhere but where one item says why it must be: see AGENTS.md.
+unsafe_code = "deny"
+missing_docs = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+missing_errors_doc = "allow"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+
+# Built for size. Measured over 400 tool turns against an instant model,
+# this costs no CPU beside `opt-level = 3` (1.6 ms a turn either way), and
+# the binary is 4.5 MB in place of 7.3.
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+strip = true

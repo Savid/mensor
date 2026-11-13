@@ -1,0 +1,528 @@
+//! Claude's Messages API: `POST /v1/messages`.
+
+use mensor_mind::{Block, Content, Message, ModelReply, ModelRequest, Role, Stop, Usage};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
+
+use crate::{CUT_OFF, Config, Credential, Failure, Post};
+
+/// The API version every request names.
+pub const VERSION: &str = "2026-10-21";
+/// Lets the API serve a declined request from another model in the same call.
+pub const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
+/// Lets a request say what happens to reasoning bound to an edited history.
+pub const BINDING_BETA: &str = "thinking-binding-controls-2026-08-01";
+/// Marks an OAuth token, which goes on `Authorization` and not `x-api-key`.
+pub const OAUTH_BETA: &str = "oauth-2025-04-20";
+
+pub(crate) fn post(config: &Config, request: &ModelRequest, drop_reasoning: bool) -> Post {
+    let url = format!("{}/v1/messages", config.base_url.trim_end_matches('/'));
+    let mut headers = vec![("anthropic-version", VERSION.to_owned())];
+    let mut betas = Vec::new();
+    match &config.credential {
+        Credential::ApiKey(key) => headers.push(("x-api-key", key.clone())),
+        Credential::Token(token) => {
+            headers.push(("authorization", format!("Bearer {token}")));
+            betas.push(OAUTH_BETA);
+        }
+    }
+    if config.fallbacks {
+        betas.push(FALLBACK_BETA);
+    }
+    if drop_reasoning {
+        betas.push(BINDING_BETA);
+    }
+    if !betas.is_empty() {
+        headers.push(("anthropic-beta", betas.join(",")));
+    }
+    let body = serde_json::to_string(&body(config, request, drop_reasoning))
+        .expect("a request is strings and JSON values, which are always written");
+    Post { url, headers, body }
+}
+
+/// Whether the API refused reasoning that the history no longer matches.
+pub(crate) fn reasoning_is_unbound(failure: &Failure) -> bool {
+    failure.status == Some(400) && failure.detail.contains("bound to a different conversation")
+}
+
+/// The body of one request. It borrows the conversation.
+#[derive(Serialize)]
+struct Body<'a> {
+    model: &'a str,
+    max_tokens: u32,
+    stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system: Option<&'a str>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<ToolDef<'a>>,
+    messages: Vec<Said<'a>>,
+    cache_control: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_config: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fallbacks: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<Value>,
+}
+
+#[derive(Serialize)]
+struct ToolDef<'a> {
+    name: &'a str,
+    description: &'a str,
+    input_schema: &'a Value,
+}
+
+#[derive(Serialize)]
+struct Said<'a> {
+    role: &'static str,
+    content: Vec<Part<'a>>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum Part<'a> {
+    Text {
+        text: &'a str,
+    },
+    ToolUse {
+        id: &'a str,
+        name: &'a str,
+        input: &'a Value,
+    },
+    ToolResult {
+        tool_use_id: &'a str,
+        content: &'a str,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        is_error: bool,
+    },
+    /// A block of the model's own, written as it came.
+    #[serde(untagged)]
+    Other(&'a Value),
+}
+
+// A request that must be answered in text is not told so with `tool_choice`:
+// that would stop it reading the cache the request before it wrote. The
+// mind asks for text in words, and takes only the text of the reply.
+fn body<'a>(config: &'a Config, request: &'a ModelRequest, drop_reasoning: bool) -> Body<'a> {
+    Body {
+        model: &config.model,
+        max_tokens: config.max_tokens,
+        stream: true,
+        system: request
+            .system
+            .as_deref()
+            .filter(|system| !system.is_empty()),
+        tools: request
+            .tools
+            .iter()
+            .map(|tool| ToolDef {
+                name: &tool.name,
+                description: &tool.description,
+                input_schema: &tool.input,
+            })
+            .collect(),
+        messages: request.messages.iter().filter_map(said).collect(),
+        // A history only grows, so each request extends the last one's
+        // prefix.
+        cache_control: json!({"type": "ephemeral"}),
+        output_config: config
+            .effort
+            .as_ref()
+            .map(|effort| json!({"effort": effort})),
+        fallbacks: config.fallbacks.then_some("default"),
+        thinking: drop_reasoning.then(|| {
+            json!({
+                "type": "adaptive",
+                "block_binding": {"prefix_mismatch_behavior": "drop_block"},
+            })
+        }),
+    }
+}
+
+fn said(message: &Message) -> Option<Said<'_>> {
+    let content: Vec<Part<'_>> = message.content.iter().filter_map(part).collect();
+    let role = match message.role {
+        Role::User => "user",
+        Role::Assistant => "assistant",
+    };
+    (!content.is_empty()).then_some(Said { role, content })
+}
+
+fn part(content: &Content) -> Option<Part<'_>> {
+    Some(match content {
+        // The API refuses a text block with nothing in it.
+        Content::Text(text) if text.is_empty() => return None,
+        Content::Text(text) => Part::Text { text },
+        Content::ToolUse { id, name, input } => Part::ToolUse { id, name, input },
+        // Reasoning another API wrote means nothing to this one.
+        Content::Other(block) if crate::chat::is_reasoning(block) => return None,
+        Content::Other(block) => Part::Other(block),
+        Content::ToolResult {
+            tool_use,
+            text,
+            error,
+        } => Part::ToolResult {
+            tool_use_id: tool_use,
+            content: if text.is_empty() { "(no output)" } else { text },
+            is_error: *error,
+        },
+    })
+}
+
+#[derive(Deserialize)]
+struct Reply {
+    content: Vec<Value>,
+    stop_reason: Option<String>,
+    #[serde(default)]
+    usage: ReplyUsage,
+}
+
+#[derive(Default, Deserialize)]
+struct ReplyUsage {
+    #[serde(default, rename = "input_tokens")]
+    input: u64,
+    #[serde(default, rename = "cache_creation_input_tokens")]
+    cache_written: u64,
+    #[serde(default, rename = "cache_read_input_tokens")]
+    cache_read: u64,
+    #[serde(default, rename = "output_tokens")]
+    output: u64,
+}
+
+/// Reads one response.
+pub(crate) fn reply(body: &str) -> Result<ModelReply, String> {
+    let reply: Reply = serde_json::from_str(body).map_err(|error| error.to_string())?;
+    let stop = match reply.stop_reason.as_deref() {
+        Some("end_turn") => Stop::EndTurn,
+        Some("tool_use") => Stop::ToolUse,
+        Some("max_tokens") => Stop::MaxTokens,
+        Some("refusal") => Stop::Refusal,
+        _ => Stop::Other,
+    };
+    let usage = Usage {
+        input: reply.usage.input + reply.usage.cache_written + reply.usage.cache_read,
+        output: reply.usage.output,
+    };
+    Ok(ModelReply {
+        content: reply.content.into_iter().map(block).collect(),
+        stop,
+        usage,
+    })
+}
+
+/// A block the mind reads.
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum Read {
+    Text {
+        text: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: Value,
+    },
+}
+
+/// A text block and a tool use are read. Anything else, such as the model's
+/// signed reasoning, is kept whole to be handed back.
+fn block(value: Value) -> Block {
+    match Read::deserialize(&value) {
+        Ok(Read::Text { text }) => Block::Text { text },
+        Ok(Read::ToolUse { id, name, input }) => Block::ToolUse { id, name, input },
+        Err(_) => Block::Other { value },
+    }
+}
+
+/// A streamed reply so far, put together as the message a request that is
+/// not streamed is answered with.
+#[derive(Debug, Default)]
+pub(crate) struct Parts {
+    message: Map<String, Value>,
+    content: Vec<Value>,
+    /// The input of each block that uses a tool, which comes as pieces of
+    /// JSON text.
+    inputs: Vec<String>,
+    ended: bool,
+    error: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum Event {
+    MessageStart {
+        message: Map<String, Value>,
+    },
+    ContentBlockStart {
+        content_block: Value,
+    },
+    ContentBlockDelta {
+        index: usize,
+        delta: Delta,
+    },
+    ContentBlockStop {
+        index: usize,
+    },
+    MessageDelta {
+        delta: Map<String, Value>,
+        #[serde(default)]
+        usage: Map<String, Value>,
+    },
+    MessageStop,
+    Error {
+        error: Value,
+    },
+    /// A ping, and whatever the API adds later.
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum Delta {
+    #[serde(rename = "text_delta")]
+    Text { text: String },
+    #[serde(rename = "input_json_delta")]
+    InputJson { partial_json: String },
+    #[serde(rename = "thinking_delta")]
+    Thinking { thinking: String },
+    #[serde(rename = "signature_delta")]
+    Signature { signature: String },
+    #[serde(other)]
+    Other,
+}
+
+impl Parts {
+    /// Takes one event. Text the model wrote in it joins `text`.
+    pub(crate) fn take(&mut self, data: &str, text: &mut String) {
+        let event = match serde_json::from_str(data) {
+            Ok(event) => event,
+            Err(error) => {
+                self.error = Some(format!("an event of the stream could not be read: {error}"));
+                return;
+            }
+        };
+        match event {
+            Event::MessageStart { message } => self.message = message,
+            Event::ContentBlockStart { content_block } => {
+                // Two texts of one reply are told apart as two paragraphs.
+                let is_text = content_block.get("type").and_then(Value::as_str) == Some("text");
+                let follows = self.content.iter().any(|block| block.get("text").is_some());
+                if is_text && follows {
+                    text.push_str("\n\n");
+                }
+                self.content.push(content_block);
+                self.inputs.push(String::new());
+            }
+            Event::ContentBlockDelta { index, delta } => {
+                let (Some(block), Some(input)) =
+                    (self.content.get_mut(index), self.inputs.get_mut(index))
+                else {
+                    return;
+                };
+                match delta {
+                    Delta::Text { text: piece } => {
+                        text.push_str(&piece);
+                        append(block, "text", &piece);
+                    }
+                    Delta::InputJson { partial_json } => input.push_str(&partial_json),
+                    Delta::Thinking { thinking } => append(block, "thinking", &thinking),
+                    Delta::Signature { signature } => append(block, "signature", &signature),
+                    Delta::Other => {}
+                }
+            }
+            Event::ContentBlockStop { index } => {
+                // An input cut off mid-way stays the empty one its block
+                // started with: the reply did not stop for tools, so the
+                // mind runs none of them.
+                let input = self.inputs.get(index).filter(|input| !input.is_empty());
+                let input = input.and_then(|input| serde_json::from_str::<Value>(input).ok());
+                if let (Some(input), Some(Value::Object(block))) =
+                    (input, self.content.get_mut(index))
+                {
+                    block.insert("input".into(), input);
+                }
+            }
+            Event::MessageDelta { delta, usage } => {
+                self.message.extend(delta);
+                match self.message.get_mut("usage") {
+                    Some(Value::Object(counted)) => counted.extend(usage),
+                    _ => {
+                        self.message.insert("usage".into(), Value::Object(usage));
+                    }
+                }
+            }
+            Event::MessageStop => self.ended = true,
+            Event::Error { error } => {
+                self.error = Some(crate::said(&json!({"error": error}).to_string()));
+            }
+            Event::Other => {}
+        }
+    }
+
+    pub(crate) fn finish(mut self) -> Result<String, String> {
+        if let Some(error) = self.error {
+            return Err(error);
+        }
+        if !self.ended {
+            return Err(CUT_OFF.into());
+        }
+        self.message
+            .insert("content".into(), Value::Array(self.content));
+        Ok(Value::Object(self.message).to_string())
+    }
+}
+
+/// Adds `piece` to the end of a block's string `key`.
+fn append(block: &mut Value, key: &str, piece: &str) {
+    match block.get_mut(key) {
+        Some(Value::String(held)) => held.push_str(piece),
+        _ => {
+            if let Value::Object(block) = block {
+                block.insert(key.into(), Value::String(piece.into()));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tests::{body_of, request};
+    use crate::{Credential, Exchange};
+
+    fn config() -> Config {
+        Config::messages(Credential::ApiKey("sk-test".into()), "claude-opus-5-5")
+    }
+
+    fn written(config: &Config, request: &ModelRequest, drop_reasoning: bool) -> Value {
+        serde_json::to_value(body(config, request, drop_reasoning)).unwrap()
+    }
+
+    #[test]
+    fn a_request_is_written_as_the_api_reads_it() {
+        assert_eq!(
+            written(&config(), &request(), false),
+            json!({
+                "model": "claude-opus-5-5",
+                "max_tokens": 16000,
+                "stream": true,
+                "system": "Be brief.",
+                "tools": [{"name": "bash", "description": "Run a command.", "input_schema": {"type": "object"}}],
+                "messages": [
+                    {"role": "user", "content": [{"type": "text", "text": "list the files"}]},
+                    {"role": "assistant", "content": [
+                        {"type": "thinking", "thinking": "", "signature": "s"},
+                        {"type": "tool_use", "id": "tu_1", "name": "bash", "input": {"command": "ls"}},
+                    ]},
+                    {"role": "user", "content": [
+                        {"type": "tool_result", "tool_use_id": "tu_1", "content": "(no output)"},
+                        {"type": "tool_result", "tool_use_id": "tu_2", "content": "no", "is_error": true},
+                    ]},
+                ],
+                "cache_control": {"type": "ephemeral"},
+                "fallbacks": "default",
+            })
+        );
+    }
+
+    #[test]
+    fn options_appear_only_when_they_are_set() {
+        let mut config = config();
+        config.fallbacks = false;
+        config.effort = Some("high".into());
+        let request = ModelRequest {
+            system: None,
+            tools: Vec::new(),
+            text_only: true,
+            ..request()
+        };
+        let body = written(&config, &request, true);
+        assert_eq!(body["output_config"], json!({"effort": "high"}));
+        assert_eq!(
+            body["thinking"]["block_binding"]["prefix_mismatch_behavior"],
+            json!("drop_block")
+        );
+        for absent in ["system", "tools", "fallbacks", "temperature", "tool_choice"] {
+            assert!(body.get(absent).is_none(), "{absent}");
+        }
+    }
+
+    #[test]
+    fn a_reply_keeps_what_the_mind_does_not_read() {
+        let reasoning = json!({"type": "thinking", "thinking": "", "signature": "sig"});
+        let body = json!({
+            "content": [
+                reasoning,
+                {"type": "text", "text": "Looking."},
+                {"type": "tool_use", "id": "tu_1", "name": "bash", "input": {"command": "ls"}},
+            ],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 10, "cache_read_input_tokens": 90, "output_tokens": 7},
+        });
+        let reply = reply(&body.to_string()).unwrap();
+        assert_eq!(
+            reply.content,
+            vec![
+                Block::Other { value: reasoning },
+                Block::Text {
+                    text: "Looking.".into()
+                },
+                Block::ToolUse {
+                    id: "tu_1".into(),
+                    name: "bash".into(),
+                    input: json!({"command": "ls"})
+                },
+            ]
+        );
+        assert_eq!(reply.stop, Stop::ToolUse);
+        assert_eq!(
+            reply.usage,
+            Usage {
+                input: 100,
+                output: 7
+            }
+        );
+    }
+
+    #[test]
+    fn every_stop_reason_has_a_meaning() {
+        let stop = |reason: Value| {
+            reply(&json!({"content": [], "stop_reason": reason}).to_string())
+                .unwrap()
+                .stop
+        };
+        assert_eq!(stop(json!("end_turn")), Stop::EndTurn);
+        assert_eq!(stop(json!("max_tokens")), Stop::MaxTokens);
+        assert_eq!(stop(json!("refusal")), Stop::Refusal);
+        assert_eq!(stop(json!("pause_turn")), Stop::Other);
+        assert_eq!(stop(Value::Null), Stop::Other);
+    }
+
+    #[test]
+    fn a_token_goes_on_authorization_with_its_beta() {
+        let config = Config {
+            fallbacks: false,
+            ..Config::messages(Credential::Token("tok".into()), "claude-opus-5-5")
+        };
+        let request = request();
+        let post = Exchange::new(&config, &request).post();
+        assert_eq!(post.header("authorization"), Some("Bearer tok"));
+        assert_eq!(post.header("anthropic-beta"), Some(OAUTH_BETA));
+        assert_eq!(post.header("x-api-key"), None);
+        assert_eq!(post.header("anthropic-version"), Some(VERSION));
+        assert_eq!(body_of(&post)["model"], json!("claude-opus-5-5"));
+    }
+
+    #[test]
+    fn reasoning_another_api_wrote_is_left_out() {
+        let mut request = request();
+        request.messages[1].content[0] =
+            Content::Other(json!({"type": "reasoning_details", "details": [{"text": "hm"}]}));
+        let body = written(&config(), &request, false);
+        assert_eq!(
+            body["messages"][1]["content"],
+            json!([{"type": "tool_use", "id": "tu_1", "name": "bash", "input": {"command": "ls"}}])
+        );
+    }
+}

@@ -1,0 +1,462 @@
+use std::collections::BTreeMap;
+use std::sync::Mutex;
+
+use mensor_protocol::Name;
+use serde::{Deserialize, Serialize};
+
+use crate::Item;
+
+/// Where a pair's history begins.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "origin", rename_all = "snake_case")]
+pub enum Origin {
+    /// With nothing: a new body said hello.
+    Root,
+    /// With the first `inherited` items of another pair's history, because
+    /// its body is a clone of that pair's.
+    Fork {
+        /// The pair whose history is shared.
+        parent: Name,
+        /// How many of the parent's items are shared.
+        inherited: u64,
+    },
+}
+
+/// A mind and its body, known by the body's name.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pair {
+    /// The body's name.
+    pub name: Name,
+    /// Where the pair's history begins.
+    #[serde(flatten)]
+    pub origin: Origin,
+}
+
+/// Why a store refused.
+#[derive(Debug, thiserror::Error)]
+pub enum StoreError {
+    /// A pair of this name already exists.
+    #[error("a pair named {0} already exists")]
+    Exists(Name),
+    /// No pair has this name.
+    #[error("no pair is named {0}")]
+    Missing(Name),
+    /// A fork asks for more items than its parent has.
+    #[error("{parent} has fewer than the {inherited} items a fork of it would share")]
+    Short {
+        /// The parent named.
+        parent: Name,
+        /// The items asked for.
+        inherited: u64,
+    },
+    /// The storage behind the store failed.
+    #[error("the store failed: {0}")]
+    Backend(String),
+}
+
+/// Where histories are kept.
+///
+/// A history only grows, and a fork shares its parent's items without copying
+/// them, so a store never changes or removes an item another pair may read.
+/// An append is durable when it returns: a mind's host relies on that before
+/// it sends anything the appended items describe.
+///
+/// A store holds every item, and a mind only the end of its history, so a
+/// store also answers what a mind no longer can.
+pub trait Store: Send + Sync {
+    /// Starts a pair's history.
+    fn create(&self, pair: &Pair) -> Result<(), StoreError>;
+
+    /// Adds items to the end of a pair's history.
+    fn append(&self, name: &Name, items: &[Item]) -> Result<(), StoreError>;
+
+    /// A pair's history from index `from`, shared items included, `limit`
+    /// items of it at the most.
+    fn read(&self, name: &Name, from: u64, limit: usize) -> Result<Vec<Item>, StoreError>;
+
+    /// The last item of one [kind](Item::kind) in a pair's history.
+    fn last(&self, name: &Name, kind: &str) -> Result<Option<Item>, StoreError>;
+
+    /// The end of a pair's history, which is what its mind is loaded with:
+    /// the index its last summary names and the items from there, or all
+    /// of it from 0 when it holds no summary.
+    fn tail(&self, name: &Name) -> Result<(u64, Vec<Item>), StoreError> {
+        let from = match self.last(name, "summary")? {
+            Some(Item::Summary { from, .. }) => from,
+            _ => 0,
+        };
+        Ok((from, self.read(name, from, usize::MAX)?))
+    }
+
+    /// The latest of a pair's history, which is what [`Mind::status`] is
+    /// told from: the index its last step had seen and the items from
+    /// there, or all of it from 0 when it holds no step. That is the round
+    /// in progress and the prompts no step has answered, however much the
+    /// pair's mind would hold.
+    ///
+    /// [`Mind::status`]: crate::Mind::status
+    fn recent(&self, name: &Name) -> Result<(u64, Vec<Item>), StoreError> {
+        let from = match self.last(name, "step")? {
+            Some(Item::Step { seen, .. }) => seen,
+            _ => 0,
+        };
+        Ok((from, self.read(name, from, usize::MAX)?))
+    }
+
+    /// The text of the prompt a pair's history holds under `key`.
+    fn prompt(&self, name: &Name, key: &str) -> Result<Option<String>, StoreError>;
+
+    /// Every pair, parents before their forks.
+    fn pairs(&self) -> Result<Vec<Pair>, StoreError>;
+}
+
+/// The index a mind starts from in the history `items`: the one its last
+/// summary names, or 0.
+pub fn tail_from(items: &[Item]) -> u64 {
+    let from = items.iter().rev().find_map(|item| match item {
+        Item::Summary { from, .. } => Some(*from),
+        _ => None,
+    });
+    from.unwrap_or(0)
+}
+
+/// The text of the prompt `items` hold under `key`.
+pub fn prompt_under<'a>(items: &'a [Item], key: &str) -> Option<&'a str> {
+    items.iter().find_map(|item| match item {
+        Item::Prompt {
+            key: Some(held),
+            text,
+        } if held == key => Some(text.as_str()),
+        _ => None,
+    })
+}
+
+/// A store that keeps everything in memory, for tests and for hosts that
+/// need nothing to survive them.
+#[derive(Debug, Default)]
+pub struct MemoryStore {
+    pairs: Mutex<Pairs>,
+}
+
+#[derive(Debug, Default)]
+struct Pairs {
+    by_name: BTreeMap<Name, Entry>,
+    order: Vec<Name>,
+}
+
+#[derive(Debug)]
+struct Entry {
+    origin: Origin,
+    own: Vec<Item>,
+}
+
+impl MemoryStore {
+    /// An empty store.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Pairs> {
+        self.pairs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+impl Pairs {
+    /// The first `limit` items of a pair's history.
+    fn history(&self, name: &Name, limit: u64) -> Result<Vec<Item>, StoreError> {
+        let entry = self
+            .by_name
+            .get(name)
+            .ok_or_else(|| StoreError::Missing(name.clone()))?;
+        let (mut items, base) = match &entry.origin {
+            Origin::Root => (Vec::new(), 0),
+            Origin::Fork { parent, inherited } => {
+                (self.history(parent, limit.min(*inherited))?, *inherited)
+            }
+        };
+        let own = usize::try_from(limit.saturating_sub(base)).unwrap_or(usize::MAX);
+        items.extend(entry.own.iter().take(own).cloned());
+        Ok(items)
+    }
+}
+
+impl Store for MemoryStore {
+    fn create(&self, pair: &Pair) -> Result<(), StoreError> {
+        let mut pairs = self.lock();
+        if pairs.by_name.contains_key(&pair.name) {
+            return Err(StoreError::Exists(pair.name.clone()));
+        }
+        if let Origin::Fork { parent, inherited } = &pair.origin {
+            let have = pairs.history(parent, u64::MAX)?.len();
+            if u64::try_from(have).unwrap_or(u64::MAX) < *inherited {
+                return Err(StoreError::Short {
+                    parent: parent.clone(),
+                    inherited: *inherited,
+                });
+            }
+        }
+        pairs.by_name.insert(
+            pair.name.clone(),
+            Entry {
+                origin: pair.origin.clone(),
+                own: Vec::new(),
+            },
+        );
+        pairs.order.push(pair.name.clone());
+        Ok(())
+    }
+
+    fn append(&self, name: &Name, items: &[Item]) -> Result<(), StoreError> {
+        let mut pairs = self.lock();
+        let entry = pairs
+            .by_name
+            .get_mut(name)
+            .ok_or_else(|| StoreError::Missing(name.clone()))?;
+        entry.own.extend_from_slice(items);
+        Ok(())
+    }
+
+    fn read(&self, name: &Name, from: u64, limit: usize) -> Result<Vec<Item>, StoreError> {
+        let mut items = self.lock().history(name, u64::MAX)?;
+        let from = usize::try_from(from).unwrap_or(usize::MAX).min(items.len());
+        let mut items = items.split_off(from);
+        items.truncate(limit);
+        Ok(items)
+    }
+
+    fn last(&self, name: &Name, kind: &str) -> Result<Option<Item>, StoreError> {
+        let items = self.lock().history(name, u64::MAX)?;
+        Ok(items.into_iter().rev().find(|item| item.kind() == kind))
+    }
+
+    fn prompt(&self, name: &Name, key: &str) -> Result<Option<String>, StoreError> {
+        let items = self.lock().history(name, u64::MAX)?;
+        Ok(prompt_under(&items, key).map(str::to_owned))
+    }
+
+    fn pairs(&self) -> Result<Vec<Pair>, StoreError> {
+        let pairs = self.lock();
+        Ok(pairs
+            .order
+            .iter()
+            .map(|name| Pair {
+                name: name.clone(),
+                origin: pairs.by_name[name].origin.clone(),
+            })
+            .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn name(s: &str) -> Name {
+        Name::new(s).unwrap()
+    }
+
+    fn prompt(text: &str) -> Item {
+        Item::Prompt {
+            key: None,
+            text: text.into(),
+        }
+    }
+
+    fn texts(items: &[Item]) -> Vec<&str> {
+        items
+            .iter()
+            .map(|item| match item {
+                Item::Prompt { text, .. } => text.as_str(),
+                _ => panic!("not a prompt"),
+            })
+            .collect()
+    }
+
+    fn root(store: &MemoryStore, pair: &str, items: &[&str]) {
+        store
+            .create(&Pair {
+                name: name(pair),
+                origin: Origin::Root,
+            })
+            .unwrap();
+        let items: Vec<_> = items.iter().map(|text| prompt(text)).collect();
+        store.append(&name(pair), &items).unwrap();
+    }
+
+    fn fork(store: &MemoryStore, pair: &str, parent: &str, inherited: u64) {
+        let origin = Origin::Fork {
+            parent: name(parent),
+            inherited,
+        };
+        store
+            .create(&Pair {
+                name: name(pair),
+                origin,
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn a_history_reads_back_from_any_index() {
+        let store = MemoryStore::new();
+        root(&store, "a1", &["0", "1", "2"]);
+        assert_eq!(
+            texts(&store.read(&name("a1"), 0, usize::MAX).unwrap()),
+            ["0", "1", "2"]
+        );
+        assert_eq!(
+            texts(&store.read(&name("a1"), 2, usize::MAX).unwrap()),
+            ["2"]
+        );
+        assert!(store.read(&name("a1"), 9, usize::MAX).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_history_is_read_a_page_at_a_time_and_from_its_last_summary() {
+        let store = MemoryStore::new();
+        root(&store, "a1", &["0", "1", "2"]);
+        assert_eq!(texts(&store.read(&name("a1"), 1, 1).unwrap()), ["1"]);
+        assert_eq!(store.tail(&name("a1")).unwrap().0, 0);
+
+        let keyed = Item::Prompt {
+            key: Some("k".into()),
+            text: "3".into(),
+        };
+        let summary = Item::Summary {
+            text: "So far.".into(),
+            usage: crate::Usage::default(),
+            from: 2,
+            boot: None,
+            last_call: 0,
+        };
+        store.append(&name("a1"), &[keyed, summary]).unwrap();
+        fork(&store, "b7", "a1", 5);
+        store.append(&name("b7"), &[prompt("5")]).unwrap();
+
+        // A fork's history may start in its parent's.
+        let (from, items) = store.tail(&name("b7")).unwrap();
+        assert_eq!((from, items.len()), (2, 4));
+        // With no step in it, the latest of a history is all of it.
+        assert_eq!(store.recent(&name("b7")).unwrap().0, 0);
+        assert_eq!(
+            store.prompt(&name("b7"), "k").unwrap().as_deref(),
+            Some("3")
+        );
+        assert_eq!(store.prompt(&name("b7"), "other").unwrap(), None);
+    }
+
+    #[test]
+    fn a_fork_shares_its_parents_first_items_and_no_more() {
+        let store = MemoryStore::new();
+        root(&store, "a1", &["0", "1", "2"]);
+        fork(&store, "b7", "a1", 2);
+        store.append(&name("b7"), &[prompt("b")]).unwrap();
+        store.append(&name("a1"), &[prompt("3")]).unwrap();
+
+        assert_eq!(
+            texts(&store.read(&name("b7"), 0, usize::MAX).unwrap()),
+            ["0", "1", "b"]
+        );
+        assert_eq!(
+            texts(&store.read(&name("b7"), 2, usize::MAX).unwrap()),
+            ["b"]
+        );
+        assert_eq!(
+            texts(&store.read(&name("a1"), 0, usize::MAX).unwrap()),
+            ["0", "1", "2", "3"]
+        );
+    }
+
+    #[test]
+    fn a_fork_of_a_fork_reads_through_both() {
+        let store = MemoryStore::new();
+        root(&store, "a1", &["0", "1", "2"]);
+        fork(&store, "b7", "a1", 2);
+        store
+            .append(&name("b7"), &[prompt("b2"), prompt("b3")])
+            .unwrap();
+        fork(&store, "c9", "b7", 3);
+        store.append(&name("c9"), &[prompt("c3")]).unwrap();
+        fork(&store, "d4", "b7", 1);
+
+        assert_eq!(
+            texts(&store.read(&name("c9"), 0, usize::MAX).unwrap()),
+            ["0", "1", "b2", "c3"]
+        );
+        assert_eq!(
+            texts(&store.read(&name("d4"), 0, usize::MAX).unwrap()),
+            ["0"]
+        );
+    }
+
+    #[test]
+    fn pairs_are_listed_in_the_order_they_were_made() {
+        let store = MemoryStore::new();
+        root(&store, "z9", &[]);
+        fork(&store, "a1", "z9", 0);
+        let names: Vec<_> = store
+            .pairs()
+            .unwrap()
+            .into_iter()
+            .map(|pair| pair.name)
+            .collect();
+        assert_eq!(names, [name("z9"), name("a1")]);
+    }
+
+    #[test]
+    fn a_store_refuses_what_it_cannot_do() {
+        let store = MemoryStore::new();
+        root(&store, "a1", &["0"]);
+        let again = store.create(&Pair {
+            name: name("a1"),
+            origin: Origin::Root,
+        });
+        assert!(matches!(again, Err(StoreError::Exists(_))));
+        assert!(matches!(
+            store.append(&name("x"), &[]),
+            Err(StoreError::Missing(_))
+        ));
+        assert!(matches!(
+            store.read(&name("x"), 0, usize::MAX),
+            Err(StoreError::Missing(_))
+        ));
+
+        let orphan = Origin::Fork {
+            parent: name("x"),
+            inherited: 0,
+        };
+        let orphan = store.create(&Pair {
+            name: name("b7"),
+            origin: orphan,
+        });
+        assert!(matches!(orphan, Err(StoreError::Missing(_))));
+        let long = Origin::Fork {
+            parent: name("a1"),
+            inherited: 2,
+        };
+        let long = store.create(&Pair {
+            name: name("b7"),
+            origin: long,
+        });
+        assert!(matches!(long, Err(StoreError::Short { .. })));
+    }
+
+    #[test]
+    fn a_pair_is_written_flat() {
+        let pair = Pair {
+            name: name("b7"),
+            origin: Origin::Fork {
+                parent: name("a1"),
+                inherited: 4,
+            },
+        };
+        let written = serde_json::to_value(&pair).unwrap();
+        assert_eq!(
+            written,
+            serde_json::json!({"name": "b7", "origin": "fork", "parent": "a1", "inherited": 4})
+        );
+        assert_eq!(serde_json::from_value::<Pair>(written).unwrap(), pair);
+    }
+}

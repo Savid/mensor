@@ -1,0 +1,21 @@
+[package]
+name = "mensor-store-sqlite"
+description = "A mind's histories in one SQLite file"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+mensor-protocol.workspace = true
+mensor-mind.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

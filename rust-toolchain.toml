@@ -1,0 +1,7 @@
+# The compiler that builds, lints and tests every crate.
+[toolchain]
+channel = "1.97.1"
+profile = "minimal"
+components = ["clippy", "rustfmt"]
+# The Cloudflare worker is built for this one.
+targets = ["wasm32-unknown-unknown"]
