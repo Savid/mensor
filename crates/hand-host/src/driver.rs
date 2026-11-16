@@ -409,9 +409,8 @@ impl Driver {
 }
 
 impl Drop for Driver {
-    /// A hand that ends, released or refused, stops what it runs. In a
-    /// process of its own that ends with it anyway; in its host's process
-    /// it would not.
+    /// A hand that ends, released or refused, stops the calls it runs: the
+    /// process it shares with other hands goes on.
     fn drop(&mut self) {
         for (_, task) in self.tasks.drain() {
             task.abort();

@@ -79,15 +79,16 @@ It is the API of `mensor serve`, for one mind at a time.
 | `GET /v1/minds/{name}/history?after=` | The items from a cursor, 512 at the most, and the next cursor. |
 | `GET /v1/minds/{name}/events?after=` | The same as server-sent events, each new item as it is stored. Between them come `writing` events: the reply the model is writing, piece by piece. |
 
-Four things differ from the server. There is no `/v1/attach`: the hand is
-already there, so `hands` is always `["local"]`, and `waiting` and
-`watching` are empty. There
-is no `/release`: the one hand is never let go. There is no `GET
-/v1/minds`: each object knows only itself. And a mind is born by its first
-prompt, not by a hand attaching.
+It differs from the server in four ways:
 
-The hand has no `clone` capability, so its mind is offered no tools of its
-own, forks nothing, and has no parent or children to talk to.
+- No `/v1/attach`: the hand is already there, so `hands` is always
+  `["local"]`, and `waiting` and `watching` are empty.
+- No `/release`: the one hand is never let go.
+- No `GET /v1/minds`: each object knows only itself.
+- A mind starts with its first prompt, not with a hand attaching.
+
+The hand cannot clone, so the mind has none of its own tools: it neither
+forks nor has kin to talk to.
 
 ## What the hand can do
 
@@ -150,12 +151,10 @@ checks what the restarted object does with nobody prompting it.
 - An object that is awake holds the end of its history: the items from
   its last summary, or all of it until there is one. The rest is read from
   its database when it is asked for.
-- Not built: clones and forks, a remote hand attaching to an object's mind,
-  listing minds, and deleting one.
-- It has run on workerd under `wrangler dev` and on Cloudflare's network,
-  with a model behind Chat Completions. A deploy there did not stop an
-  object in the middle of a model request: the reply ended under the old
-  version, so the recovery alarm has been tested only on workerd.
+- Not built: forks, a remote hand attaching to an object's mind, listing
+  minds, and deleting one.
+- The recovery alarm is tested on workerd only: a deploy on Cloudflare's
+  network has not stopped an object mid-request.
 
 ## Tests
 
