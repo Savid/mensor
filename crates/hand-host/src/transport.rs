@@ -64,13 +64,16 @@ pub enum Incoming {
 pub struct Gone;
 
 /// Why a dial did not connect.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum DialError {
     /// Dialling again may work.
+    #[error("{0}")]
     Retry(String),
     /// The host turned the hand away.
+    #[error("the host refused: {}", .0.reason())]
     Refused(Refusal),
     /// Dialling again cannot work.
+    #[error(transparent)]
     Fail(Error),
 }
 

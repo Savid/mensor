@@ -1,14 +1,15 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 420" width="880" height="420" role="img" aria-label="A hand says hello with the last id it read. The mind stores each call before sending it. Call 42 ends first and is acked. The connection drops while call 41 runs; 41 ends and the hand holds its result. The next hello carries it, and the mind stores it and acks.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 420" width="880" height="420" role="img" aria-label="A hand says hello with the last id it read. The mind stores each call before it sends it, and one call at a time to a hand: call 41 runs, its result is stored and acked, then call 42 is sent. The connection drops while 42 runs; 42 ends and the hand holds its result. The next hello carries it, and the mind stores it and acks.">
   <title>A connection, dropped and joined again</title>
   <style>
     svg {
       --bg: #f8f8fb; --frame: #e3e3ec; --panel: #f0f0f6; --surface: #ffffff;
       --ink: #1c1d2b; --muted: #5c5f73; --faint: #8e91a5; --line: #d0d2dd; --wire: #4a4d63;
       --mind: #6246d0; --mind-soft: #f0ecff; --mind-edge: #c6baf5;
-      --hand: #bd4f0b; --hand-soft: #fff0e4; --hand-edge: #f1c29e;
+      --hand: #ad4608; --hand-soft: #fff0e4; --hand-edge: #f1c29e;
       --model: #08776b; --model-soft: #e3f4f0; --model-edge: #9fd6cb;
       --ok: #1d7a39; --ok-soft: #e6f4ea; --ok-edge: #a7d8b4;
       --warn: #b3261e; --warn-soft: #fdeceb; --warn-edge: #f2b8b4;
+      --shadow: rgba(28, 26, 58, 0.08);
     }
     @media (prefers-color-scheme: dark) {
       svg {
@@ -19,6 +20,7 @@
         --model: #4fd3bc; --model-soft: #0f2824; --model-edge: #22635a;
         --ok: #5fd07c; --ok-soft: #10261a; --ok-edge: #245c35;
         --warn: #ff8a80; --warn-soft: #2f1416; --warn-edge: #7a2a2a;
+        --shadow: rgba(0, 0, 0, 0.4);
       }
     }
     text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif; font-size: 13px; fill: var(--ink); }
@@ -27,7 +29,7 @@
     .sub { font-size: 12px; fill: var(--muted); }
     .lbl { font-size: 11.5px; fill: var(--muted); }
     .note { font-size: 11.5px; fill: var(--muted); font-style: italic; }
-    .eyebrow { font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em; fill: var(--faint); }
+    .eyebrow { font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em; fill: var(--muted); }
     .b { font-weight: 600; }
     .mind { fill: var(--mind); } .hand { fill: var(--hand); } .model { fill: var(--model); }
     .ok { fill: var(--ok); } .warn { fill: var(--warn); } .muted { fill: var(--muted); } .faint { fill: var(--faint); }
@@ -54,16 +56,17 @@
     .track { fill: none; stroke: var(--mind); stroke-width: 2.5; stroke-linecap: round; }
     .lane { fill: none; stroke: var(--hand); stroke-width: 1.5; stroke-linecap: round; }
     .life { fill: none; stroke: var(--line); stroke-width: 1.25; stroke-dasharray: 3 4; }
-    .tick.p { fill: var(--faint); } .tick.s { fill: var(--mind); } .tick.o { fill: var(--hand); }
+    .tick.p { fill: var(--muted); } .tick.s { fill: var(--mind); } .tick.o { fill: var(--hand); }
     .bar.k-mind { fill: var(--mind-soft); stroke: var(--mind); } .bar.k-hand { fill: var(--hand-soft); stroke: var(--hand); }
     .gem.k-mind { fill: var(--mind); } .gem.k-hand { fill: var(--hand); } .gem.k-warn { fill: var(--warn); }
     .gem.k-bg { fill: var(--bg); }
+    .shadow { flood-color: var(--shadow); }
     .tip { fill: var(--wire); } .tip.k-mind { fill: var(--mind); } .tip.k-hand { fill: var(--hand); }
     .tip.k-model { fill: var(--model); } .tip.k-faint { fill: var(--faint); } .tip.k-warn { fill: var(--warn); }
   </style>
   <defs>
     <filter id="lift" x="-10%" y="-20%" width="120%" height="150%">
-      <feDropShadow dx="0" dy="1.5" stdDeviation="2" flood-color="#1c1a3a" flood-opacity="0.08"/>
+      <feDropShadow class="shadow" dx="0" dy="1.5" stdDeviation="2"/>
     </filter>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="tip" d="M0,1 L9,5 L0,9 L2.6,5 Z"/></marker>
     <marker id="a-mind" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="tip k-mind" d="M0,1 L9,5 L0,9 L2.6,5 Z"/></marker>
@@ -96,35 +99,36 @@
   <path class="life" d="M648,76 L648,396"/>
 
   <!-- Messages, top to bottom -->
+  <rect class="bar k-hand" x="227" y="148" width="10" height="36" rx="3"/>
+  <rect class="bar k-hand" x="227" y="256" width="10" height="56" rx="3"/>
   <path class="wire k-hand" d="M240,112 L640,112" marker-end="url(#a-hand)"/>
   <text x="440.0" y="105" class="mono lbl" text-anchor="middle">hello  lastId 40</text>
   <path class="wire k-mind" d="M640,148 L240,148" marker-end="url(#a-mind)"/>
-  <text x="440.0" y="141" class="mono lbl" text-anchor="middle">call 41  bash “cargo test”</text>
-  <path class="wire k-mind" d="M640,184 L240,184" marker-end="url(#a-mind)"/>
-  <text x="440.0" y="177" class="mono lbl" text-anchor="middle">call 42  write notes.md</text>
-  <path class="wire k-hand" d="M240,220 L640,220" marker-end="url(#a-hand)"/>
-  <text x="440.0" y="213" class="mono lbl" text-anchor="middle">result 42</text>
+  <text x="440.0" y="141" class="mono lbl" text-anchor="middle">call 41  write notes.md</text>
+  <path class="wire k-hand" d="M240,184 L640,184" marker-end="url(#a-hand)"/>
+  <text x="440.0" y="177" class="mono lbl" text-anchor="middle">result 41</text>
+  <path class="wire k-mind" d="M640,220 L240,220" marker-end="url(#a-mind)"/>
+  <text x="440.0" y="213" class="mono lbl" text-anchor="middle">ack [41]</text>
   <path class="wire k-mind" d="M640,256 L240,256" marker-end="url(#a-mind)"/>
-  <text x="440.0" y="249" class="mono lbl" text-anchor="middle">ack [42]</text>
-  <rect class="bar k-hand" x="227" y="148" width="10" height="164" rx="3"/>
-  <rect class="bar k-hand" x="233" y="184" width="10" height="36" rx="3"/>
+  <text x="440.0" y="249" class="mono lbl" text-anchor="middle">call 42  bash “cargo test”</text>
   <path class="wire k-warn dash" d="M272,292 L608,292"/>
   <rect class="soft k-warn" x="370" y="280" width="140" height="24" rx="12"/>
   <use href="#i-cut" class="ic k-warn" x="380.5" y="286.5" width="11" height="11"/>
   <text x="446" y="296" class="lbl warn" text-anchor="middle">connection drops</text>
   <path class="wire k-hand" d="M240,340 L640,340" marker-end="url(#a-hand)"/>
-  <text x="440.0" y="333" class="mono lbl" text-anchor="middle">hello  lastId 42  held [41]</text>
+  <text x="440.0" y="333" class="mono lbl" text-anchor="middle">hello  lastId 42  held [42]</text>
   <path class="wire k-mind" d="M640,376 L240,376" marker-end="url(#a-mind)"/>
-  <text x="440.0" y="369" class="mono lbl" text-anchor="middle">ack [41]</text>
+  <text x="440.0" y="369" class="mono lbl" text-anchor="middle">ack [42]</text>
 
   <!-- What each end does -->
   <text x="214" y="152" class="note" text-anchor="end">starts 41: above lastId</text>
-  <text x="214" y="188" class="note" text-anchor="end">starts 42 beside it</text>
-  <text x="214" y="296" class="note" text-anchor="end">41 keeps running</text>
-  <text x="214" y="316" class="note" text-anchor="end">41 ends: holds its result</text>
-  <text x="214" y="380" class="note" text-anchor="end">forgets 41</text>
+  <text x="214" y="224" class="note" text-anchor="end">forgets 41</text>
+  <text x="214" y="260" class="note" text-anchor="end">starts 42</text>
+  <text x="214" y="296" class="note" text-anchor="end">42 keeps running</text>
+  <text x="214" y="316" class="note" text-anchor="end">42 ends: holds its result</text>
+  <text x="214" y="380" class="note" text-anchor="end">forgets 42</text>
   <text x="666" y="152" class="note">stored, then sent</text>
-  <text x="666" y="188" class="note">stored, then sent</text>
-  <text x="666" y="224" class="note">stores it, then acks</text>
-  <text x="666" y="344" class="note">stores 41's result</text>
+  <text x="666" y="188" class="note">stores it, then acks</text>
+  <text x="666" y="260" class="note">one call at a time to a hand</text>
+  <text x="666" y="344" class="note">stores 42's result</text>
 </svg>

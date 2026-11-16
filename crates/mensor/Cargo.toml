@@ -1,5 +1,6 @@
 [package]
 name = "mensor"
+default-run = "mensor"
 description = "Run a mind's host, a hand that dials one, or both in one process"
 version.workspace = true
 edition.workspace = true

@@ -28,8 +28,8 @@ mind its history, the hand the ids it has read and the results it holds.
 **`hello`**, first on every connection:
 
 ```json
-{"type":"hello","mind":"m","hand":"a1","boot":"9f3c2a…","lastId":41,
- "running":[41],"held":[{"id":40,"output":"…"}],"capabilities":[…]}
+{"type":"hello","mind":"m","hand":"a1","boot":"9f3c2a…","lastId":42,
+ "running":[],"held":[{"id":42,"output":"…"}],"capabilities":[…]}
 ```
 
 | Field | Meaning |
@@ -40,9 +40,9 @@ mind its history, the hand the ids it has read and the results it holds.
 | `lastId` | The highest call id the hand has read, or 0. |
 | `running` | The calls still running. |
 | `held` | The results not yet acked, oldest first. |
-| `capabilities` | What the hand can do: each a `name` and its `operations`, each of those a `name`, a `description` and the JSON Schema of its `input`. |
+| `capabilities` | What the hand can do: each a `name` and its `operations`, each of those a `name`, a `description` and the JSON Schema of its `input`. No `input` may have a `hand` property: the mind adds its own. |
 
-A name is 1 to 64 letters, digits, `-`, `_` or `.`, starting with a letter
+A name is 1 to 64 ASCII letters, digits, `-`, `_` or `.`, starting with a letter
 or digit.
 
 **`result`**, a call finished. It carries `output`, any JSON the operation
@@ -54,8 +54,9 @@ returned, or `error`, a string:
 ```
 
 **`refused`** `{"type":"refused","id":41,"reason":"…"}`: a call whose id is
-not above `lastId`. It did not start. The host drops the connection, and the
-next hello settles the call.
+not above `lastId`. It did not start. The mind never sends such a call, so
+the host takes a `refused` as a broken protocol: it closes the connection
+with 4000, and the hand ends.
 
 ## Mind to hand
 
@@ -73,7 +74,7 @@ hand may forget them.
 
 ## Delivery
 
-![A hand says hello with the last id it read. Calls are stored before they are sent, and results acked once stored. The connection drops while call 41 runs; the next hello carries its held result.](images/protocol.svg)
+![A hand says hello with the last id it read. The mind stores each call before it sends it, one call at a time to a hand, and acks each result once stored. The connection drops while call 42 runs; the next hello carries its held result.](images/protocol.svg)
 
 - **At most once.** The mind stores a call before it sends it, under ids
   that only grow. One mind numbers the calls of all its hands, so each hand
@@ -94,7 +95,7 @@ hand may forget them.
 
 `pending` is every call the mind sent this hand that has no outcome yet.
 
-![A hello with lastId 41, running 41 and held 40: call 39 is unknown, the mind takes 40's result, waits for 41, and sends 42 again.](images/settle.svg)
+![How a hello settles the pending call 42: a new boot, or a call at or below lastId in neither list, makes it unknown; a held result is taken; a running call is waited for; a call above lastId is sent again.](images/settle.svg)
 
 1. **The boot changed** from the one the mind last stored for this hand: the
    hand restarted and remembers none of the pending calls. Each may have
@@ -110,6 +111,12 @@ hand may forget them.
 
 3. Once what it took is stored, the mind acks every id in `held`.
 
+If the turn was interrupted while the hand was away, a call in `running` is
+cancelled, and one above `lastId` is recorded as not run.
+
+mensor's mind sends a hand one call at a time, so `pending` holds one call at
+most. The protocol allows more.
+
 An unknown outcome reaches the model as an error that says the call may have
 run, and to check the current state before running it again.
 
@@ -124,7 +131,7 @@ A host decides what a hello means from its `mind`:
 | The mind is… | The host |
 | --- | --- |
 | one it knows | gives it the hand: a hand it knows is reconnecting, a new one joins |
-| new, with no `.` in its name | starts it, with an empty history |
+| new, with no `.` in its name and at most 55 bytes | starts it, with an empty history |
 | new, with a `.` in its name | refuses for now: it is a fork's child, not made yet |
 
 A mind refuses a hand it has released, and a new one once it has all the
@@ -135,7 +142,7 @@ hands to clone itself with a `call` to the hand's `clone` capability:
 
 ```json
 {"type":"call","id":43,"capability":"clone","operation":"clone",
- "input":{"into":[{"mind":"m.k3x9q2ab","hand":"a1"},{"mind":"m.p8d1rx0q","hand":"a1"}]}}
+ "input":{"into":[{"mind":"m.d3342iuj","hand":"a1"},{"mind":"m.ckj6ldqi","hand":"a1"}]}}
 ```
 
 The hand copies itself once for each target and starts a hand on each copy,
@@ -157,7 +164,7 @@ A hand dials again only after one that is not final.
 
 | Code | Meaning | Final |
 | --- | --- | --- |
-| 4000 | The hand sent something the protocol does not define | yes |
+| 4000 | The hand broke the protocol: no hello within 10 s, a second hello, a `refused`, an `input` with a `hand` property, or a message the protocol does not define | yes |
 | 4001 | The mind has all the hands it may | yes |
 | 4002 | The mind is a fork's child that is not made yet | no: the hand dials again, and gives up after 2 minutes |
 | 4003 | A newer connection has this mind and hand | yes |

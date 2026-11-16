@@ -21,7 +21,7 @@ repository's root for worker-build.
 cd crates/cloudflare
 env -i PATH="$PATH" HOME="$HOME" CLOUDFLARE_INCLUDE_PROCESS_ENV=true \
   ANTHROPIC_API_KEY="$(cat path/to/anthropic.key)" \
-  npx wrangler dev
+  npx wrangler@4.160.1 dev
 ```
 
 `CLOUDFLARE_INCLUDE_PROCESS_ENV` hands the worker every variable of the shell
@@ -30,17 +30,17 @@ that starts it, which is why the command starts from an empty one. With no
 
 ```bash
 api=127.0.0.1:8787/v1/minds
-curl -s -X POST $api/a1/prompt -H 'content-type: application/json' \
+curl -s -X POST $api/m/prompt -H 'content-type: application/json' \
   -d '{"key":"1","text":"Fetch example.com and save its title to title.txt."}'
-curl -sN $api/a1/events
+curl -sN $api/m/events
 ```
 
 To deploy, set the secrets and publish:
 
 ```bash
-npx wrangler secret put ANTHROPIC_API_KEY
-npx wrangler secret put MENSOR_TOKEN
-npx wrangler deploy
+npx wrangler@4.160.1 secret put ANTHROPIC_API_KEY
+npx wrangler@4.160.1 secret put MENSOR_TOKEN
+npx wrangler@4.160.1 deploy
 ```
 
 | Variable | Meaning |
@@ -107,13 +107,15 @@ model or the page it had asked for, and the mind is idle when the request
 that interrupted it is answered. An answer that arrives later is dropped.
 
 **One wake has a budget.** After 32 pieces of work, or eight minutes, a wake
-sets the alarm for now and ends, so that none outgrows what the platform
-allows one alarm.
+sets the alarm for now and ends. A model request that times out is tried up
+to four more times, so a wake can still reach the platform's fifteen
+minutes: it is then stopped, and carries on as the next section says.
 
 **Writes with no wait between them are one commit.** The platform stores
 together every write made between two awaits. A `files` call never waits,
 so the model's reply, the call it asked for, the file it changed and the
-call's outcome are stored as one, or not at all.
+call's outcome are stored as one, or not at all, unless a wake ends between
+the reply and the call.
 
 ## What a stop does
 
@@ -125,7 +127,7 @@ and opens what it stored.
 | It stopped while… | When it wakes |
 | --- | --- |
 | the model was being asked | The model is asked again. Nothing of the lost request was stored. |
-| a `files` call ran | This cannot be seen: the call and its outcome are one commit. Either both are stored, or the model is asked again. |
+| a `files` call ran | Usually the call and its outcome are one commit: either both are stored, or the model is asked again. If a wake ended between a reply and its call, and the object stopped before the next, the call is unknown, as for `fetch`. |
 | a `fetch` call ran | The call may have run, so it is not made again. Its outcome is recorded as an error that says it is unknown, and the model decides what to do. |
 | nothing was happening | Nothing is stored, and no model is asked. It is the same hand, with the same `boot`. |
 
@@ -134,7 +136,7 @@ checks what the restarted object does with nobody prompting it.
 
 ## Limits
 
-- One row holds at most 8 MB, the platform's limit, so one item of history
+- One row holds at most 2 MB, the platform's limit, so one item of history
   and one file are each smaller than that.
 - An alarm runs for at most fifteen minutes. One request to the model is
   given four.

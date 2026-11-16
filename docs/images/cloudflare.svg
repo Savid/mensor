@@ -1,14 +1,15 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 392" width="880" height="392" role="img" aria-label="A client&#x27;s request reaches a Worker, which finds the Durable Object named after the mind. Inside, the mind passes calls to its hand, local, in memory. The mind&#x27;s history, the hand&#x27;s memory and its files are tables in the object&#x27;s SQLite. The mind calls the model from there. An alarm is the object&#x27;s only worker.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 472" width="880" height="472" role="img" aria-label="A client&#x27;s request reaches a Worker, which finds the Durable Object named after the mind. Inside, the mind m passes calls to its hand, local, in memory. The history, what the hand remembers and its files are tables in the object&#x27;s SQLite. The mind asks the model from there. An alarm is the object&#x27;s only worker.">
   <title>A mind as one Durable Object</title>
   <style>
     svg {
       --bg: #f8f8fb; --frame: #e3e3ec; --panel: #f0f0f6; --surface: #ffffff;
       --ink: #1c1d2b; --muted: #5c5f73; --faint: #8e91a5; --line: #d0d2dd; --wire: #4a4d63;
       --mind: #6246d0; --mind-soft: #f0ecff; --mind-edge: #c6baf5;
-      --hand: #bd4f0b; --hand-soft: #fff0e4; --hand-edge: #f1c29e;
+      --hand: #ad4608; --hand-soft: #fff0e4; --hand-edge: #f1c29e;
       --model: #08776b; --model-soft: #e3f4f0; --model-edge: #9fd6cb;
       --ok: #1d7a39; --ok-soft: #e6f4ea; --ok-edge: #a7d8b4;
       --warn: #b3261e; --warn-soft: #fdeceb; --warn-edge: #f2b8b4;
+      --shadow: rgba(28, 26, 58, 0.08);
     }
     @media (prefers-color-scheme: dark) {
       svg {
@@ -19,6 +20,7 @@
         --model: #4fd3bc; --model-soft: #0f2824; --model-edge: #22635a;
         --ok: #5fd07c; --ok-soft: #10261a; --ok-edge: #245c35;
         --warn: #ff8a80; --warn-soft: #2f1416; --warn-edge: #7a2a2a;
+        --shadow: rgba(0, 0, 0, 0.4);
       }
     }
     text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif; font-size: 13px; fill: var(--ink); }
@@ -27,7 +29,7 @@
     .sub { font-size: 12px; fill: var(--muted); }
     .lbl { font-size: 11.5px; fill: var(--muted); }
     .note { font-size: 11.5px; fill: var(--muted); font-style: italic; }
-    .eyebrow { font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em; fill: var(--faint); }
+    .eyebrow { font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em; fill: var(--muted); }
     .b { font-weight: 600; }
     .mind { fill: var(--mind); } .hand { fill: var(--hand); } .model { fill: var(--model); }
     .ok { fill: var(--ok); } .warn { fill: var(--warn); } .muted { fill: var(--muted); } .faint { fill: var(--faint); }
@@ -54,16 +56,17 @@
     .track { fill: none; stroke: var(--mind); stroke-width: 2.5; stroke-linecap: round; }
     .lane { fill: none; stroke: var(--hand); stroke-width: 1.5; stroke-linecap: round; }
     .life { fill: none; stroke: var(--line); stroke-width: 1.25; stroke-dasharray: 3 4; }
-    .tick.p { fill: var(--faint); } .tick.s { fill: var(--mind); } .tick.o { fill: var(--hand); }
+    .tick.p { fill: var(--muted); } .tick.s { fill: var(--mind); } .tick.o { fill: var(--hand); }
     .bar.k-mind { fill: var(--mind-soft); stroke: var(--mind); } .bar.k-hand { fill: var(--hand-soft); stroke: var(--hand); }
     .gem.k-mind { fill: var(--mind); } .gem.k-hand { fill: var(--hand); } .gem.k-warn { fill: var(--warn); }
     .gem.k-bg { fill: var(--bg); }
+    .shadow { flood-color: var(--shadow); }
     .tip { fill: var(--wire); } .tip.k-mind { fill: var(--mind); } .tip.k-hand { fill: var(--hand); }
     .tip.k-model { fill: var(--model); } .tip.k-faint { fill: var(--faint); } .tip.k-warn { fill: var(--warn); }
   </style>
   <defs>
     <filter id="lift" x="-10%" y="-20%" width="120%" height="150%">
-      <feDropShadow dx="0" dy="1.5" stdDeviation="2" flood-color="#1c1a3a" flood-opacity="0.08"/>
+      <feDropShadow class="shadow" dx="0" dy="1.5" stdDeviation="2"/>
     </filter>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="tip" d="M0,1 L9,5 L0,9 L2.6,5 Z"/></marker>
     <marker id="a-mind" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="tip k-mind" d="M0,1 L9,5 L0,9 L2.6,5 Z"/></marker>
@@ -81,68 +84,70 @@
     <symbol id="i-alarm" viewBox="-8 -8 16 16"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle r="6"/><path d="M0,-3.5 V0 L2.6,1.8"/></g></symbol>
     <symbol id="i-cut" viewBox="-8 -8 16 16"><path d="M-4,-4 L4,4 M4,-4 L-4,4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
   </defs>
-  <rect class="bg" x="0.5" y="0.5" width="879" height="391" rx="16"/>
+  <rect class="bg" x="0.5" y="0.5" width="879" height="471" rx="16"/>
+
+  <!-- The model, above the object -->
+  <rect class="node k-model" x="424" y="32" width="160" height="52" rx="10" filter="url(#lift)"/>
+  <circle class="badge k-model" cx="450" cy="58.0" r="13"/>
+  <use href="#i-model" class="ic k-model" x="442" y="50" width="16" height="16"/>
+  <text x="472" y="63.0" class="title">model API</text>
+  <text x="540" y="108" class="lbl" text-anchor="end">request</text>
+  <text x="580" y="108" class="lbl">stream</text>
 
   <!-- The object -->
-  <rect class="panel" x="400" y="32" width="448" height="336" rx="14"/>
-  <text x="420" y="56"><tspan class="eyebrow">DURABLE OBJECT  </tspan><tspan class="mono lbl b">a1</tspan></text>
+  <rect class="panel" x="400" y="120" width="448" height="328" rx="14"/>
+  <text x="420" y="144"><tspan class="eyebrow">DURABLE OBJECT  </tspan><tspan class="mono lbl b">m</tspan></text>
+  <path class="wire k-model" d="M548,160 L548,84" marker-end="url(#a-model)"/>
+  <path class="wire k-model" d="M572,84 L572,160" marker-end="url(#a-model)"/>
 
   <!-- In front: the client and the Worker -->
-  <rect class="node k-plain" x="32" y="72" width="112" height="52" rx="10" filter="url(#lift)"/>
-  <circle class="badge k-plain" cx="58" cy="98.0" r="13"/>
-  <use href="#i-you" class="ic" x="50" y="90" width="16" height="16"/>
-  <text x="80" y="95.0" class="title">client</text>
-  <text x="80" y="112.0" class="sub">HTTP</text>
-  <path class="wire" d="M144,98 L208,98" marker-end="url(#a)"/>
-  <text x="176" y="90" class="lbl mono" text-anchor="middle">prompt</text>
-  <rect class="node k-plain" x="208" y="72" width="140" height="52" rx="10" filter="url(#lift)"/>
-  <circle class="badge k-plain" cx="234" cy="98.0" r="13"/>
-  <use href="#i-worker" class="ic" x="226" y="90" width="16" height="16"/>
-  <text x="256" y="95.0" class="title">Worker</text>
-  <text x="256" y="112.0" class="sub">routes by name</text>
-  <path class="wire" d="M348,98 L424,98" marker-end="url(#a)"/>
-  <text x="386" y="90" class="lbl" text-anchor="middle">by name</text>
+  <rect class="node k-plain" x="32" y="162" width="112" height="52" rx="10" filter="url(#lift)"/>
+  <circle class="badge k-plain" cx="58" cy="188.0" r="13"/>
+  <use href="#i-you" class="ic" x="50" y="180" width="16" height="16"/>
+  <text x="80" y="185.0" class="title">client</text>
+  <text x="80" y="202.0" class="sub">HTTP</text>
+  <path class="wire" d="M144,188 L208,188" marker-end="url(#a)"/>
+  <text x="176" y="180" class="lbl mono" text-anchor="middle">prompt</text>
+  <rect class="node k-plain" x="208" y="162" width="140" height="52" rx="10" filter="url(#lift)"/>
+  <circle class="badge k-plain" cx="234" cy="188.0" r="13"/>
+  <use href="#i-worker" class="ic" x="226" y="180" width="16" height="16"/>
+  <text x="256" y="185.0" class="title">Worker</text>
+  <text x="256" y="202.0" class="sub">routes by name</text>
+  <path class="wire" d="M348,188 L424,188" marker-end="url(#a)"/>
 
-  <!-- The mind and its hand -->
-  <rect class="node k-mind" x="424" y="72" width="160" height="56" rx="10" filter="url(#lift)"/>
-  <circle class="badge k-mind" cx="450" cy="100.0" r="13"/>
-  <use href="#i-mind" class="ic k-mind" x="442" y="92" width="16" height="16"/>
-  <text x="472" y="97.0" class="title">mind <tspan class="mono mind">a1</tspan></text>
-  <text x="472" y="114.0" class="sub">history · turn · tools</text>
-  <rect class="node k-hand" x="664" y="72" width="160" height="56" rx="10" filter="url(#lift)"/>
-  <circle class="badge k-hand" cx="690" cy="100.0" r="13"/>
-  <use href="#i-hand" class="ic k-hand" x="682" y="92" width="16" height="16"/>
-  <text x="712" y="97.0" class="title">hand <tspan class="mono hand">local</tspan></text>
-  <text x="712" y="114.0" class="sub">files · fetch</text>
-  <path class="wire k-hand" d="M584,92 L664,92" marker-end="url(#a-hand)"/>
-  <path class="wire k-hand" d="M664,108 L584,108" marker-end="url(#a-hand)"/>
-  <text x="624" y="86" class="lbl mono" text-anchor="middle">call</text>
-  <text x="624" y="124" class="lbl mono" text-anchor="middle">result</text>
-  <text x="624" y="144" class="note" text-anchor="middle">in memory</text>
-  <rect class="node" x="424" y="172" width="400" height="128" rx="12"/>
-  <text x="440" y="194" class="eyebrow">SQLITE</text>
-  <path class="wire" d="M496,128 L496,210" marker-end="url(#a)"/>
-  <path class="wire" d="M672,128 L672,210" marker-end="url(#a)"/>
-  <path class="wire" d="M752,128 L752,210" marker-end="url(#a)"/>
-  <rect class="soft k-plain" x="440" y="210" width="112" height="50" rx="8"/>
-  <text x="454" y="231" class="mono b">items</text>
-  <text x="454" y="248" class="lbl">the history</text>
-  <rect class="soft k-plain" x="568" y="210" width="112" height="50" rx="8"/>
-  <text x="582" y="231" class="mono b">hand</text>
-  <text x="582" y="248" class="lbl">what it holds</text>
-  <rect class="soft k-plain" x="696" y="210" width="112" height="50" rx="8"/>
-  <text x="710" y="231" class="mono b">files</text>
-  <text x="710" y="248" class="lbl">a row per file</text>
-  <text x="440" y="286" class="note">a reply, its call and the file it changed: one commit</text>
-  <use href="#i-alarm" class="ic" x="436" y="328" width="16" height="16"/>
-  <text x="460" y="340" class="lbl">an alarm is its only worker: a prompt wakes it, it sleeps when idle</text>
+  <!-- The mind and its hand, in memory -->
+  <rect class="node k-mind" x="424" y="160" width="160" height="56" rx="10" filter="url(#lift)"/>
+  <circle class="badge k-mind" cx="450" cy="188.0" r="13"/>
+  <use href="#i-mind" class="ic k-mind" x="442" y="180" width="16" height="16"/>
+  <text x="472" y="185.0" class="title">mind <tspan class="mono mind">m</tspan></text>
+  <text x="472" y="202.0" class="sub">history · turn</text>
+  <rect class="node k-hand" x="664" y="160" width="160" height="56" rx="10" filter="url(#lift)"/>
+  <circle class="badge k-hand" cx="690" cy="188.0" r="13"/>
+  <use href="#i-hand" class="ic k-hand" x="682" y="180" width="16" height="16"/>
+  <text x="712" y="185.0" class="title">hand <tspan class="mono hand">local</tspan></text>
+  <text x="712" y="202.0" class="sub">files · fetch</text>
+  <path class="wire k-hand" d="M584,180 L664,180" marker-end="url(#a-hand)"/>
+  <path class="wire k-hand" d="M664,196 L584,196" marker-end="url(#a-hand)"/>
+  <text x="624" y="174" class="lbl mono" text-anchor="middle">call</text>
+  <text x="624" y="212" class="lbl mono" text-anchor="middle">result</text>
+  <text x="624" y="234" class="note" text-anchor="middle">in memory</text>
 
-  <!-- The model, outside -->
-  <rect class="node k-model" x="208" y="260" width="140" height="52" rx="10" filter="url(#lift)"/>
-  <circle class="badge k-model" cx="234" cy="286.0" r="13"/>
-  <use href="#i-model" class="ic k-model" x="226" y="278" width="16" height="16"/>
-  <text x="256" y="291.0" class="title">model API</text>
-  <path class="wire k-model" d="M424,116 H384 V286 H348" marker-end="url(#a-model)"/>
-  <text x="376" y="200" class="lbl" text-anchor="end">request</text>
-  <text x="376" y="216" class="lbl" text-anchor="end">stream</text>
+  <!-- Its SQLite -->
+  <rect class="node" x="424" y="260" width="400" height="128" rx="12"/>
+  <text x="440" y="282" class="eyebrow">SQLITE</text>
+  <path class="wire" d="M496,216 L496,298" marker-end="url(#a)"/>
+  <path class="wire" d="M672,216 L672,298" marker-end="url(#a)"/>
+  <path class="wire" d="M752,216 L752,298" marker-end="url(#a)"/>
+  <rect class="soft k-plain" x="440" y="298" width="112" height="50" rx="8"/>
+  <text x="452" y="319" class="mono b">items</text>
+  <text x="452" y="336" class="lbl">the history</text>
+  <rect class="soft k-plain" x="568" y="298" width="112" height="50" rx="8"/>
+  <text x="580" y="319" class="mono b">hand</text>
+  <text x="580" y="336" class="lbl">its memory</text>
+  <rect class="soft k-plain" x="696" y="298" width="112" height="50" rx="8"/>
+  <text x="708" y="319" class="mono b">files</text>
+  <text x="708" y="336" class="lbl">a row per file</text>
+  <text x="440" y="374" class="note">a files call: reply, call, file and outcome, one commit within a wake</text>
+  <use href="#i-alarm" class="ic" x="436" y="412" width="16" height="16"/>
+  <text x="460" y="424" class="lbl">an alarm is its only worker: a prompt wakes it, it sleeps when idle</text>
 </svg>

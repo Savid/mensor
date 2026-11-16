@@ -1,8 +1,10 @@
 # mensor
 
 An agent as a mind with hands. A mind holds the history, calls the model and
-drives up to four hands, which run commands and change files. The mind has
-tools of its own: `fork`, `wait`, `tell`, `clone_hand` and `release_hand`.
+drives its hands (`--max-hands`, four by default), which run commands and
+change files. The mind has tools of its own: `tell` and `wait` need no hand,
+`fork` and `clone_hand` have a hand clone itself, and `release_hand` lets
+one go.
 `mensor serve` hosts minds, `mensor hand` runs a hand that dials them, and
 `mensor run` does both in one process. `crates/cloudflare` runs a mind and
 its one hand as a Durable Object. The protocol is `docs/protocol.md`.
@@ -15,7 +17,7 @@ its one hand as a Durable Object. The protocol is `docs/protocol.md`.
 make check    # fmt-check, lint, test and deny: a change is done when this exits 0
 make fmt      # rustfmt
 make lint     # clippy on every target, pedantic, and the docs: warnings refused
-make test     # every test, the end-to-end ones included
+make test     # every native test, the end-to-end ones included
 make deny     # cargo-deny: advisories, licences, duplicate versions, sources
 make tools    # installs the pinned cargo-deny and worker-build
 make build    # target/release/mensor, mensor-mind and mensor-hand
@@ -36,8 +38,9 @@ While iterating, test the crate you touched: `cargo test -p mensor-mind`.
   files, and perform what the pure crates decide, in the order given. A
   mind's host stores `Output::Append` and makes `Output::Fork` before the
   outputs after them: never send what is not stored, and never store a
-  fork before its children exist. Store calls go through `blocking`
-  (`mind-host/src/task.rs`), never on a runtime thread.
+  fork before its children exist. `Store` calls never run on a runtime
+  thread: they go through `blocking` (`crates/mind-host/src/task.rs`) or
+  `spawn_blocking`.
 - `crates/mind/src/tools.rs` is what the model is shown and what each tool
   does. A tool use for a hand that is away waits unissued. The mind's own
   tools run after their step's hand tools, one at a time, and a fork runs
@@ -55,12 +58,13 @@ While iterating, test the crate you touched: `cargo test -p mensor-mind`.
   `Connection`. The WebSocket joins them over a network, and
   `crates/mensor/src/local.rs` in memory.
 - A capability implements `mensor_hand::Capability`, names its operations
-  and bounds its own output. `clone` (`hand-host/src/capabilities/clone.rs`)
+  and bounds its own output. `clone`
+  (`crates/hand-host/src/capabilities/clone.rs`)
   is never shown to the model. It makes every copy or none, under a `.part`
-  name until the copy is whole. `Hands` (`mensor/src/hand.rs`) runs a hand
-  and all its clones as tasks of one process; the copies under `--clones`
-  are the only record of the clones, and one is deleted only when its mind
-  releases its clone.
+  name until the copy is whole. `Hands` (`crates/mensor/src/hand.rs`) runs
+  a hand and all its clones as tasks of one process; the copies under
+  `--clones` are the process's only record of its clones, and one is
+  deleted only when its mind releases its clone.
 - `crates/model` builds each API's requests and reads its answers
   (`messages.rs`, `chat.rs`), retries included. Hosts only send. A request
   is written from structs that borrow the conversation, never through a
@@ -91,13 +95,15 @@ While iterating, test the crate you touched: `cargo test -p mensor-mind`.
 - A mind holds only the end of its history: everything after its last
   summary, which carries what it needs from before (`from`, `hands`,
   `lastCall`, `forksLeft`, `parent`, `children`). What reaches further back
-  asks the store, a page at a time. Nothing holds a whole history in memory.
+  asks the store, a page at a time.
 - What a mind looks up (a call, an outcome, the last step) is in the round
-  in progress: no lookup scans the history.
+  in progress. Only a prompt's key and the last call's id are looked for
+  further back.
 - A child shares its parent's rows in the store without copying them.
 - A mind is in memory only while it is awake. The way to reach its task is
   cloned only under the lock on the host's map of minds, and dropped once
-  used: a task that rests relies on being the only holder.
+  used, except by a hand's `Connection`, which holds it until the hand
+  detaches. A task that rests relies on being the only holder.
 - The release profile is built for size. Before adding a dependency, compare
   `target/release/mensor*` with and without it. TLS uses ring: a host, and
   any test that makes a client, installs it first.
@@ -117,25 +123,29 @@ While iterating, test the crate you touched: `cargo test -p mensor-mind`.
   Add no other without asking.
 - Every public item has a doc comment.
 - Fix a lint rather than suppress it. A suppression is
-  `#[expect(clippy::<lint>, reason = "why")]` on one item.
-- Libraries return `thiserror` enums. Only a binary turns an error into
-  text for a person.
-- Log with `tracing`, with fields.
+  `#[expect(<lint>, reason = "why")]` on one item. The lints allowed
+  everywhere are in the root `Cargo.toml`.
+- An error a caller tells apart is a `thiserror` enum. Only `crates/mensor`
+  and the hosts' HTTP problems word an error for a person.
+- Log with `tracing`, with fields. The worker logs with `console_*!`.
 
 ## Tests
 
 - Test behaviour through the public API, and name a test for what it shows:
-  `a_hand_that_restarts_makes_only_its_own_calls_unknown`.
-- Wait in an end-to-end test with `eventually`, never a bare sleep.
+  `a_hand_that_restarts_makes_only_its_own_calls_unknown`. Private code may
+  be tested in its own module.
+- Wait in a test by polling, as `eventually` does. Sleep only to show that
+  something does not happen.
 - Tests that run commands use a `tempfile` directory.
-- A workerd test starts the worker with `--var` values made for it and an
-  empty environment.
+- A workerd test starts the worker with `--var` values made for it, in an
+  environment cleared down to `PATH`, `HOME` and `VOLTA_HOME`, with `CI`
+  and `WRANGLER_SEND_METRICS` set.
 
 ## Docs
 
-- Diagrams are SVGs in `docs/images`, written by hand: colours are CSS
-  variables, redefined under `prefers-color-scheme: dark`, background
-  included. No mermaid. A change to what a diagram shows updates it.
+- Diagrams are plain SVGs in `docs/images`: colours are CSS variables,
+  redefined under `prefers-color-scheme: dark`, background included. No
+  mermaid. A change to what a diagram shows updates it.
 
 ## Secrets
 

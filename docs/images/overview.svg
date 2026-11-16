@@ -1,14 +1,15 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 484" width="880" height="484" role="img" aria-label="You prompt a mind over HTTP. The mind, in the host mensor serve, holds the history, calls the model and stores every item. Hands on other machines dial in over a WebSocket; the mind sends each a call and gets back its result. Up to four hands per mind.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 584" width="880" height="584" role="img" aria-label="You prompt a mind over HTTP. The mind, in the host mensor serve, holds the history, calls the model and stores every item. Its hand tools run on hands: each is sent to a hand as a call, and its result comes back. Of its own tools, tell and wait reach a child mind in the same host with no hand; fork and clone_hand have a hand clone itself, and release_hand lets one go. A fork&#x27;s child gets a copy of hand a1, on a1&#x27;s machine.">
   <title>mensor: a mind and its hands</title>
   <style>
     svg {
       --bg: #f8f8fb; --frame: #e3e3ec; --panel: #f0f0f6; --surface: #ffffff;
       --ink: #1c1d2b; --muted: #5c5f73; --faint: #8e91a5; --line: #d0d2dd; --wire: #4a4d63;
       --mind: #6246d0; --mind-soft: #f0ecff; --mind-edge: #c6baf5;
-      --hand: #bd4f0b; --hand-soft: #fff0e4; --hand-edge: #f1c29e;
+      --hand: #ad4608; --hand-soft: #fff0e4; --hand-edge: #f1c29e;
       --model: #08776b; --model-soft: #e3f4f0; --model-edge: #9fd6cb;
       --ok: #1d7a39; --ok-soft: #e6f4ea; --ok-edge: #a7d8b4;
       --warn: #b3261e; --warn-soft: #fdeceb; --warn-edge: #f2b8b4;
+      --shadow: rgba(28, 26, 58, 0.08);
     }
     @media (prefers-color-scheme: dark) {
       svg {
@@ -19,6 +20,7 @@
         --model: #4fd3bc; --model-soft: #0f2824; --model-edge: #22635a;
         --ok: #5fd07c; --ok-soft: #10261a; --ok-edge: #245c35;
         --warn: #ff8a80; --warn-soft: #2f1416; --warn-edge: #7a2a2a;
+        --shadow: rgba(0, 0, 0, 0.4);
       }
     }
     text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif; font-size: 13px; fill: var(--ink); }
@@ -27,7 +29,7 @@
     .sub { font-size: 12px; fill: var(--muted); }
     .lbl { font-size: 11.5px; fill: var(--muted); }
     .note { font-size: 11.5px; fill: var(--muted); font-style: italic; }
-    .eyebrow { font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em; fill: var(--faint); }
+    .eyebrow { font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em; fill: var(--muted); }
     .b { font-weight: 600; }
     .mind { fill: var(--mind); } .hand { fill: var(--hand); } .model { fill: var(--model); }
     .ok { fill: var(--ok); } .warn { fill: var(--warn); } .muted { fill: var(--muted); } .faint { fill: var(--faint); }
@@ -54,16 +56,17 @@
     .track { fill: none; stroke: var(--mind); stroke-width: 2.5; stroke-linecap: round; }
     .lane { fill: none; stroke: var(--hand); stroke-width: 1.5; stroke-linecap: round; }
     .life { fill: none; stroke: var(--line); stroke-width: 1.25; stroke-dasharray: 3 4; }
-    .tick.p { fill: var(--faint); } .tick.s { fill: var(--mind); } .tick.o { fill: var(--hand); }
+    .tick.p { fill: var(--muted); } .tick.s { fill: var(--mind); } .tick.o { fill: var(--hand); }
     .bar.k-mind { fill: var(--mind-soft); stroke: var(--mind); } .bar.k-hand { fill: var(--hand-soft); stroke: var(--hand); }
     .gem.k-mind { fill: var(--mind); } .gem.k-hand { fill: var(--hand); } .gem.k-warn { fill: var(--warn); }
     .gem.k-bg { fill: var(--bg); }
+    .shadow { flood-color: var(--shadow); }
     .tip { fill: var(--wire); } .tip.k-mind { fill: var(--mind); } .tip.k-hand { fill: var(--hand); }
     .tip.k-model { fill: var(--model); } .tip.k-faint { fill: var(--faint); } .tip.k-warn { fill: var(--warn); }
   </style>
   <defs>
     <filter id="lift" x="-10%" y="-20%" width="120%" height="150%">
-      <feDropShadow dx="0" dy="1.5" stdDeviation="2" flood-color="#1c1a3a" flood-opacity="0.08"/>
+      <feDropShadow class="shadow" dx="0" dy="1.5" stdDeviation="2"/>
     </filter>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="tip" d="M0,1 L9,5 L0,9 L2.6,5 Z"/></marker>
     <marker id="a-mind" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="tip k-mind" d="M0,1 L9,5 L0,9 L2.6,5 Z"/></marker>
@@ -81,118 +84,144 @@
     <symbol id="i-alarm" viewBox="-8 -8 16 16"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle r="6"/><path d="M0,-3.5 V0 L2.6,1.8"/></g></symbol>
     <symbol id="i-cut" viewBox="-8 -8 16 16"><path d="M-4,-4 L4,4 M4,-4 L-4,4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
   </defs>
-  <rect class="bg" x="0.5" y="0.5" width="879" height="483" rx="16"/>
+  <rect class="bg" x="0.5" y="0.5" width="879" height="583" rx="16"/>
 
   <!-- The model's API, above the host -->
-  <rect class="node k-model" x="288" y="32" width="248" height="56" rx="10" filter="url(#lift)"/>
-  <circle class="badge k-model" cx="314" cy="60.0" r="13"/>
-  <use href="#i-model" class="ic k-model" x="306" y="52" width="16" height="16"/>
-  <text x="336" y="57.0" class="title">model API</text>
-  <text x="336" y="74.0" class="sub">Messages · Chat Completions</text>
-  <path class="wire k-model" d="M396,156 L396,88" marker-end="url(#a-model)"/>
-  <path class="wire k-model" d="M428,88 L428,156" marker-end="url(#a-model)"/>
-  <text x="388" y="112" class="lbl" text-anchor="end">request</text>
-  <text x="436" y="112" class="lbl">stream</text>
+  <rect class="node k-model" x="260" y="32" width="248" height="56" rx="10" filter="url(#lift)"/>
+  <circle class="badge k-model" cx="286" cy="60.0" r="13"/>
+  <use href="#i-model" class="ic k-model" x="278" y="52" width="16" height="16"/>
+  <text x="308" y="57.0" class="title">model API</text>
+  <text x="308" y="74.0" class="sub">Messages · Chat Completions</text>
+  <text x="360" y="112" class="lbl" text-anchor="end">request</text>
+  <text x="408" y="112" class="lbl">stream</text>
 
-  <!-- The host: the mind and its store -->
-  <rect class="panel" x="200" y="120" width="424" height="332" rx="14"/>
-  <text x="220" y="144" class="lbl mono">mensor serve</text>
-  <rect class="node k-mind" x="224" y="156" width="376" height="212" rx="12" filter="url(#lift)"/>
-  <circle class="badge k-mind" cx="250" cy="183" r="13"/>
-  <use href="#i-mind" class="ic k-mind" x="242" y="175" width="16" height="16"/>
-  <text x="272" y="188" class="title">mind <tspan class="mono mind">m</tspan></text>
-  <text x="272" y="205" class="sub">holds the history and calls the model</text>
-  <text x="244" y="237" class="eyebrow">HISTORY</text>
-  <rect class="tick p" x="315.5" y="227" width="5" height="12" rx="1.5"/>
-  <rect class="tick s" x="325.5" y="227" width="5" height="12" rx="1.5"/>
-  <rect class="tick o" x="335.5" y="227" width="5" height="12" rx="1.5"/>
-  <rect class="tick s" x="345.5" y="227" width="5" height="12" rx="1.5"/>
-  <rect class="tick o" x="355.5" y="227" width="5" height="12" rx="1.5"/>
-  <rect class="tick s" x="365.5" y="227" width="5" height="12" rx="1.5"/>
-  <rect class="tick s" x="375.5" y="227" width="5" height="12" rx="1.5"/>
-  <rect class="tick o" x="385.5" y="227" width="5" height="12" rx="1.5"/>
-  <rect class="tick o" x="395.5" y="227" width="5" height="12" rx="1.5"/>
-  <rect class="tick s" x="405.5" y="227" width="5" height="12" rx="1.5"/>
-  <rect class="tick p" x="415.5" y="227" width="5" height="12" rx="1.5"/>
-  <rect class="tick s" x="425.5" y="227" width="5" height="12" rx="1.5"/>
-  <rect class="tick o" x="435.5" y="227" width="5" height="12" rx="1.5"/>
-  <rect class="tick s" x="445.5" y="227" width="5" height="12" rx="1.5"/>
-  <rect class="tick o" x="455.5" y="227" width="5" height="12" rx="1.5"/>
-  <rect class="tick s" x="465.5" y="227" width="5" height="12" rx="1.5"/>
-  <rect class="tick s" x="475.5" y="227" width="5" height="12" rx="1.5"/>
-  <rect class="tick p" x="485.5" y="227" width="5" height="12" rx="1.5"/>
-  <rect class="tick s" x="495.5" y="227" width="5" height="12" rx="1.5"/>
-  <rect class="tick o" x="505.5" y="227" width="5" height="12" rx="1.5"/>
-  <rect class="tick s" x="515.5" y="227" width="5" height="12" rx="1.5"/>
-  <rect class="tick o" x="525.5" y="227" width="5" height="12" rx="1.5"/>
-  <rect class="tick o" x="535.5" y="227" width="5" height="12" rx="1.5"/>
-  <rect class="tick s" x="545.5" y="227" width="5" height="12" rx="1.5"/>
-  <rect class="tick o" x="555.5" y="227" width="5" height="12" rx="1.5"/>
-  <text x="318" y="255" class="lbl"><tspan class="faint">prompts</tspan><tspan class="faint">  ·  </tspan><tspan class="mind">steps</tspan><tspan class="faint">  ·  </tspan><tspan class="hand">outcomes</tspan></text>
-  <text x="244" y="276" class="eyebrow">HAND TOOLS</text>
-  <rect class="soft k-hand" x="244" y="284" width="40" height="20" rx="10"/>
-  <text x="264.0" y="298.0" class="mono hand" text-anchor="middle">bash</text>
-  <rect class="soft k-hand" x="290" y="284" width="40" height="20" rx="10"/>
-  <text x="310.0" y="298.0" class="mono hand" text-anchor="middle">read</text>
-  <rect class="soft k-hand" x="336" y="284" width="47" height="20" rx="10"/>
-  <text x="359.5" y="298.0" class="mono hand" text-anchor="middle">write</text>
-  <rect class="soft k-hand" x="389" y="284" width="40" height="20" rx="10"/>
-  <text x="409.0" y="298.0" class="mono hand" text-anchor="middle">edit</text>
-  <rect class="soft k-hand" x="435" y="284" width="40" height="20" rx="10"/>
-  <text x="455.0" y="298.0" class="mono hand" text-anchor="middle">list</text>
-  <text x="244" y="324" class="eyebrow">ITS OWN TOOLS</text>
-  <rect class="soft k-mind" x="244" y="332" width="40" height="20" rx="10"/>
-  <text x="264.0" y="346.0" class="mono mind" text-anchor="middle">fork</text>
-  <rect class="soft k-mind" x="290" y="332" width="40" height="20" rx="10"/>
-  <text x="310.0" y="346.0" class="mono mind" text-anchor="middle">wait</text>
-  <rect class="soft k-mind" x="336" y="332" width="40" height="20" rx="10"/>
-  <text x="356.0" y="346.0" class="mono mind" text-anchor="middle">tell</text>
-  <rect class="soft k-mind" x="382" y="332" width="80" height="20" rx="10"/>
-  <text x="422.0" y="346.0" class="mono mind" text-anchor="middle">clone_hand</text>
-  <rect class="soft k-mind" x="468" y="332" width="93" height="20" rx="10"/>
-  <text x="514.5" y="346.0" class="mono mind" text-anchor="middle">release_hand</text>
-  <path class="wire" d="M312,368 L312,392" marker-end="url(#a)"/>
-  <text x="320" y="384" class="lbl">append</text>
-  <rect class="node k-plain" x="224" y="392" width="196" height="44" rx="10" filter="url(#lift)"/>
-  <circle class="badge k-plain" cx="250" cy="414.0" r="13"/>
-  <use href="#i-store" class="ic" x="242" y="406" width="16" height="16"/>
-  <text x="272" y="419.0" class="title">SQLite store</text>
-  <use href="#i-key" class="ic" x="444" y="406" width="16" height="16"/>
-  <text x="466" y="418" class="lbl">the model's key stays here</text>
+  <!-- The host, which holds the model's key -->
+  <rect class="panel" x="184" y="120" width="664" height="320" rx="14"/>
+  <text x="204" y="144" class="lbl mono">mensor serve</text>
+  <use href="#i-key" class="ic" x="430" y="132" width="16" height="16"/>
+  <text x="450" y="144" class="lbl">holds the model's key</text>
+
+  <!-- The mind: its history, its own tools, and the tools its hands run -->
+  <rect class="node k-mind" x="208" y="156" width="352" height="268" rx="12" filter="url(#lift)"/>
+  <path class="wire k-model" d="M368,156 L368,88" marker-end="url(#a-model)"/>
+  <path class="wire k-model" d="M400,88 L400,156" marker-end="url(#a-model)"/>
+  <circle class="badge k-mind" cx="234" cy="183" r="13"/>
+  <use href="#i-mind" class="ic k-mind" x="226" y="175" width="16" height="16"/>
+  <text x="256" y="188" class="title">mind <tspan class="mono mind">m</tspan></text>
+  <text x="256" y="205" class="sub">holds the history and calls the model</text>
+  <text x="228" y="235" class="eyebrow">HISTORY</text>
+  <rect class="tick p" x="299.5" y="225" width="5" height="12" rx="1.5"/>
+  <rect class="tick s" x="308.5" y="225" width="5" height="12" rx="1.5"/>
+  <rect class="tick o" x="317.5" y="225" width="5" height="12" rx="1.5"/>
+  <rect class="tick s" x="326.5" y="225" width="5" height="12" rx="1.5"/>
+  <rect class="tick o" x="335.5" y="225" width="5" height="12" rx="1.5"/>
+  <rect class="tick s" x="344.5" y="225" width="5" height="12" rx="1.5"/>
+  <rect class="tick s" x="353.5" y="225" width="5" height="12" rx="1.5"/>
+  <rect class="tick o" x="362.5" y="225" width="5" height="12" rx="1.5"/>
+  <rect class="tick o" x="371.5" y="225" width="5" height="12" rx="1.5"/>
+  <rect class="tick s" x="380.5" y="225" width="5" height="12" rx="1.5"/>
+  <rect class="tick p" x="389.5" y="225" width="5" height="12" rx="1.5"/>
+  <rect class="tick s" x="398.5" y="225" width="5" height="12" rx="1.5"/>
+  <rect class="tick o" x="407.5" y="225" width="5" height="12" rx="1.5"/>
+  <rect class="tick s" x="416.5" y="225" width="5" height="12" rx="1.5"/>
+  <rect class="tick s" x="425.5" y="225" width="5" height="12" rx="1.5"/>
+  <rect class="tick o" x="434.5" y="225" width="5" height="12" rx="1.5"/>
+  <rect class="tick s" x="443.5" y="225" width="5" height="12" rx="1.5"/>
+  <rect class="tick p" x="452.5" y="225" width="5" height="12" rx="1.5"/>
+  <rect class="tick s" x="461.5" y="225" width="5" height="12" rx="1.5"/>
+  <rect class="tick o" x="470.5" y="225" width="5" height="12" rx="1.5"/>
+  <rect class="tick s" x="479.5" y="225" width="5" height="12" rx="1.5"/>
+  <rect class="tick o" x="488.5" y="225" width="5" height="12" rx="1.5"/>
+  <rect class="tick o" x="497.5" y="225" width="5" height="12" rx="1.5"/>
+  <rect class="tick s" x="506.5" y="225" width="5" height="12" rx="1.5"/>
+  <rect class="tick o" x="515.5" y="225" width="5" height="12" rx="1.5"/>
+  <rect class="tick s" x="524.5" y="225" width="5" height="12" rx="1.5"/>
+  <text x="302" y="252" class="lbl"><tspan class="muted">prompts</tspan><tspan class="muted">  ·  </tspan><tspan class="mind">steps</tspan><tspan class="muted">  ·  </tspan><tspan class="hand">outcomes</tspan></text>
+  <text x="228" y="280" class="eyebrow">ITS OWN TOOLS</text>
+  <rect class="soft k-mind" x="228" y="288" width="42" height="20" rx="10"/>
+  <text x="249.0" y="302.0" class="mono mind" text-anchor="middle">tell</text>
+  <rect class="soft k-mind" x="276" y="288" width="42" height="20" rx="10"/>
+  <text x="297.0" y="302.0" class="mono mind" text-anchor="middle">wait</text>
+  <text x="372" y="302" class="lbl">parent and children · no hand</text>
+  <rect class="soft k-mind" x="228" y="314" width="42" height="20" rx="10"/>
+  <text x="249.0" y="328.0" class="mono mind" text-anchor="middle">fork</text>
+  <rect class="soft k-mind" x="276" y="314" width="84" height="20" rx="10"/>
+  <text x="318.0" y="328.0" class="mono mind" text-anchor="middle">clone_hand</text>
+  <text x="372" y="328" class="lbl">a hand clones itself</text>
+  <rect class="soft k-mind" x="228" y="340" width="98" height="20" rx="10"/>
+  <text x="277.0" y="354.0" class="mono mind" text-anchor="middle">release_hand</text>
+  <text x="372" y="354" class="lbl">a hand is let go</text>
+  <text x="228" y="384" class="eyebrow">HAND TOOLS  ·  RUN ON A HAND</text>
+  <rect class="soft k-hand" x="228" y="392" width="42" height="20" rx="10"/>
+  <text x="249.0" y="406.0" class="mono hand" text-anchor="middle">bash</text>
+  <rect class="soft k-hand" x="276" y="392" width="42" height="20" rx="10"/>
+  <text x="297.0" y="406.0" class="mono hand" text-anchor="middle">read</text>
+  <rect class="soft k-hand" x="324" y="392" width="49" height="20" rx="10"/>
+  <text x="348.5" y="406.0" class="mono hand" text-anchor="middle">write</text>
+  <rect class="soft k-hand" x="379" y="392" width="42" height="20" rx="10"/>
+  <text x="400.0" y="406.0" class="mono hand" text-anchor="middle">edit</text>
+  <rect class="soft k-hand" x="427" y="392" width="42" height="20" rx="10"/>
+  <text x="448.0" y="406.0" class="mono hand" text-anchor="middle">list</text>
+
+  <!-- Beside it in the host: its store, and a child it forked -->
+  <rect class="node k-plain" x="664" y="156" width="168" height="44" rx="10" filter="url(#lift)"/>
+  <circle class="badge k-plain" cx="690" cy="178.0" r="13"/>
+  <use href="#i-store" class="ic" x="682" y="170" width="16" height="16"/>
+  <text x="712" y="183.0" class="title">SQLite store</text>
+  <path class="wire" d="M560,178 L664,178" marker-end="url(#a)"/>
+  <text x="612" y="171" class="lbl" text-anchor="middle">append</text>
+  <rect class="node k-mind" x="664" y="270" width="168" height="56" rx="10" filter="url(#lift)"/>
+  <circle class="badge k-mind" cx="690" cy="298.0" r="13"/>
+  <use href="#i-mind" class="ic k-mind" x="682" y="290" width="16" height="16"/>
+  <text x="712" y="295.0" class="title"><tspan class="mono mind">m.d3342iuj</tspan></text>
+  <text x="712" y="312.0" class="sub">a child of m</text>
+  <path class="wire k-mind" d="M560,290 L664,290" marker-end="url(#a-mind)"/>
+  <path class="wire k-mind dash" d="M664,306 L560,306" marker-end="url(#a-mind)"/>
+  <text x="612" y="283" class="lbl mono" text-anchor="middle">tell</text>
+  <text x="612" y="321" class="lbl" text-anchor="middle">what it said</text>
 
   <!-- You, over HTTP -->
-  <rect class="node k-plain" x="32" y="236" width="112" height="56" rx="10" filter="url(#lift)"/>
-  <circle class="badge k-plain" cx="58" cy="264.0" r="13"/>
-  <use href="#i-you" class="ic" x="50" y="256" width="16" height="16"/>
-  <text x="80" y="261.0" class="title">you</text>
-  <text x="80" y="278.0" class="sub">HTTP API</text>
-  <path class="wire" d="M144,252 L224,252" marker-end="url(#a)"/>
-  <path class="wire" d="M224,276 L144,276" marker-end="url(#a)"/>
-  <text x="172" y="246" class="lbl mono" text-anchor="middle">prompt</text>
-  <text x="172" y="290" class="lbl mono" text-anchor="middle">events</text>
+  <rect class="node k-plain" x="20" y="262" width="112" height="56" rx="10" filter="url(#lift)"/>
+  <circle class="badge k-plain" cx="46" cy="290.0" r="13"/>
+  <use href="#i-you" class="ic" x="38" y="282" width="16" height="16"/>
+  <text x="68" y="287.0" class="title">you</text>
+  <text x="68" y="304.0" class="sub">HTTP API</text>
+  <path class="wire" d="M132,278 L208,278" marker-end="url(#a)"/>
+  <path class="wire" d="M208,302 L132,302" marker-end="url(#a)"/>
+  <text x="158" y="272" class="lbl mono" text-anchor="middle">prompt</text>
+  <text x="158" y="316" class="lbl mono" text-anchor="middle">events</text>
 
-  <!-- Hands, each on a machine of its own, dialled in -->
-  <text x="664" y="150" class="lbl" text-anchor="middle">WebSocket</text>
-  <rect class="panel" x="704" y="156" width="144" height="96" rx="12"/>
-  <text x="720" y="176" class="eyebrow">MACHINE</text>
-  <rect class="node k-hand" x="716" y="188" width="120" height="52" rx="10" filter="url(#lift)"/>
-  <circle class="badge k-hand" cx="742" cy="214.0" r="13"/>
-  <use href="#i-hand" class="ic k-hand" x="734" y="206" width="16" height="16"/>
-  <text x="764" y="211.0" class="title">hand <tspan class="mono hand">a1</tspan></text>
-  <text x="764" y="228.0" class="sub mono">/tmp/a1</text>
-  <path class="wire k-hand" d="M600,206 L716,206" marker-end="url(#a-hand)"/>
-  <path class="wire k-hand" d="M716,222 L600,222" marker-end="url(#a-hand)"/>
-  <text x="658" y="200" class="lbl mono" text-anchor="middle">call</text>
-  <text x="658" y="238" class="lbl mono" text-anchor="middle">result</text>
-  <rect class="panel" x="704" y="276" width="144" height="96" rx="12"/>
-  <text x="720" y="296" class="eyebrow">MACHINE</text>
-  <rect class="node k-hand" x="716" y="308" width="120" height="52" rx="10" filter="url(#lift)"/>
-  <circle class="badge k-hand" cx="742" cy="334.0" r="13"/>
-  <use href="#i-hand" class="ic k-hand" x="734" y="326" width="16" height="16"/>
-  <text x="764" y="331.0" class="title">hand <tspan class="mono hand">b2</tspan></text>
-  <text x="764" y="348.0" class="sub mono">/tmp/b2</text>
-  <path class="wire k-hand" d="M600,326 L716,326" marker-end="url(#a-hand)"/>
-  <path class="wire k-hand" d="M716,342 L600,342" marker-end="url(#a-hand)"/>
-  <rect class="slot" x="704" y="396" width="144" height="48" rx="12"/>
-  <text x="776" y="424" class="lbl" text-anchor="middle">up to four hands</text>
+  <!-- Hands, each dialled in over a WebSocket. The child's a1 is a copy, on a1's machine -->
+  <rect class="panel" x="208" y="472" width="160" height="88" rx="12"/>
+  <text x="224" y="492" class="eyebrow">MACHINE</text>
+  <rect class="node k-hand" x="224" y="504" width="128" height="48" rx="10" filter="url(#lift)"/>
+  <circle class="badge k-hand" cx="250" cy="528.0" r="13"/>
+  <use href="#i-hand" class="ic k-hand" x="242" y="520" width="16" height="16"/>
+  <text x="272" y="525.0" class="title">hand <tspan class="mono hand">b2</tspan></text>
+  <text x="272" y="542.0" class="sub mono">/tmp/b2</text>
+  <rect class="panel" x="392" y="472" width="456" height="88" rx="12"/>
+  <text x="408" y="492" class="eyebrow">MACHINE</text>
+  <rect class="node k-hand" x="408" y="504" width="136" height="48" rx="10" filter="url(#lift)"/>
+  <circle class="badge k-hand" cx="434" cy="528.0" r="13"/>
+  <use href="#i-hand" class="ic k-hand" x="426" y="520" width="16" height="16"/>
+  <text x="456" y="525.0" class="title">hand <tspan class="mono hand">a1</tspan></text>
+  <text x="456" y="542.0" class="sub mono">/tmp/a1</text>
+  <rect class="node k-hand" x="664" y="504" width="168" height="48" rx="10" filter="url(#lift)"/>
+  <circle class="badge k-hand" cx="690" cy="528.0" r="13"/>
+  <use href="#i-hand" class="ic k-hand" x="682" y="520" width="16" height="16"/>
+  <text x="712" y="525.0" class="title">hand <tspan class="mono hand">a1</tspan></text>
+  <text x="712" y="542.0" class="sub mono">copy of /tmp/a1</text>
+  <path class="wire k-hand dash" d="M544,528 L664,528" marker-end="url(#a-hand)"/>
+  <text x="604" y="521" class="lbl mono hand" text-anchor="middle">clone</text>
+  <path class="wire k-hand" d="M300,424 L300,504" marker-end="url(#a-hand)"/>
+  <path class="wire k-hand" d="M316,504 L316,424" marker-end="url(#a-hand)"/>
+  <path class="wire k-hand" d="M468,424 L468,504" marker-end="url(#a-hand)"/>
+  <path class="wire k-hand" d="M484,504 L484,424" marker-end="url(#a-hand)"/>
+  <path class="wire k-hand" d="M740,326 L740,504" marker-end="url(#a-hand)"/>
+  <path class="wire k-hand" d="M756,504 L756,326" marker-end="url(#a-hand)"/>
+  <text x="292" y="460" class="lbl mono" text-anchor="end">call</text>
+  <text x="324" y="460" class="lbl mono">result</text>
+  <rect class="slot" x="20" y="472" width="164" height="88" rx="12"/>
+  <text x="102" y="512" class="lbl" text-anchor="middle">a mind takes up to</text>
+  <text x="102" y="528" class="lbl" text-anchor="middle">four hands (--max-hands)</text>
 </svg>

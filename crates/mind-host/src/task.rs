@@ -366,7 +366,7 @@ impl Task {
             .is_some_and(|current| current.id == link)
     }
 
-    /// Ends a hand's connection. The hand settles again when it redials.
+    /// Ends a hand's connection, closing it with `refusal`.
     fn drop_link(&mut self, hand: &Name, refusal: Refusal) {
         if let Some(link) = self.links.remove(hand) {
             let _ = link.outbound.send(Outgoing::Close(refusal));

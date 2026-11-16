@@ -5,10 +5,11 @@
       --bg: #f8f8fb; --frame: #e3e3ec; --panel: #f0f0f6; --surface: #ffffff;
       --ink: #1c1d2b; --muted: #5c5f73; --faint: #8e91a5; --line: #d0d2dd; --wire: #4a4d63;
       --mind: #6246d0; --mind-soft: #f0ecff; --mind-edge: #c6baf5;
-      --hand: #bd4f0b; --hand-soft: #fff0e4; --hand-edge: #f1c29e;
+      --hand: #ad4608; --hand-soft: #fff0e4; --hand-edge: #f1c29e;
       --model: #08776b; --model-soft: #e3f4f0; --model-edge: #9fd6cb;
       --ok: #1d7a39; --ok-soft: #e6f4ea; --ok-edge: #a7d8b4;
       --warn: #b3261e; --warn-soft: #fdeceb; --warn-edge: #f2b8b4;
+      --shadow: rgba(28, 26, 58, 0.08);
     }
     @media (prefers-color-scheme: dark) {
       svg {
@@ -19,6 +20,7 @@
         --model: #4fd3bc; --model-soft: #0f2824; --model-edge: #22635a;
         --ok: #5fd07c; --ok-soft: #10261a; --ok-edge: #245c35;
         --warn: #ff8a80; --warn-soft: #2f1416; --warn-edge: #7a2a2a;
+        --shadow: rgba(0, 0, 0, 0.4);
       }
     }
     text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif; font-size: 13px; fill: var(--ink); }
@@ -27,7 +29,7 @@
     .sub { font-size: 12px; fill: var(--muted); }
     .lbl { font-size: 11.5px; fill: var(--muted); }
     .note { font-size: 11.5px; fill: var(--muted); font-style: italic; }
-    .eyebrow { font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em; fill: var(--faint); }
+    .eyebrow { font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em; fill: var(--muted); }
     .b { font-weight: 600; }
     .mind { fill: var(--mind); } .hand { fill: var(--hand); } .model { fill: var(--model); }
     .ok { fill: var(--ok); } .warn { fill: var(--warn); } .muted { fill: var(--muted); } .faint { fill: var(--faint); }
@@ -54,16 +56,17 @@
     .track { fill: none; stroke: var(--mind); stroke-width: 2.5; stroke-linecap: round; }
     .lane { fill: none; stroke: var(--hand); stroke-width: 1.5; stroke-linecap: round; }
     .life { fill: none; stroke: var(--line); stroke-width: 1.25; stroke-dasharray: 3 4; }
-    .tick.p { fill: var(--faint); } .tick.s { fill: var(--mind); } .tick.o { fill: var(--hand); }
+    .tick.p { fill: var(--muted); } .tick.s { fill: var(--mind); } .tick.o { fill: var(--hand); }
     .bar.k-mind { fill: var(--mind-soft); stroke: var(--mind); } .bar.k-hand { fill: var(--hand-soft); stroke: var(--hand); }
     .gem.k-mind { fill: var(--mind); } .gem.k-hand { fill: var(--hand); } .gem.k-warn { fill: var(--warn); }
     .gem.k-bg { fill: var(--bg); }
+    .shadow { flood-color: var(--shadow); }
     .tip { fill: var(--wire); } .tip.k-mind { fill: var(--mind); } .tip.k-hand { fill: var(--hand); }
     .tip.k-model { fill: var(--model); } .tip.k-faint { fill: var(--faint); } .tip.k-warn { fill: var(--warn); }
   </style>
   <defs>
     <filter id="lift" x="-10%" y="-20%" width="120%" height="150%">
-      <feDropShadow dx="0" dy="1.5" stdDeviation="2" flood-color="#1c1a3a" flood-opacity="0.08"/>
+      <feDropShadow class="shadow" dx="0" dy="1.5" stdDeviation="2"/>
     </filter>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="tip" d="M0,1 L9,5 L0,9 L2.6,5 Z"/></marker>
     <marker id="a-mind" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="tip k-mind" d="M0,1 L9,5 L0,9 L2.6,5 Z"/></marker>
@@ -101,36 +104,37 @@
   <rect class="tick s" x="177.5" y="82" width="5" height="12" rx="1.5"/>
   <rect class="tick o" x="193.5" y="82" width="5" height="12" rx="1.5"/>
   <rect class="tick s" x="209.5" y="82" width="5" height="12" rx="1.5"/>
-  <rect class="tick s" x="261.5" y="82" width="5" height="12" rx="1.5"/>
-  <rect class="tick p" x="277.5" y="82" width="5" height="12" rx="1.5"/>
-  <rect class="tick p" x="301.5" y="146" width="5" height="12" rx="1.5"/>
-  <rect class="tick s" x="317.5" y="146" width="5" height="12" rx="1.5"/>
-  <rect class="tick o" x="333.5" y="146" width="5" height="12" rx="1.5"/>
-  <rect class="tick s" x="349.5" y="146" width="5" height="12" rx="1.5"/>
+  <rect class="tick o" x="261.5" y="82" width="5" height="12" rx="1.5"/>
+  <rect class="tick s" x="277.5" y="82" width="5" height="12" rx="1.5"/>
+  <rect class="tick o" x="301.5" y="146" width="5" height="12" rx="1.5"/>
+  <rect class="tick p" x="317.5" y="146" width="5" height="12" rx="1.5"/>
+  <rect class="tick s" x="333.5" y="146" width="5" height="12" rx="1.5"/>
+  <rect class="tick o" x="349.5" y="146" width="5" height="12" rx="1.5"/>
   <rect class="tick s" x="381.5" y="146" width="5" height="12" rx="1.5"/>
-  <rect class="tick p" x="397.5" y="146" width="5" height="12" rx="1.5"/>
-  <rect class="tick p" x="301.5" y="210" width="5" height="12" rx="1.5"/>
-  <rect class="tick s" x="317.5" y="210" width="5" height="12" rx="1.5"/>
-  <rect class="tick o" x="333.5" y="210" width="5" height="12" rx="1.5"/>
+  <rect class="tick o" x="397.5" y="146" width="5" height="12" rx="1.5"/>
+  <rect class="tick o" x="301.5" y="210" width="5" height="12" rx="1.5"/>
+  <rect class="tick p" x="317.5" y="210" width="5" height="12" rx="1.5"/>
+  <rect class="tick s" x="333.5" y="210" width="5" height="12" rx="1.5"/>
   <rect class="tick o" x="365.5" y="210" width="5" height="12" rx="1.5"/>
   <rect class="tick s" x="381.5" y="210" width="5" height="12" rx="1.5"/>
   <rect class="gem k-mind" x="226" y="82" width="12" height="12" rx="1.5" transform="rotate(45 232 88)"/>
   <path class="lane" d="M40,104 L512,104"/>
-  <path class="lane dash" d="M252,104 C256,140 268,168 300,168"/>
-  <path class="lane dash" d="M252,104 C256,200 268,232 300,232"/>
   <path class="lane" d="M300,168 L512,168"/>
   <path class="lane" d="M300,232 L512,232"/>
+  <circle class="gem k-hand" cx="300" cy="168" r="3.5"/>
+  <circle class="gem k-hand" cx="300" cy="232" r="3.5"/>
   <text x="296" y="141" class="note">“a haiku about rain”</text>
   <text x="296" y="205" class="note">“a haiku about the sun”</text>
-  <text x="244" y="82" class="lbl mono mind">fork</text>
-  <text x="222" y="132" class="lbl hand" text-anchor="end">a1 copies</text>
-  <text x="222" y="147" class="lbl hand" text-anchor="end">its directory</text>
+  <text x="244" y="76" class="lbl mono mind">fork</text>
+  <text x="222" y="132" class="lbl hand" text-anchor="end">first a1 clones itself,</text>
+  <text x="222" y="147" class="lbl hand" text-anchor="end">then each child starts</text>
+  <text x="222" y="162" class="lbl hand" text-anchor="end">with a copy as its a1</text>
   <text x="540" y="92" class="mono mind b">m</text>
   <text x="540" y="108" class="lbl mono"><tspan class="hand b">a1</tspan><tspan class="muted">  /tmp/a1</tspan></text>
-  <text x="540" y="156" class="mono mind b">m.k3x9q2ab</text>
-  <text x="540" y="172" class="lbl mono"><tspan class="hand b">a1</tspan><tspan class="muted">  /tmp/a1.clones/m.k3x9q2ab/a1.e847c908</tspan></text>
-  <text x="540" y="220" class="mono mind b">m.p8d1rx0q</text>
-  <text x="540" y="236" class="lbl mono"><tspan class="hand b">a1</tspan><tspan class="muted">  /tmp/a1.clones/m.p8d1rx0q/a1.3c09d1fa</tspan></text>
+  <text x="540" y="156" class="mono mind b">m.d3342iuj</text>
+  <text x="540" y="172" class="lbl mono"><tspan class="hand b">a1</tspan><tspan class="muted">  /tmp/a1.clones/m.d3342iuj/a1.e847c908</tspan></text>
+  <text x="540" y="220" class="mono mind b">m.ckj6ldqi</text>
+  <text x="540" y="236" class="lbl mono"><tspan class="hand b">a1</tspan><tspan class="muted">  /tmp/a1.clones/m.ckj6ldqi/a1.3c09d1fa</tspan></text>
 
   <!-- clone_hand and release_hand -->
   <line x1="32" y1="260" x2="848" y2="260" stroke="var(--frame)"/>
@@ -147,13 +151,13 @@
   <rect class="tick s" x="177.5" y="322" width="5" height="12" rx="1.5"/>
   <rect class="tick o" x="193.5" y="322" width="5" height="12" rx="1.5"/>
   <rect class="tick s" x="209.5" y="322" width="5" height="12" rx="1.5"/>
-  <rect class="tick s" x="269.5" y="322" width="5" height="12" rx="1.5"/>
-  <rect class="tick o" x="285.5" y="322" width="5" height="12" rx="1.5"/>
+  <rect class="tick o" x="253.5" y="322" width="5" height="12" rx="1.5"/>
+  <rect class="tick s" x="285.5" y="322" width="5" height="12" rx="1.5"/>
   <rect class="tick o" x="301.5" y="322" width="5" height="12" rx="1.5"/>
   <rect class="tick o" x="317.5" y="322" width="5" height="12" rx="1.5"/>
   <rect class="tick s" x="341.5" y="322" width="5" height="12" rx="1.5"/>
   <rect class="tick s" x="381.5" y="322" width="5" height="12" rx="1.5"/>
-  <rect class="tick p" x="453.5" y="322" width="5" height="12" rx="1.5"/>
+  <rect class="tick o" x="453.5" y="322" width="5" height="12" rx="1.5"/>
   <rect class="tick s" x="469.5" y="322" width="5" height="12" rx="1.5"/>
   <rect class="gem k-mind" x="226" y="322" width="12" height="12" rx="1.5" transform="rotate(45 232 328)"/>
   <rect class="gem k-mind" x="426" y="322" width="12" height="12" rx="1.5" transform="rotate(45 432 328)"/>
@@ -167,5 +171,5 @@
   <text x="352" y="380" class="note" text-anchor="middle">both hands at once</text>
   <text x="540" y="332" class="mono mind b">m</text>
   <text x="540" y="348" class="lbl mono"><tspan class="hand b">a1</tspan><tspan class="muted">  /tmp/a1</tspan></text>
-  <text x="540" y="364" class="lbl mono"><tspan class="hand b">a1-2</tspan><tspan class="faint">  /tmp/a1.clones/m/a1-2.b5c64f2a</tspan><tspan class="warn">  deleted</tspan></text>
+  <text x="540" y="364" class="lbl mono"><tspan class="hand b">a1-2</tspan><tspan class="muted">  /tmp/a1.clones/m/a1-2.b5c64f2a</tspan><tspan class="warn">  deleted</tspan></text>
 </svg>
