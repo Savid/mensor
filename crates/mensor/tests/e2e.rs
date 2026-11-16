@@ -91,8 +91,9 @@ impl Server {
             Some(clones.to_owned()),
             &["commands", "files", "clone"],
         );
-        let hands = InProcess::new(self.host.clone(), does.clone());
-        hands.start(name(mind), name(hand), &does).unwrap()
+        InProcess::new(self.host.clone(), does)
+            .start(name(mind), name(hand))
+            .unwrap()
     }
 
     async fn prompt(&self, mind: &str, text: &str) {
@@ -154,6 +155,7 @@ fn hand_through(
         min: Duration::from_millis(10),
         max: Duration::from_millis(50),
     };
+    config.give_up = Duration::from_millis(500);
     start(core, config)
 }
 
@@ -244,6 +246,17 @@ fn told(request: &ModelRequest) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// The one directory in `dir`: a clone's copy, `<hand>.<code>`.
+fn only_in(dir: &Path) -> std::path::PathBuf {
+    let copies: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.is_dir())
+        .collect();
+    assert_eq!(copies.len(), 1, "{copies:?}");
+    copies.into_iter().next().unwrap()
 }
 
 fn outcome<'a>(items: &'a [Item], tool_use: &str) -> &'a Outcome {
@@ -519,7 +532,7 @@ async fn a_fork_makes_a_child_that_works_in_a_copy_of_the_hand() {
         std::fs::read_to_string(dir.join("note.txt")).unwrap(),
         "parent\n"
     );
-    let copy = clones.join(child_name.as_str()).join("a1");
+    let copy = only_in(&clones.join(child_name.as_str()));
     assert_eq!(
         std::fs::read_to_string(copy.join("note.txt")).unwrap(),
         "parent\nchild\n"
@@ -571,7 +584,7 @@ async fn a_clone_joins_its_mind_works_beside_its_original_and_is_let_go() {
         outcome(&history, "tu_c"),
         &Outcome::Output(json!({"hand": "local-2"}))
     );
-    let copy = clones.join("main").join("local-2");
+    let copy = only_in(&clones.join("main"));
     assert!(stdout(outcome(&history, "tu_b")).contains("local-2"));
     assert_eq!(
         std::fs::read_to_string(dir.join("where.txt")).unwrap(),
@@ -593,13 +606,15 @@ async fn only_a_parent_makes_a_mind_with_a_child_name() {
     let server = Server::start(Config::default()).await;
     let dir = tempfile::tempdir().unwrap();
     // A hand that dials a child its parent has not made yet dials again,
-    // and starts no mind of that name.
+    // starts no mind of that name, and gives up in the end.
+    let started = Instant::now();
     let (_early, waiting) = server.hand(fresh("m.k3x9q2ab", "a1"), dir.path());
-    sleep(Duration::from_millis(150)).await;
+    let error = ended(waiting).await.unwrap_err();
     assert!(
-        !waiting.is_finished(),
-        "a child not made yet is worth another dial"
+        matches!(error, Error::Refused(Refusal::UnknownMind)),
+        "{error}"
     );
+    assert!(started.elapsed() >= Duration::from_millis(500));
     assert!(server.host.minds().await.is_empty());
 
     // A name too long to have children is refused for good.

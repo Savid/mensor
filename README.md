@@ -81,10 +81,12 @@ hand. Hand names never appear in a tool's definition, so the tools stay the
 same as hands come and go, and a model's prompt cache survives them.
 
 **A hand that is away holds up only its own calls.** They wait, unsent,
-until it is back, and an interrupt ends them as not run. A hand that dies
-while it runs a call can be let go from outside with `POST
+until it is back, and an interrupt ends them as not run. A mind whose hands
+are all away waits for one of them before it asks its model. A hand that
+dies while it runs a call can be let go from outside with `POST
 /v1/minds/{name}/release {"hand": "a1"}`: its unanswered calls are recorded
-as unknown, the turn goes on, and the hand is refused if it comes back.
+as unknown, the turn goes on, and the hand is refused if it comes back. A
+mind that has let every hand go still talks, with no tools.
 
 **A mind has up to `--max-hands` hands** (four unless set). One more is
 refused. The model is told when a hand joins, and what it can do.
@@ -112,13 +114,19 @@ capability.
   `--max-forks` minds (64 unless set), its children's forks included: each
   fork shares what remains between the mind and its children.
 - **Children work on their own.** A parent is told its children's names and
-  hears nothing more from them. A prompt the parent is given while its fork
-  runs is in the history the children share, so they see it too.
+  hears nothing more from them. A prompt the parent is given while the
+  other calls of the fork's step still run is in the history the children
+  share, so they see it too.
 
-Clones are made in `--clones` (`<dir>.clones` unless set), one directory per
-mind and one per hand within it. `mensor hand` starts each clone as a process
-of its own, with its own arguments but for its mind, its name and its
-directory. `mensor run` starts them in its own process.
+Clones are made in `--clones` (`<dir>.clones` unless set): each copy at
+`<clones>/<mind>/<hand>.<code>`, a code of its own so that nothing an earlier
+run left is in the way. A pipe, a socket or a device in the directory is
+left out of a copy, and so is every process a command left running.
+`mensor hand` starts each clone as a process of its own, in its own process
+group, with its own arguments but for its mind, its name and its directory,
+and logs it to `<copy>.log`; a clone outlives the hand that started it.
+`mensor run` starts them in its own process, and starts only `local` again
+when it restarts.
 
 ## Models
 
@@ -165,7 +173,7 @@ gives back to the system twice a minute: 300 minds awake held 244 MB, and
 12 MB once they rested. A child stores none of its parent's items again: it
 reads them through its parent.
 
-**The store is one SQLite file.** Each item is a row of `items`: its `mind`
+**The store is one SQLite file**, for one host at a time. Each item is a row of `items`: its `mind`
 and index `at`, the `time` it was stored (ms since 1970), its `kind`, the
 `key` of a prompt that has one, and the `item` itself as JSON. `GET
 /v1/minds/{name}/history?after=` answers 512 items at the most, with the

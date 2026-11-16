@@ -72,8 +72,12 @@ impl InProcess {
         Self { host, does }
     }
 
-    /// Starts the hand `hand` of the mind `mind`, doing `does`.
-    pub fn start(&self, mind: Name, hand: Name, does: &Does) -> Result<Handle, String> {
+    /// Starts the hand `hand` of the mind `mind`, doing what this one does.
+    pub fn start(&self, mind: Name, hand: Name) -> Result<Handle, String> {
+        self.start_doing(mind, hand, &self.does)
+    }
+
+    fn start_doing(&self, mind: Name, hand: Name, does: &Does) -> Result<Handle, String> {
         let spawn: Arc<dyn Spawn> = Arc::new(Self {
             host: self.host.clone(),
             does: does.clone(),
@@ -102,7 +106,7 @@ impl Spawn for InProcess {
     ) -> BoxFuture<'_, Result<Box<dyn Started>, String>> {
         Box::pin(async move {
             let does = self.does.of_clone(dir)?;
-            let handle = self.start(mind, hand, &does)?;
+            let handle = self.start_doing(mind, hand, &does)?;
             Ok(Box::new(Task(handle)) as Box<dyn Started>)
         })
     }

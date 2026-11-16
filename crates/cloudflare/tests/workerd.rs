@@ -276,9 +276,9 @@ impl Worker {
                         return Ok(());
                     }
                     let status = response.status();
-                    let hand = response.text().await.unwrap_or_default();
-                    let hand: String = hand.chars().take(300).collect();
-                    format!("{status} {kind:?}: {hand}")
+                    let body = response.text().await.unwrap_or_default();
+                    let body: String = body.chars().take(300).collect();
+                    format!("{status} {kind:?}: {body}")
                 }
                 Err(error) => error.to_string(),
             };
@@ -304,12 +304,12 @@ impl Worker {
         format!("{}/v1/minds/{mind}{rest}", self.url)
     }
 
-    async fn prompt(&self, mind: &str, hand: Value) -> (StatusCode, Value) {
+    async fn prompt(&self, mind: &str, body: Value) -> (StatusCode, Value) {
         let sent = self
             .http
             .post(self.mind(mind, "/prompt"))
             .bearer_auth(TOKEN)
-            .json(&hand);
+            .json(&body);
         let response = sent.send().await.unwrap();
         let (status, answer) = (response.status(), response.text().await.unwrap());
         let read = serde_json::from_str(&answer);

@@ -58,10 +58,17 @@ async fn main() -> ExitCode {
 /// Serves until the process is asked to stop. The hand may end before
 /// then, when its mind lets it go, and the host serves on.
 async fn run(run: Run) -> Result<(), String> {
+    if !run.mind.is_root() {
+        return Err(format!(
+            "{} cannot start a mind: a mind's name has no '.' and is at most {} bytes",
+            run.mind,
+            Name::ROOT_MAX_LEN
+        ));
+    }
     let (host, listener) = open(run.host).await?;
-    let hands = InProcess::new(host.clone(), run.does.clone());
+    let hands = InProcess::new(host.clone(), run.does);
     let local = Name::new("local").map_err(|error| error.to_string())?;
-    let hand = hands.start(run.mind, local, &run.does)?;
+    let hand = hands.start(run.mind, local)?;
     tokio::select! {
         served = host.serve(listener, std::future::pending()) => {
             served.map_err(|error| format!("the host stopped: {error}"))

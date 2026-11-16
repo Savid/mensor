@@ -1,5 +1,6 @@
 //! Running a hand: the flags, and the hand they describe.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -59,10 +60,11 @@ impl Does {
             .map_err(|error| format!("{} cannot be used: {error}", self.dir.display()))
     }
 
-    /// Where the hand's clones are made.
+    /// Where the hand's clones are made, as an absolute path.
     pub fn clones(&self) -> Result<PathBuf, String> {
         if let Some(clones) = &self.clones {
-            return Ok(clones.clone());
+            return std::path::absolute(clones)
+                .map_err(|error| format!("{} cannot be used: {error}", clones.display()));
         }
         let dir = self.dir()?;
         Ok(match dir.file_name() {
@@ -106,7 +108,7 @@ impl Does {
 /// asked to stop.
 pub async fn run(hand: Hand) -> Result<(), String> {
     let spawn: Arc<dyn Spawn> = Arc::new(Process {
-        args: std::env::args().collect(),
+        args: std::env::args_os().collect(),
         clones: hand.does.clones()?,
     });
     let capabilities = hand.does.capabilities(&spawn)?;
@@ -142,7 +144,7 @@ pub async fn alive(
 /// directory. The host's token reaches it in this process's environment,
 /// which the commands a hand runs are not given.
 struct Process {
-    args: Vec<String>,
+    args: Vec<OsString>,
     clones: PathBuf,
 }
 
@@ -157,10 +159,10 @@ impl Spawn for Process {
             let program = std::env::current_exe()
                 .map_err(|error| format!("this program cannot be found: {error}"))?;
             let set = [
-                ("--mind", mind.to_string()),
-                ("--hand", hand.to_string()),
-                ("--dir", dir.display().to_string()),
-                ("--clones", self.clones.display().to_string()),
+                ("--mind", OsString::from(mind.as_str())),
+                ("--hand", OsString::from(hand.as_str())),
+                ("--dir", dir.clone().into_os_string()),
+                ("--clones", self.clones.clone().into_os_string()),
             ];
             let args = with_flags(self.args.iter().skip(1).cloned(), &set);
             let log = log_beside(&dir)?;
@@ -196,18 +198,19 @@ fn log_beside(dir: &Path) -> Result<std::fs::File, String> {
 
 /// `args` with each flag in `set` given its value instead, whether it was
 /// written `--flag value` or `--flag=value`.
-fn with_flags(args: impl IntoIterator<Item = String>, set: &[(&str, String)]) -> Vec<String> {
+fn with_flags(args: impl IntoIterator<Item = OsString>, set: &[(&str, OsString)]) -> Vec<OsString> {
     let mut kept = Vec::new();
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
+        let text = arg.to_string_lossy();
         let named = set.iter().find(|(flag, _)| {
-            arg == *flag
-                || arg
+            text == *flag
+                || text
                     .strip_prefix(flag)
                     .is_some_and(|rest| rest.starts_with('='))
         });
         match named {
-            Some((flag, _)) if arg == *flag => {
+            Some((flag, _)) if text == *flag => {
                 args.next();
             }
             Some(_) => {}
@@ -215,7 +218,7 @@ fn with_flags(args: impl IntoIterator<Item = String>, set: &[(&str, String)]) ->
         }
     }
     for (flag, value) in set {
-        kept.push((*flag).to_owned());
+        kept.push(OsString::from(flag));
         kept.push(value.clone());
     }
     kept
@@ -237,7 +240,7 @@ mod tests {
             "--dir",
             ".",
         ]
-        .map(String::from);
+        .map(OsString::from);
         let set = [
             ("--mind", "m.k3".into()),
             ("--hand", "a1".into()),
@@ -256,6 +259,7 @@ mod tests {
                 "--dir",
                 "/c/m.k3/a1"
             ]
+            .map(OsString::from)
         );
     }
 }

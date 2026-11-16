@@ -1,6 +1,6 @@
 [package]
 name = "mensor-cloudflare"
-description = "mensor on Cloudflare Workers: each pair is one Durable Object"
+description = "mensor on Cloudflare Workers: each mind is one Durable Object"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

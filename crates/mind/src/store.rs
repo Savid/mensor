@@ -94,7 +94,7 @@ pub trait Store: Send + Sync {
     /// told from: the index its last step had seen and the items from
     /// there, or all of it from 0 when it holds no step. That is the round
     /// in progress and the prompts no step has answered, however much the
-    /// mind's mind would hold.
+    /// mind would hold.
     ///
     /// [`Mind::status`]: crate::Mind::status
     fn recent(&self, name: &Name) -> Result<(u64, Vec<Item>), StoreError> {

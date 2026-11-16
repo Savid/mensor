@@ -183,9 +183,53 @@ impl Table {
 
     /// What the tool named `name` does, and the hands that can do it: for
     /// the mind's own tools, the hands that can be cloned.
+    ///
+    /// A hand tool is also found by the name it had before hands came or
+    /// went: its operation alone, when one operation has it, or
+    /// `<capability>_<operation>`.
     pub(crate) fn find(&self, name: &str) -> Option<(&Does, &[Name])> {
-        let entry = self.entries.iter().find(|(tool, ..)| tool.name == name);
-        entry.map(|(_, does, holders)| (does, holders.as_slice()))
+        match self.find_all(name).as_slice() {
+            [only] => Some(*only),
+            _ => None,
+        }
+    }
+
+    /// Every tool `name` may mean: the one so named, or else each hand
+    /// tool it named before hands came or went, by its operation alone or
+    /// as `<capability>_<operation>`.
+    pub(crate) fn find_all(&self, name: &str) -> Vec<(&Does, &[Name])> {
+        if let Some(exact) = self.entries.iter().find(|(tool, ..)| tool.name == name) {
+            return vec![found(exact)];
+        }
+        self.entries
+            .iter()
+            .filter(|entry| {
+                operation_of(entry).is_some_and(|(capability, operation)| {
+                    operation == name
+                        || name
+                            .strip_prefix(capability)
+                            .and_then(|rest| rest.strip_prefix('_'))
+                            == Some(operation)
+                })
+            })
+            .map(found)
+            .collect()
+    }
+}
+
+/// What an entry does, and the hands that can do it.
+fn found((_, does, holders): &(Tool, Does, Vec<Name>)) -> (&Does, &[Name]) {
+    (does, holders.as_slice())
+}
+
+/// The capability and operation of a hand tool's entry.
+fn operation_of(entry: &(Tool, Does, Vec<Name>)) -> Option<(&str, &str)> {
+    match &entry.1 {
+        Does::Hand {
+            capability,
+            operation,
+        } => Some((capability, operation)),
+        Does::Mind(_) => None,
     }
 }
 

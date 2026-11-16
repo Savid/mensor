@@ -93,7 +93,7 @@ own, and forks nothing.
 | Capability | Operations | Backed by |
 | --- | --- | --- |
 | `files` | `read`, `write`, `edit`, `list` | Rows of the object's `files` table, one per file, keyed by path |
-| `fetch` | `fetch` | The platform's `fetch`. It keeps the first 256 KiB of a hand, and gives up after a minute |
+| `fetch` | `fetch` | The platform's `fetch`. It keeps the first 256 KiB of a body, and gives up after a minute |
 
 `files` is the capability a hand on a real machine has, over another
 backing, so the model sees the same four tools. A hand here runs no

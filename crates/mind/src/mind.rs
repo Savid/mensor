@@ -6,7 +6,7 @@ use mensor_protocol::{
 use serde_json::{Value, json};
 
 use crate::fork::{Fork, child_name, shares};
-use crate::tools::{CLONE, Does, MAX_CHILDREN, MindTool, Table, split};
+use crate::tools::{CLONE, Does, HAND, MAX_CHILDREN, MindTool, Table, split};
 use crate::window::{to_summarise, window};
 use crate::{Block, Content, HandRecord, Item, Message, ModelReply, ModelRequest, Outcome, Stop};
 
@@ -314,15 +314,31 @@ impl Mind {
                 if self.outcome_of(id).is_some() || self.call_of(id).is_some() {
                     continue;
                 }
-                let Some((Does::Hand { .. }, holders)) = table.find(name) else {
-                    continue;
+                // The hand a use names, or else the one it would run on. A
+                // mind told from its latest items alone may know no tools.
+                let hand = match (split(input).0, table.find(name)) {
+                    (Some(Ok(hand)), _) => Some(hand),
+                    (_, Some((Does::Hand { .. }, holders))) => {
+                        self.hand_for(None, at, holders, name).ok()
+                    }
+                    (_, Some((Does::Mind(_), cloners))) => {
+                        let mut then = cloners.iter().filter(|hand| self.had(hand, at));
+                        then.next().filter(|_| then.next().is_none()).cloned()
+                    }
+                    _ => None,
                 };
-                if let Ok(hand) = self.hand_for(split(input).0, at, holders, name)
-                    && !self.is_attached(&hand)
-                {
+                if let Some(hand) = hand.filter(|hand| !self.is_attached(hand)) {
                     waiting.insert(hand);
                 }
             }
+        }
+        // A mind with its model to ask and every hand away waits for any.
+        if waiting.is_empty() && matches!(self.next(), Next::Ask) && !self.may_ask() {
+            let hands = self
+                .hands
+                .iter()
+                .filter(|(_, hand)| hand.released.is_none());
+            waiting.extend(hands.map(|(name, _)| name.clone()));
         }
         waiting.into_iter().collect()
     }
@@ -385,6 +401,18 @@ impl Mind {
     /// mind has all the hands it may.
     pub fn attach(&mut self, hello: &Hello) -> Result<Vec<Output>, Refusal> {
         let hand = hello.hand.clone();
+        // Every tool's `hand` names the hand that runs it, so an operation
+        // that takes one of its own could never be given it.
+        let operations = hello
+            .capabilities
+            .iter()
+            .flat_map(|capability| &capability.operations);
+        if operations
+            .into_iter()
+            .any(|operation| operation.input["properties"].get(HAND).is_some())
+        {
+            return Err(Refusal::Protocol);
+        }
         match self.hands.get(&hand) {
             Some(known) if known.released.is_some() => return Err(Refusal::Released),
             None if self.unreleased() >= self.settings.max_hands => return Err(Refusal::Limit),
@@ -413,12 +441,15 @@ impl Mind {
                     self.took(id, tool_use, reply, &mut outputs);
                     continue;
                 }
-                Settled::Unknown if plan.new_boot => Outcome::Unknown(
-                    "the hand restarted after it was sent this call, and remembers nothing of it"
-                        .into(),
-                ),
+                Settled::Unknown if plan.new_boot => {
+                    let why = "the hand restarted after it was sent this call, and remembers nothing of it";
+                    self.unknown(id, tool_use, why, &mut outputs);
+                    continue;
+                }
                 Settled::Unknown => {
-                    Outcome::Unknown("the hand read this call but holds no result for it".into())
+                    let why = "the hand read this call but holds no result for it";
+                    self.unknown(id, tool_use, why, &mut outputs);
+                    continue;
                 }
                 Settled::Wait => {
                     if interrupted {
@@ -746,9 +777,7 @@ impl Mind {
                     };
                     self.append(item, outputs);
                 }
-                Next::Ask
-                    if self.asking.is_none() && self.hands.values().any(|hand| hand.attached) =>
-                {
+                Next::Ask if self.asking.is_none() && self.may_ask() => {
                     let (request, summary) = self.request();
                     self.asking = Some(Asking {
                         seen: request.seen,
@@ -818,6 +847,15 @@ impl Mind {
                     })
                     .collect();
                 if into.iter().all(|(mind, _)| *mind == self.name) {
+                    // The clone is this mind's hand from now on: tool uses
+                    // for it wait until it says hello.
+                    for (_, clone) in &into {
+                        let item = Item::Cloned {
+                            hand: clone.clone(),
+                            from: hand.clone(),
+                        };
+                        self.append(item, outputs);
+                    }
                     let clone = into.first().map(|(_, clone)| clone);
                     Outcome::Output(json!({ "hand": clone }))
                 } else {
@@ -865,10 +903,16 @@ impl Mind {
             .rposition(|item| matches!(item, Item::Call { id: of, .. } if *of == id));
         let inherited = self.before + index(at.map_or(self.items.len(), |at| at + 1));
         let (share, kept) = shares(self.forks_left, index(children.len()));
+        // The hands the child shares the history of, as they were at the
+        // clone call: every one but the cloned stays with the parent.
         let others: Vec<Name> = self
             .hands
             .iter()
-            .filter(|(name, known)| *name != hand && known.released.is_none())
+            .filter(|(name, known)| {
+                *name != hand
+                    && known.joined < inherited
+                    && known.released.is_none_or(|released| released >= inherited)
+            })
             .map(|(name, _)| name.clone())
             .collect();
         for (child, prompt) in children.iter().zip(prompts) {
@@ -905,16 +949,55 @@ impl Mind {
         self.append(Item::Forks { left: kept }, outputs);
     }
 
+    /// Stores a call's outcome as unknown. A clone that may have been made
+    /// is told as such: a fork's children may exist, so the model is told
+    /// their names, and their share of the budget is spent.
+    fn unknown(&mut self, id: CallId, tool_use: String, why: &str, outputs: &mut Vec<Output>) {
+        let into = self.round().iter().find_map(|item| match item {
+            Item::Call {
+                id: of,
+                capability,
+                input,
+                ..
+            } if *of == id && capability == CLONE => Some(input["into"].clone()),
+            _ => None,
+        });
+        let children: Vec<&str> = into
+            .iter()
+            .flat_map(|into| into.as_array().into_iter().flatten())
+            .filter_map(|target| target["mind"].as_str())
+            .filter(|mind| *mind != self.name.as_str())
+            .collect();
+        let outcome = if children.is_empty() {
+            Outcome::Unknown(why.into())
+        } else {
+            Outcome::Unknown(format!(
+                "{why}; it may have made the child minds {}, which then work on their own",
+                children.join(", ")
+            ))
+        };
+        let charged = index(children.len());
+        let item = Item::Outcome {
+            tool_use,
+            call: Some(id),
+            outcome,
+        };
+        self.append(item, outputs);
+        if charged > 0 {
+            let (_, kept) = shares(self.forks_left, charged);
+            self.append(Item::Forks { left: kept }, outputs);
+        }
+    }
+
     fn release_hand(&mut self, hand: &Name, reason: &str, outputs: &mut Vec<Output>) {
         for (id, of, tool_use) in self.pending() {
             if of == *hand {
-                let outcome = Outcome::Unknown("the hand was released before it answered".into());
-                let item = Item::Outcome {
+                self.unknown(
+                    id,
                     tool_use,
-                    call: Some(id),
-                    outcome,
-                };
-                self.append(item, outputs);
+                    "the hand was released before it answered",
+                    outputs,
+                );
             }
         }
         let item = Item::Released {
@@ -994,6 +1077,13 @@ impl Mind {
             if self.outcome_of(id).is_some() {
                 continue;
             }
+            // A use that became a call is the call's, whatever the tools are
+            // called now: it waits for its result on its hand.
+            if let Some(hand) = self.called(id) {
+                busy.insert(hand);
+                waiting = true;
+                continue;
+            }
             let skip = |why: String| {
                 Some(Next::Skip {
                     tool_use: id.clone(),
@@ -1003,7 +1093,8 @@ impl Mind {
             if stop != Stop::ToolUse {
                 return skip("the model stopped before it finished asking for this call".into());
             }
-            let Some((does, holders)) = table.find(name) else {
+            let (named, rest) = split(input);
+            let Some((does, holders)) = self.meant(&table, name, named.as_ref(), at) else {
                 return skip(format!("there is no tool named {name}"));
             };
             match does {
@@ -1013,15 +1104,11 @@ impl Mind {
                     capability,
                     operation,
                 } => {
-                    let (named, rest) = split(input);
                     let hand = match self.hand_for(named, at, holders, name) {
                         Ok(hand) => hand,
                         Err(why) => return skip(why),
                     };
-                    if self.call_of(id).is_some()
-                        || busy.contains(&hand)
-                        || !self.is_attached(&hand)
-                    {
+                    if busy.contains(&hand) || !self.is_attached(&hand) {
                         busy.insert(hand);
                         waiting = true;
                         continue;
@@ -1039,15 +1126,15 @@ impl Mind {
         // The mind's own tool runs once every other tool of its step has
         // ended, so nothing runs on any hand while one is cloned.
         match own {
-            Some((id, _, _)) if waiting || self.call_of(id).is_some() => Some(Next::Await),
-            Some((id, tool, input)) => Some(self.own(id, tool, input, &table)),
-            None if waiting => Some(Next::Await),
+            _ if waiting => Some(Next::Await),
+            Some((id, tool, input)) => Some(self.own(id, tool, input, at, &table)),
             None => None,
         }
     }
 
-    /// What the mind's own tool `tool`, used as `id` with `input`, does next.
-    fn own(&self, id: &str, tool: MindTool, input: &Value, table: &Table) -> Next {
+    /// What the mind's own tool `tool`, used as `id` with `input` in the
+    /// step at `step_at`, does next.
+    fn own(&self, id: &str, tool: MindTool, input: &Value, step_at: usize, table: &Table) -> Next {
         let skip = |why: String| Next::Skip {
             tool_use: id.to_owned(),
             why,
@@ -1078,10 +1165,13 @@ impl Mind {
                     self.hands_line()
                 ));
             }
-            None => match cloners {
-                [only] => only.clone(),
-                _ => return skip(format!("say which hand to clone: {listed}")),
-            },
+            None => {
+                let mut then = cloners.iter().filter(|hand| self.had(hand, step_at));
+                match (then.next(), then.next()) {
+                    (Some(only), None) => only.clone(),
+                    _ => return skip(format!("say which hand to clone: {listed}")),
+                }
+            }
         };
         if !cloners.contains(&hand) {
             return skip(format!(
@@ -1147,28 +1237,28 @@ impl Mind {
             Some(Ok(hand)) => hand,
             Some(Err(bad)) => {
                 return Err(format!(
-                    "{bad} is not the name of a hand. {}",
-                    self.hands_line()
+                    "{bad} is not the name of a hand. These hands can do {tool}: {}.",
+                    join(holders)
                 ));
             }
             None => {
-                let step = self.before + index(step_at);
-                let mut then = self.hands.iter().filter(|(_, hand)| {
-                    hand.joined < step && hand.released.is_none_or(|released| released > step)
-                });
+                let mut then = self.hands.keys().filter(|hand| self.had(hand, step_at));
                 match (then.next(), then.next()) {
-                    (Some((only, _)), None) => only.clone(),
+                    (Some(only), None) => only.clone(),
                     (None, _) => return Err("there was no hand to run this".into()),
                     (Some(_), Some(_)) => {
-                        return Err(format!("say which hand runs this. {}", self.hands_line()));
+                        return Err(format!(
+                            "say which hand runs this. These hands can do {tool}: {}.",
+                            join(holders)
+                        ));
                     }
                 }
             }
         };
         if !self.is_known(&hand) {
             return Err(format!(
-                "there is no hand named {hand}. {}",
-                self.hands_line()
+                "there is no hand named {hand}. These hands can do {tool}: {}.",
+                join(holders)
             ));
         }
         if !holders.contains(&hand) {
@@ -1178,6 +1268,41 @@ impl Mind {
             ));
         }
         Ok(hand)
+    }
+
+    /// The tool a use named `name` means. A name that hands coming or going
+    /// have made mean more than one tool means the one of the hand the use
+    /// names, or of the one hand the mind had when the step was stored.
+    fn meant<'t>(
+        &self,
+        table: &'t Table,
+        name: &str,
+        named: Option<&Result<Name, String>>,
+        step_at: usize,
+    ) -> Option<(&'t Does, &'t [Name])> {
+        let found = table.find_all(name);
+        if let [only] = found.as_slice() {
+            return Some(*only);
+        }
+        let hand = if let Some(Ok(hand)) = named {
+            hand.clone()
+        } else {
+            let mut then = self.hands.keys().filter(|hand| self.had(hand, step_at));
+            then.next().filter(|_| then.next().is_none()).cloned()?
+        };
+        let mut theirs = found
+            .into_iter()
+            .filter(|(_, holders)| holders.contains(&hand));
+        theirs.next().filter(|_| theirs.next().is_none())
+    }
+
+    /// Whether the mind had `hand`, not released, when the step at `step_at`
+    /// was stored.
+    fn had(&self, hand: &Name, step_at: usize) -> bool {
+        let step = self.before + index(step_at);
+        self.hands.get(hand).is_some_and(|hand| {
+            hand.joined < step && hand.released.is_none_or(|released| released > step)
+        })
     }
 
     /// The hands, as a tool use that named a wrong one is told them.
@@ -1206,6 +1331,14 @@ impl Mind {
                     .map_or(true, |name| !self.hands.contains_key(name))
             })?
             .ok()
+    }
+
+    /// Whether the mind may ask its model: while a hand is connected, or
+    /// once it has let every hand it had go. A mind that has never had a
+    /// hand waits for its first.
+    fn may_ask(&self) -> bool {
+        self.hands.values().any(|hand| hand.attached)
+            || (!self.hands.is_empty() && self.unreleased() == 0)
     }
 
     fn is_known(&self, hand: &Name) -> bool {
@@ -1329,6 +1462,16 @@ impl Mind {
         })
     }
 
+    /// The hand a tool use's call went to, while the call has no outcome.
+    fn called(&self, tool_use: &str) -> Option<Name> {
+        self.round().iter().find_map(|item| match item {
+            Item::Call {
+                hand, tool_use: of, ..
+            } if of == tool_use => Some(hand.clone()),
+            _ => None,
+        })
+    }
+
     fn call_of(&self, tool_use: &str) -> Option<CallId> {
         self.round().iter().find_map(|item| match item {
             Item::Call {
@@ -1421,6 +1564,23 @@ fn note(hands: &mut BTreeMap<Name, Hand>, forks_left: &mut u64, item: &Item, at:
             });
             known.record.boot.clone_from(boot);
             known.record.capabilities.clone_from(capabilities);
+        }
+        Item::Cloned { hand, from } => {
+            let capabilities = hands
+                .get(from)
+                .map(|from| from.record.capabilities.clone())
+                .unwrap_or_default();
+            hands.entry(hand.clone()).or_insert_with(|| Hand {
+                // No process of it has said hello: its first will be new.
+                record: HandRecord {
+                    boot: String::new(),
+                    capabilities,
+                    released: false,
+                },
+                attached: false,
+                joined: at,
+                released: None,
+            });
         }
         Item::Released { hand, .. } => {
             if let Some(known) = hands.get_mut(hand) {

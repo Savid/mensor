@@ -8,6 +8,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use mensor_hand::{CallFuture, Capability};
 use mensor_protocol::{CapabilityDecl, Name, OperationDecl, Reply};
@@ -110,25 +111,34 @@ impl Capability for Cloning {
 }
 
 impl Cloning {
+    /// Copies the directory once per target, then starts a hand on each
+    /// copy. Starting is quick once every copy is made, so a clone does not
+    /// wait on the copies after it for the mind it joins.
     async fn clone_into(&self, into: Vec<Target>) -> Reply {
         // Undone if this future is dropped or fails before the end.
         let mut made = Made::default();
-        let mut clones = Vec::new();
+        let mut copies = Vec::new();
         for Target { mind, hand } in into {
-            let dir = self.clones.join(mind.as_str()).join(hand.as_str());
-            if dir.exists() {
-                return Reply::Error(format!("{} already exists", dir.display()));
-            }
+            // A directory of its own, whatever another run left here.
+            let dir = self
+                .clones
+                .join(mind.as_str())
+                .join(format!("{hand}.{}", suffix()));
             made.dirs.push(dir.clone());
             let (from, to, skip) = (self.directory.clone(), dir.clone(), self.clones.clone());
-            let copied = tokio::task::spawn_blocking(move || copy_tree(&from, &to, &skip)).await;
-            match copied {
-                Ok(Ok(())) => {}
+            let stop = Arc::clone(&made.stop);
+            let ended =
+                tokio::task::spawn_blocking(move || copy_tree(&from, &to, &skip, &stop)).await;
+            match ended {
+                Ok(Ok(())) => copies.push((mind, hand, dir)),
                 Ok(Err(error)) => {
                     return Reply::Error(format!("the directory could not be copied: {error}"));
                 }
                 Err(error) => return Reply::Error(format!("the copy stopped: {error}")),
             }
+        }
+        let mut clones = Vec::new();
+        for (mind, hand, dir) in copies {
             match self
                 .spawn
                 .spawn(mind.clone(), hand.clone(), dir.clone())
@@ -146,12 +156,29 @@ impl Cloning {
     }
 }
 
+/// Eight random hex characters.
+fn suffix() -> String {
+    let mut bytes = [0u8; 4];
+    let _ = getrandom::fill(&mut bytes);
+    bytes
+        .iter()
+        .fold(String::with_capacity(8), |mut hex, byte| {
+            use std::fmt::Write;
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        })
+}
+
 /// What a clone has made so far. Dropped before it is kept, it undoes all
-/// of it, so a clone makes every copy or none, failed or cancelled.
+/// of it, so a clone makes every copy or none, failed or cancelled: it
+/// stops a copy still being made, stops the hands it started, and removes
+/// the copies and their logs.
 #[derive(Default)]
 struct Made {
     dirs: Vec<PathBuf>,
     started: Vec<Box<dyn Started>>,
+    /// Tells a copy still being made to stop, and remove what it made.
+    stop: Arc<AtomicBool>,
     kept: bool,
 }
 
@@ -166,29 +193,58 @@ impl Drop for Made {
         if self.kept {
             return;
         }
+        self.stop.store(true, Ordering::Relaxed);
         for started in self.started.drain(..) {
             started.stop();
         }
-        for dir in &self.dirs {
-            let _ = std::fs::remove_dir_all(dir);
+        let dirs = std::mem::take(&mut self.dirs);
+        let remove = move || {
+            for dir in dirs {
+                let _ = std::fs::remove_dir_all(&dir);
+                let mut log = dir.into_os_string();
+                log.push(".log");
+                let _ = std::fs::remove_file(PathBuf::from(log));
+            }
+        };
+        // Off the runtime's threads, where there is one: a large copy takes
+        // a while to remove.
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => drop(runtime.spawn_blocking(remove)),
+            Err(_) => remove(),
         }
     }
 }
 
 /// Copies the tree at `from` to `to`, which must not exist, leaving out
-/// `skip` if it is inside it. Links are copied as links.
-fn copy_tree(from: &Path, to: &Path, skip: &Path) -> std::io::Result<()> {
+/// `skip` if it is inside it, until `stop` is set. What was copied is
+/// removed again if the copy fails or is stopped.
+fn copy_tree(from: &Path, to: &Path, skip: &Path, stop: &AtomicBool) -> std::io::Result<()> {
     std::fs::create_dir_all(skip)?;
     let skip = std::fs::canonicalize(skip)?;
+    if skip == std::fs::canonicalize(from)? {
+        return Err(std::io::Error::other(
+            "the clones directory is the hand's own directory",
+        ));
+    }
     if let Some(parent) = to.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    copy_dir(from, to, &skip)
+    let copied = copy_dir(from, to, &skip, stop);
+    if copied.is_err() {
+        let _ = std::fs::remove_dir_all(to);
+    }
+    copied
 }
 
-fn copy_dir(from: &Path, to: &Path, skip: &Path) -> std::io::Result<()> {
+/// Copies a directory: files, links as links, and directories with their
+/// permissions. A pipe, a socket or a device is no file to copy, and is
+/// left out.
+fn copy_dir(from: &Path, to: &Path, skip: &Path, stop: &AtomicBool) -> std::io::Result<()> {
     std::fs::create_dir(to)?;
     for entry in std::fs::read_dir(from)? {
+        if stop.load(Ordering::Relaxed) {
+            return Err(std::io::Error::other("the clone was stopped"));
+        }
         let entry = entry?;
         let (source, target) = (entry.path(), to.join(entry.file_name()));
         let kind = entry.file_type()?;
@@ -196,13 +252,13 @@ fn copy_dir(from: &Path, to: &Path, skip: &Path) -> std::io::Result<()> {
             std::os::unix::fs::symlink(std::fs::read_link(&source)?, &target)?;
         } else if kind.is_dir() {
             if std::fs::canonicalize(&source)? != skip {
-                copy_dir(&source, &target, skip)?;
+                copy_dir(&source, &target, skip, stop)?;
             }
-        } else {
+        } else if kind.is_file() {
             std::fs::copy(&source, &target)?;
         }
     }
-    Ok(())
+    std::fs::set_permissions(to, std::fs::metadata(from)?.permissions())
 }
 
 #[cfg(test)]
@@ -277,7 +333,15 @@ mod tests {
             panic!("{reply:?}");
         };
         assert_eq!(output["clones"].as_array().unwrap().len(), 2);
-        let copy = root.path().join("clones/m.b/a1");
+        let copy = PathBuf::from(output["clones"][1]["dir"].as_str().unwrap());
+        assert!(copy.starts_with(root.path().join("clones/m.b")));
+        assert!(
+            copy.file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("a1.")
+        );
         assert_eq!(
             std::fs::read_to_string(copy.join("src/main.rs")).unwrap(),
             "fn main() {}"
@@ -303,20 +367,62 @@ mod tests {
             "{reply:?}"
         );
         assert_eq!(*spawner.stopped.lock().unwrap(), ["m.a/a1"]);
-        assert!(!root.path().join("clones/m.a/a1").exists());
-        assert!(!root.path().join("clones/m.b/a1").exists());
+        eventually_empty(&root.path().join("clones/m.a")).await;
+        eventually_empty(&root.path().join("clones/m.b")).await;
+    }
+
+    /// Waits until `dir` holds nothing: removal happens off the runtime.
+    async fn eventually_empty(dir: &Path) {
+        for _ in 0..200 {
+            if std::fs::read_dir(dir).map_or(true, |mut entries| entries.next().is_none()) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("{} still holds something", dir.display());
     }
 
     #[tokio::test]
-    async fn a_clone_into_a_copy_that_exists_is_refused() {
+    async fn a_clone_runs_again_beside_what_an_earlier_one_left() {
         let (root, cloning, _) = hand(Spawner::default());
-        std::fs::create_dir_all(root.path().join("clones/m.a/a1")).unwrap();
-        let reply = cloning.call("clone", into(&[("m.a", "a1")])).await;
-        assert!(matches!(&reply, Reply::Error(error) if error.contains("already exists")));
-        assert!(
-            root.path().join("clones/m.a/a1").exists(),
-            "what was there is kept"
+        let first = cloning.call("clone", into(&[("m.a", "a1")])).await;
+        let again = cloning.call("clone", into(&[("m.a", "a1")])).await;
+        let dir = |reply: &Reply| match reply {
+            Reply::Output(output) => output["clones"][0]["dir"].as_str().unwrap().to_owned(),
+            Reply::Error(error) => panic!("{error}"),
+        };
+        assert_ne!(dir(&first), dir(&again));
+        assert_eq!(
+            std::fs::read_dir(root.path().join("clones/m.a"))
+                .unwrap()
+                .count(),
+            2
         );
+    }
+
+    #[tokio::test]
+    async fn what_is_no_file_is_left_out_and_permissions_are_kept() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (root, cloning, _) = hand(Spawner::default());
+        let work = root.path().join("work");
+        let piped = std::process::Command::new("mkfifo")
+            .arg(work.join("pipe"))
+            .status()
+            .unwrap();
+        assert!(piped.success());
+        std::fs::set_permissions(work.join("src"), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let reply = cloning.call("clone", into(&[("m.a", "a1")])).await;
+        let Reply::Output(output) = reply else {
+            panic!("{reply:?}");
+        };
+        let copy = PathBuf::from(output["clones"][0]["dir"].as_str().unwrap());
+        assert!(!copy.join("pipe").exists());
+        let bits = std::fs::metadata(copy.join("src"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(bits & 0o777, 0o700);
     }
 
     #[tokio::test]
@@ -326,7 +432,23 @@ mod tests {
         let spawner = Arc::new(Spawner::default());
         let cloning = Cloning::new(root.path(), root.path().join(".clones"), spawner);
         let reply = cloning.call("clone", into(&[("m.a", "a1")])).await;
-        assert!(matches!(reply, Reply::Output(_)), "{reply:?}");
-        assert!(!root.path().join(".clones/m.a/a1/.clones").exists());
+        let Reply::Output(output) = reply else {
+            panic!("{reply:?}");
+        };
+        let copy = PathBuf::from(output["clones"][0]["dir"].as_str().unwrap());
+        assert!(copy.join("notes.txt").exists());
+        assert!(!copy.join(".clones").exists());
+    }
+
+    #[tokio::test]
+    async fn clones_kept_in_the_directory_itself_are_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let spawner = Arc::new(Spawner::default());
+        let cloning = Cloning::new(root.path(), root.path(), spawner);
+        let reply = cloning.call("clone", into(&[("m.a", "a1")])).await;
+        assert!(
+            matches!(&reply, Reply::Error(error) if error.contains("own directory")),
+            "{reply:?}"
+        );
     }
 }

@@ -158,7 +158,7 @@ A hand dials again only after one that is not final.
 | 4002 | The mind is a fork's child that is not made yet | no: the hand dials again, and gives up after 2 minutes |
 | 4003 | A newer connection has this mind and hand | yes |
 | 4004 | The mind released this hand | yes: the hand's process ends |
-| 4005 | A new mind's name has a `.`, or is longer than 55 bytes | yes |
+| 4005 | A new mind's name is longer than 55 bytes | yes |
 
 ## Limits
 

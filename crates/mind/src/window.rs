@@ -136,6 +136,7 @@ fn conversation(
             | Item::Call { .. }
             | Item::Attached { .. }
             | Item::Released { .. }
+            | Item::Cloned { .. }
             | Item::Forks { .. }
             | Item::Failed { .. }
             | Item::Summary { .. } => {}

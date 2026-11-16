@@ -74,6 +74,15 @@ pub enum Item {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         capabilities: Vec<CapabilityDecl>,
     },
+    /// A clone of a hand was made into this mind. It is the mind's hand
+    /// from now on, able to do what its original could, and joins when it
+    /// says hello.
+    Cloned {
+        /// The clone.
+        hand: Name,
+        /// The hand it is a clone of.
+        from: Name,
+    },
     /// A hand is no longer the mind's. Its calls are settled, and it is
     /// refused if it says hello again.
     Released {
@@ -146,6 +155,7 @@ impl Item {
             Self::Call { .. } => "call",
             Self::Outcome { .. } => "outcome",
             Self::Attached { .. } => "attached",
+            Self::Cloned { .. } => "cloned",
             Self::Released { .. } => "released",
             Self::Forks { .. } => "forks",
             Self::Paused { .. } => "paused",

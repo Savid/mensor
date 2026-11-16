@@ -186,10 +186,14 @@ impl Driver {
             let hello = self.core.hello(self.config.capabilities.declare());
             let ended = match self.config.dial.dial(hello).await {
                 Ok(link) => {
-                    attempt = 0;
-                    refused_since = None;
-                    tracing::info!(%mind, %hand, "connected to the mind's host");
-                    self.serve(link).await
+                    tracing::debug!(%mind, %hand, "dialled the mind's host");
+                    let ended = self.serve(link).await;
+                    // A connection the host ends with a refusal was never
+                    // taken: the backoff goes on.
+                    if !matches!(ended, Ended::Refused(_)) {
+                        attempt = 0;
+                    }
+                    ended
                 }
                 Err(DialError::Fail(error)) => return Err(error),
                 Err(DialError::Refused(refusal)) => Ended::Refused(refusal),
@@ -198,6 +202,11 @@ impl Driver {
                     Ended::Dropped
                 }
             };
+            // Only refusals one after another count toward giving up: a
+            // host that was away is no reason to.
+            if !matches!(ended, Ended::Refused(_)) {
+                refused_since = None;
+            }
             let ended = match ended {
                 Ended::Refused(Refusal::Released) => {
                     tracing::info!(%mind, %hand, "the mind let this hand go");
@@ -238,6 +247,15 @@ impl Driver {
             tokio::select! {
                 incoming = link.receive() => match incoming {
                     Incoming::Message(message) => {
+                        // Calls that ended first are told first, so that a
+                        // cancel never overtakes a call that has ended.
+                        while let Ok((id, reply)) = self.finished.try_recv() {
+                            if let Some(result) = self.finish(id, reply)
+                                && link.send(FromHand::Result(result)).await.is_err()
+                            {
+                                return Ended::Dropped;
+                            }
+                        }
                         for effect in self.core.receive(message) {
                             if let Some(send) = self.perform(effect)
                                 && link.send(send).await.is_err()
@@ -346,6 +364,17 @@ impl Driver {
                 }
                 Some(Ended::Stopped)
             }
+        }
+    }
+}
+
+impl Drop for Driver {
+    /// A hand that ends, released or refused, stops what it runs. In a
+    /// process of its own that ends with it anyway; in its host's process
+    /// it would not.
+    fn drop(&mut self) {
+        for (_, task) in self.tasks.drain() {
+            task.abort();
         }
     }
 }

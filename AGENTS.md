@@ -45,7 +45,7 @@ While iterating, test the crate you touched: `cargo test -p mensor-mind`.
   that does the work. What can be decided without the platform goes in
   `crates/object` or in `crates/cloudflare/src/api.rs`, where a native test
   reaches it; `tests/workerd.rs` covers what only the runtime shows.
-- `crates/api` holds the hands of the HTTP API's requests and answers.
+- `crates/api` holds the bodies of the HTTP API's requests and answers.
   Both hosts serve them, so a change to one is a change to both: neither
   host declares a shape of its own.
 - A mind's host calls its store through `blocking` (`mind-host/src/task.rs`),
@@ -56,7 +56,7 @@ While iterating, test the crate you touched: `cargo test -p mensor-mind`.
   request is written from structs that borrow the conversation, never
   through a `serde_json::Value` of it. Every request is streamed: a host
   hands the bytes to a `Reading`, which puts the events back together as
-  the hand an unstreamed answer has, so each API has one reader of replies.
+  the body an unstreamed answer has, so each API has one reader of replies.
 - What a mind tells those following it (its history grew, its model wrote
   this) goes down one ordered channel per follower, so the text of a reply
   is always told before the step that holds it. Keep it one channel.
@@ -78,7 +78,8 @@ While iterating, test the crate you touched: `cargo test -p mensor-mind`.
 - A transport is two halves. A hand reaches its mind through a
   `mensor_hand_host::Dial`, which returns a `Link`. A mind's host takes a
   hand through `Host::connect`, which returns a `Connection`. The WebSocket
-  is one pair; `crates/mensor/src/local.rs` joins the two in memory.
+  joins the two halves over a network; `crates/mensor/src/local.rs` joins
+  them in memory.
 - A mind's host performs `Output::Append` and `Output::Fork` before any
   output after them. Never send what is not stored, and never store a fork
   before its children are made.
@@ -165,7 +166,7 @@ While iterating, test the crate you touched: `cargo test -p mensor-mind`.
 - The host's token comes from `MENSOR_TOKEN`, never from a flag.
 - No credential goes into a history or the environment of a command the
   model runs. A new credential variable joins `CREDENTIALS` in
-  `crates/mensor/src/main.rs`.
+  `crates/mensor/src/lib.rs`.
 - `CLOUDFLARE_INCLUDE_PROCESS_ENV=true` hands a local worker every variable
   of the shell that starts it. Start it from a shell that holds only what it
   needs (`env -i`), and never write a credential to `.dev.vars`.

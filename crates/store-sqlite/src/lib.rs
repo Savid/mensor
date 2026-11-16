@@ -30,9 +30,11 @@ const SETTINGS: &str = "
     PRAGMA journal_mode = WAL;
     PRAGMA synchronous = FULL;
     PRAGMA foreign_keys = ON;
+    PRAGMA busy_timeout = 5000;
 ";
 
 const SCHEMA: &str = "
+    BEGIN;
     CREATE TABLE minds (
         made      INTEGER PRIMARY KEY AUTOINCREMENT,
         name      TEXT NOT NULL UNIQUE,
@@ -50,6 +52,7 @@ const SCHEMA: &str = "
     ) STRICT, WITHOUT ROWID;
     CREATE INDEX summaries ON items (mind, at) WHERE kind = 'summary';
     CREATE INDEX keys ON items (mind, key) WHERE key IS NOT NULL;
+    COMMIT;
 ";
 
 /// A [`Store`] in one `SQLite` database.
@@ -722,7 +725,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("old.sqlite");
         let old = Connection::open(&path).unwrap();
-        old.execute_batch("CREATE TABLE items (pair TEXT, at INTEGER, item TEXT)")
+        old.execute_batch("CREATE TABLE items (owner TEXT, at INTEGER, item TEXT)")
             .unwrap();
         drop(old);
         let refused = SqliteStore::open(&path).unwrap_err();
