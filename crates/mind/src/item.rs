@@ -36,9 +36,9 @@ pub enum Item {
         #[serde(default)]
         usage: Usage,
     },
-    /// A call to the body, stored before it is sent.
+    /// A call to the hand, stored before it is sent.
     Call {
-        /// The call's id, as the body knows it.
+        /// The call's id, as the hand knows it.
         id: CallId,
         /// The model's tool use this call carries out.
         tool_use: String,
@@ -59,7 +59,7 @@ pub enum Item {
         /// What happened.
         outcome: Outcome,
     },
-    /// A body process the mind had not recorded said hello.
+    /// A hand process the mind had not recorded said hello.
     Attached {
         /// That process's boot.
         boot: String,
@@ -90,7 +90,7 @@ pub enum Item {
         /// The index a mind starts from: that of the first item the steps
         /// before the summary had not seen.
         from: u64,
-        /// The body process the history last recorded, if it had one.
+        /// The hand process the history last recorded, if it had one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         boot: Option<String>,
         /// The id of the last call the history holds, or 0.
@@ -168,13 +168,13 @@ pub enum Stop {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
-    /// The body ran it and returned this.
+    /// The hand ran it and returned this.
     Output(Value),
-    /// The body ran it, or tried to, and it failed.
+    /// The hand ran it, or tried to, and it failed.
     Error(String),
     /// Nothing ran it, for this reason.
     NotRun(String),
-    /// The body may have run it, but no result exists, for this reason.
+    /// The hand may have run it, but no result exists, for this reason.
     Unknown(String),
 }
 
@@ -229,10 +229,10 @@ mod tests {
                 Item::Outcome {
                     tool_use: "tu_1".into(),
                     call: Some(3),
-                    outcome: Outcome::Unknown("the body restarted".into()),
+                    outcome: Outcome::Unknown("the hand restarted".into()),
                 },
                 json!({"type": "outcome", "toolUse": "tu_1", "call": 3,
-                       "outcome": {"unknown": "the body restarted"}}),
+                       "outcome": {"unknown": "the hand restarted"}}),
             ),
             (
                 Item::Step {

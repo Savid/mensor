@@ -3,7 +3,7 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use mensor_body::{CallFuture, Capability};
+use mensor_hand::{CallFuture, Capability};
 use mensor_protocol::{CapabilityDecl, OperationDecl, Reply};
 use nix::sys::signal::{Signal, killpg};
 use nix::unistd::Pid;
@@ -20,9 +20,9 @@ use super::capture::Capture;
 /// running may hold its pipes open for as long as it lives.
 const DRAIN: Duration = Duration::from_millis(250);
 
-/// The `commands` capability: runs shell commands on the body's machine.
+/// The `commands` capability: runs shell commands on the hand's machine.
 ///
-/// Its one operation, `bash`, runs a command with `bash -c` in the body's
+/// Its one operation, `bash`, runs a command with `bash -c` in the hand's
 /// directory. A command that is cancelled or runs out of time is killed with
 /// everything it started. What a finished command leaves running lives on.
 #[derive(Clone, Debug)]
@@ -46,11 +46,11 @@ impl Commands {
         }
     }
 
-    /// Keeps these environment variables out of every command. A body's own
+    /// Keeps these environment variables out of every command. A hand's own
     /// credentials belong here: a command the model writes inherits whatever
-    /// the body's process has. This removes them from a command's
+    /// the hand's process has. This removes them from a command's
     /// environment only. It is no sandbox, and a command may still be able
-    /// to read them from the body's process where the machine allows it.
+    /// to read them from the hand's process where the machine allows it.
     #[must_use]
     pub fn hide(mut self, names: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.hidden.extend(names.into_iter().map(Into::into));
@@ -111,7 +111,7 @@ impl Capability for Commands {
             if operation != "bash" {
                 return Reply::Error(format!("commands has no operation named {operation}"));
             }
-            match mensor_body::input::<Bash>(&operation, input) {
+            match mensor_hand::input::<Bash>(&operation, input) {
                 Ok(bash) => self.bash(bash).await,
                 Err(reply) => reply,
             }

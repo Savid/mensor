@@ -1,9 +1,9 @@
-//! A body can dial a `wss://` address.
+//! A hand can dial a `wss://` address.
 
 use std::time::Duration;
 
-use mensor_body::{Capabilities, Core, Limits};
-use mensor_body_host::{Backoff, Config, WebSocket, boot, start};
+use mensor_hand::{Capabilities, Core, Limits};
+use mensor_hand_host::{Backoff, Config, WebSocket, boot, start};
 use mensor_protocol::Name;
 use tokio::net::TcpListener;
 
@@ -30,16 +30,16 @@ async fn a_tls_dial_that_fails_is_tried_again() {
         min: Duration::from_millis(5),
         max: Duration::from_millis(20),
     };
-    let (body, task) = start(core, config);
+    let (hand, task) = start(core, config);
 
     tokio::time::timeout(Duration::from_secs(10), accepting)
         .await
-        .expect("the body dialled three times")
+        .expect("the hand dialled three times")
         .unwrap();
     assert!(
         !task.is_finished(),
         "a failed handshake is worth another dial"
     );
-    body.stop();
+    hand.stop();
     task.await.unwrap().unwrap();
 }

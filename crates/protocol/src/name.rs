@@ -3,11 +3,11 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-/// A body's name.
+/// A hand's name.
 ///
 /// A name is opaque to the mind, which neither issues nor checks one: it only
-/// asks whether it has seen the name before. Whoever starts or clones a body
-/// feeds it its name. Because a mind and its body are always a pair, the name
+/// asks whether it has seen the name before. Whoever starts or clones a hand
+/// feeds it its name. Because a mind and its hand are always a pair, the name
 /// also identifies the pair.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]

@@ -6,7 +6,7 @@ use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll, Waker};
 
-use mensor_body::{Capabilities, FileSystem, Files, FsFuture};
+use mensor_hand::{Capabilities, FileSystem, Files, FsFuture};
 use mensor_mind::{
     Block, Content, Item, ModelError, ModelReply, ModelRequest, Outcome, Settings, State, Stop,
     Usage,
@@ -224,7 +224,7 @@ fn told(request: &ModelRequest) -> Vec<(String, bool)> {
 }
 
 #[test]
-fn a_prompt_is_answered_through_the_body() {
+fn a_prompt_is_answered_through_the_hand() {
     let host = Host::new();
     host.model
         .then(vec![uses(
@@ -252,7 +252,7 @@ fn a_prompt_is_answered_through_the_body() {
         &Outcome::Output(json!("wrote 12 bytes to notes/haiku.txt"))
     );
 
-    // The model was offered the body's operations as tools, with the
+    // The model was offered the hand's operations as tools, with the
     // system prompt, and was told how its call ended.
     let requests = host.model.requests.borrow();
     let tools: Vec<_> = requests[0]
@@ -272,7 +272,7 @@ fn a_prompt_is_answered_through_the_body() {
 }
 
 #[test]
-fn an_object_opened_again_is_the_same_body_and_stores_nothing_new() {
+fn an_object_opened_again_is_the_same_hand_and_stores_nothing_new() {
     let host = Host::new();
     host.model.then(vec![says("Hello.")]);
     host.prompt("Say hello.");

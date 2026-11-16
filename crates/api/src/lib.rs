@@ -1,7 +1,7 @@
 //! The HTTP API's shapes, which every host of minds serves alike.
 //!
 //! `mensor serve` and the Cloudflare worker answer the same requests under
-//! `/v1/pairs` with the same JSON, so a client reads either the same way.
+//! `/v1/minds` with the same JSON, so a client reads either the same way.
 //! These are the bodies of those requests and answers, and the check of a
 //! bearer token. How a request is routed and how an answer is sent stay
 //! with each host.
@@ -33,7 +33,7 @@ impl Problem {
     }
 }
 
-/// The body of `POST /v1/pairs/{name}/prompt`.
+/// The body of `POST /v1/minds/{name}/prompt`.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct PromptBody {
     /// The caller's key. A prompt under a key the history already holds is
@@ -71,25 +71,25 @@ pub struct PromptReply {
     pub status: Prompted,
 }
 
-/// A pair and what it is doing: the answer to `GET /v1/pairs/{name}`.
+/// A pair and what it is doing: the answer to `GET /v1/minds/{name}`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct PairStatus {
+pub struct MindStatus {
     /// The pair and where its history begins.
     #[serde(flatten)]
     pub pair: Pair,
     /// What its mind is doing.
     pub state: State,
-    /// Whether its body is connected.
+    /// Whether its hand is connected.
     pub attached: bool,
     /// How many items its history holds.
     pub length: u64,
 }
 
-/// The most items one answer to `GET /v1/pairs/{name}/history` holds. A
+/// The most items one answer to `GET /v1/minds/{name}/history` holds. A
 /// reader carries on from the answer's `next` until an answer holds none.
 pub const PAGE: usize = 512;
 
-/// Some of a history: the answer to `GET /v1/pairs/{name}/history`.
+/// Some of a history: the answer to `GET /v1/minds/{name}/history`.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct History<'a> {
     /// The items from the cursor asked for.
@@ -110,7 +110,7 @@ impl<'a> History<'a> {
 }
 
 /// Text a model has written of a reply that is not stored yet: the data of
-/// a `writing` event, which `GET /v1/pairs/{name}/events` sends between the
+/// a `writing` event, which `GET /v1/minds/{name}/events` sends between the
 /// items of a history, with no id.
 ///
 /// A reply's text comes in pieces, in order. A piece at 0 starts a reply,
@@ -153,7 +153,7 @@ mod tests {
 
     #[test]
     fn answers_are_written_as_a_client_reads_them() {
-        let status = PairStatus {
+        let status = MindStatus {
             pair: Pair {
                 name: Name::new("a1").unwrap(),
                 origin: Origin::Root,

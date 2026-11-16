@@ -1,11 +1,11 @@
-//! The object's `SQLite` database: its history, what its body remembers, and
+//! The object's `SQLite` database: its history, what its hand remembers, and
 //! its files.
 //!
 //! The database's writes are synchronous, and the platform commits every
 //! write made between two awaits together. So an item and the work it
 //! describes are stored as one whenever nothing waits between them.
 
-use mensor_body::{Core, FileSystem, FsFuture};
+use mensor_hand::{Core, FileSystem, FsFuture};
 use mensor_mind::Item;
 use mensor_object::{Storage, StorageError, Stored, rows};
 use worker::{Date, SqlStorage, SqlStorageValue};
@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS items (
 );
 CREATE INDEX IF NOT EXISTS summaries ON items (at) WHERE kind = 'summary';
 CREATE INDEX IF NOT EXISTS keys ON items (key) WHERE key IS NOT NULL;
-CREATE TABLE IF NOT EXISTS body (id INTEGER PRIMARY KEY CHECK (id = 0), core TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS hand (id INTEGER PRIMARY KEY CHECK (id = 0), core TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS files (path TEXT PRIMARY KEY, content BLOB NOT NULL);
 ";
 
@@ -57,7 +57,7 @@ fn item(row: Vec<SqlStorageValue>) -> Result<Item, StorageError> {
         .map_err(|error| StorageError(format!("a stored item is not one: {error}")))
 }
 
-/// The history and the body's memory, in the `items` and `body` tables.
+/// The history and the hand's memory, in the `items` and `hand` tables.
 pub(crate) struct SqlStore {
     sql: SqlStorage,
     length: i64,
@@ -96,21 +96,21 @@ impl Storage for SqlStore {
         };
         let items = self.read(from, usize::MAX)?;
 
-        let body = run(&self.sql, "SELECT core FROM body", Vec::new())
+        let hand = run(&self.sql, "SELECT core FROM hand", Vec::new())
             .map_err(StorageError)?
             .into_iter()
             .next();
-        let body = match body {
+        let hand = match hand {
             Some(row) => {
                 let core = text(row.into_iter().next()).map_err(StorageError)?;
                 let core: Core = serde_json::from_str(&core).map_err(|error| {
-                    StorageError(format!("the stored body is not one: {error}"))
+                    StorageError(format!("the stored hand is not one: {error}"))
                 })?;
                 Some(core)
             }
             None => None,
         };
-        Ok(Stored { from, items, body })
+        Ok(Stored { from, items, hand })
     }
 
     fn append(&mut self, items: &[Item]) -> Result<(), StorageError> {
@@ -156,12 +156,12 @@ impl Storage for SqlStore {
         })
     }
 
-    fn keep(&mut self, body: &Core) -> Result<(), StorageError> {
-        let written = serde_json::to_string(body)
-            .map_err(|error| StorageError(format!("the body could not be written: {error}")))?;
+    fn keep(&mut self, hand: &Core) -> Result<(), StorageError> {
+        let written = serde_json::to_string(hand)
+            .map_err(|error| StorageError(format!("the hand could not be written: {error}")))?;
         run(
             &self.sql,
-            "INSERT INTO body (id, core) VALUES (0, ?) \
+            "INSERT INTO hand (id, core) VALUES (0, ?) \
              ON CONFLICT (id) DO UPDATE SET core = excluded.core",
             vec![written.into()],
         )
@@ -170,7 +170,7 @@ impl Storage for SqlStore {
     }
 }
 
-/// The body's files, one row each in the `files` table.
+/// The hand's files, one row each in the `files` table.
 pub(crate) struct SqlFiles {
     sql: SqlStorage,
 }

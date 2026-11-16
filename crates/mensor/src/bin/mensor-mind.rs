@@ -1,5 +1,5 @@
-//! Host minds: serve the endpoint bodies attach to, and the API. This is
-//! `mensor serve` alone, with nothing of a body in it.
+//! Host minds: serve the endpoint hands attach to, and the API. This is
+//! `mensor serve` alone, with nothing of a hand in it.
 
 use std::process::ExitCode;
 
@@ -10,7 +10,7 @@ use mensor::host::Hosting;
 #[command(
     name = "mensor-mind",
     version,
-    about = "Host minds: serve the endpoint bodies attach to, and the API"
+    about = "Host minds: serve the endpoint hands attach to, and the API"
 )]
 struct Cli {
     #[command(flatten)]

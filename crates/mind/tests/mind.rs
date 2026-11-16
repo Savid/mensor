@@ -194,7 +194,7 @@ fn told(tool_use: &str, text: &str) -> Content {
     }
 }
 
-/// The mind of a clone of `parent`'s body, made as a host makes it: from
+/// The mind of a clone of `parent`'s hand, made as a host makes it: from
 /// what `parent` stored, read a few items at a time and never held whole.
 fn fork(parent: &Host, hello: &Hello) -> Result<Fork, ForkError> {
     let mut made = None;
@@ -248,7 +248,7 @@ fn outcome<'a>(items: &'a [Item], tool_use: &str) -> &'a Outcome {
         .unwrap_or_else(|| panic!("no outcome for {tool_use}"))
 }
 
-/// A host whose mind has asked its body for one command and waits on it.
+/// A host whose mind has asked its hand for one command and waits on it.
 fn waiting_on_a_call() -> Host {
     let mut host = Host::new();
     host.attach(&hello("boot-1"));
@@ -323,7 +323,7 @@ fn the_calls_of_one_step_run_one_at_a_time_in_order() {
 }
 
 #[test]
-fn a_tool_the_body_lacks_does_not_run() {
+fn a_tool_the_hand_lacks_does_not_run() {
     let mut host = Host::new();
     host.attach(&hello("boot-1"));
     host.prompt("fly");
@@ -403,7 +403,7 @@ fn a_prompt_under_a_key_is_stored_once() {
 }
 
 #[test]
-fn a_mind_without_a_body_only_listens() {
+fn a_mind_without_a_hand_only_listens() {
     let mut host = Host::new();
     host.prompt("anyone there?");
     assert_eq!(host.asked(), 0);
@@ -414,7 +414,7 @@ fn a_mind_without_a_body_only_listens() {
 }
 
 #[test]
-fn a_dropped_connection_stops_new_calls_until_the_body_returns() {
+fn a_dropped_connection_stops_new_calls_until_the_hand_returns() {
     let mut host = Host::new();
     host.attach(&hello("boot-1"));
     host.prompt("list the files");
@@ -422,7 +422,7 @@ fn a_dropped_connection_stops_new_calls_until_the_body_returns() {
     host.reply(vec![bash("tu_1", "ls")]);
     assert!(
         host.sent().is_empty(),
-        "nothing is sent to a body that is gone"
+        "nothing is sent to a hand that is gone"
     );
     assert!(
         !host
@@ -436,8 +436,8 @@ fn a_dropped_connection_stops_new_calls_until_the_body_returns() {
 }
 
 #[test]
-fn a_reconnect_settles_each_call_by_what_the_body_says() {
-    // The body is still running it: wait.
+fn a_reconnect_settles_each_call_by_what_the_hand_says() {
+    // The hand is still running it: wait.
     let mut host = waiting_on_a_call();
     host.mind.detach();
     host.attach(&Hello {
@@ -450,7 +450,7 @@ fn a_reconnect_settles_each_call_by_what_the_body_says() {
     host.result(1, json!("late"));
     assert_eq!(host.last_message().content, vec![told("tu_1", "late")]);
 
-    // The body holds its result: take it, then ack.
+    // The hand holds its result: take it, then ack.
     let mut host = waiting_on_a_call();
     host.mind.detach();
     host.attach(&Hello {
@@ -461,14 +461,14 @@ fn a_reconnect_settles_each_call_by_what_the_body_says() {
     assert_eq!(host.sent(), vec![ack(&[1])]);
     assert_eq!(host.last_message().content, vec![told("tu_1", "held")]);
 
-    // The body never read it: send it again under the same id.
+    // The hand never read it: send it again under the same id.
     let mut host = waiting_on_a_call();
     host.mind.detach();
     host.attach(&hello("boot-1"));
     assert_eq!(host.sent(), vec![call(1, "ls")]);
     assert_eq!(host.asked(), 1);
 
-    // The body read it and holds nothing: unknown, and never sent again.
+    // The hand read it and holds nothing: unknown, and never sent again.
     let mut host = waiting_on_a_call();
     host.mind.detach();
     host.attach(&Hello {
@@ -481,7 +481,7 @@ fn a_reconnect_settles_each_call_by_what_the_body_says() {
     );
     assert_eq!(host.asked(), 2);
 
-    // The body restarted: unknown, and the new boot is recorded.
+    // The hand restarted: unknown, and the new boot is recorded.
     let mut host = waiting_on_a_call();
     host.mind.detach();
     host.attach(&hello("boot-2"));
@@ -618,7 +618,7 @@ fn a_clone_taken_mid_call_gets_a_mind_that_waits_for_its_own_result() {
     assert!(child.sent().is_empty());
     assert_eq!(child.mind.state(), State::Working);
 
-    // Each body finishes the command on its own, and each mind takes its own.
+    // Each hand finishes the command on its own, and each mind takes its own.
     parent.result(1, json!("parent's files"));
     child.result(1, json!("clone's files"));
     assert_eq!(
@@ -654,7 +654,7 @@ fn a_clone_that_had_finished_its_last_call_shares_what_followed_it() {
     parent.reply(vec![text("One file.")]);
 
     // The clone was copied after call 1 was acked: it has read it, and
-    // neither runs it nor holds its result. Nothing has touched the body
+    // neither runs it nor holds its result. Nothing has touched the hand
     // since, so the new mind shares the answer that followed.
     let fork = fork(&parent, &clone_of(&hello("boot-1"), 1)).unwrap();
     assert_eq!(fork.inherited, 6);
@@ -695,7 +695,7 @@ fn a_clone_shares_nothing_past_the_next_call_it_never_read() {
     parent.reply(vec![bash("tu_2", "wc -l Cargo.toml")]);
     parent.result(2, json!("12"));
 
-    // Copied after call 1 was acked, before the body read call 2.
+    // Copied after call 1 was acked, before the hand read call 2.
     let fork = fork(&parent, &clone_of(&hello("boot-1"), 1)).unwrap();
     assert_eq!(fork.inherited, 6, "up to the step that asked for call 2");
     let mut child = Host::around(fork.mind, parent.stored[..6].to_vec());
@@ -772,7 +772,7 @@ fn a_clone_that_has_read_nothing_shares_the_talk_before_the_first_call() {
     parent.prompt("list the files");
     parent.reply(vec![bash("tu_1", "ls")]);
 
-    // Copied before the body read call 1.
+    // Copied before the hand read call 1.
     let fork = fork(&parent, &clone_of(&hello("boot-1"), 0)).unwrap();
     assert_eq!(fork.inherited, 5, "everything before the call");
     let mut child = Host::around(fork.mind, parent.stored[..5].to_vec());
@@ -823,7 +823,7 @@ fn a_new_mind_numbers_its_calls_on_from_its_parents() {
 }
 
 #[test]
-fn a_body_that_read_a_call_this_mind_never_made_is_no_clone_of_it() {
+fn a_hand_that_read_a_call_this_mind_never_made_is_no_clone_of_it() {
     let parent = waiting_on_a_call();
     let stranger = clone_of(&hello("boot-1"), 99);
     assert_eq!(
@@ -909,7 +909,7 @@ fn an_interrupt_cancels_the_running_call_and_asks_no_model_after_it() {
     let mut host = waiting_on_a_call();
     host.interrupt();
     assert_eq!(host.sent(), vec![FromMind::Cancel { id: 1 }]);
-    // The body's answer to the cancel is still owed.
+    // The hand's answer to the cancel is still owed.
     assert_eq!(host.mind.state(), State::Working);
 
     let outputs = host.mind.result(CallResult {
@@ -938,7 +938,7 @@ fn an_interrupt_cancels_the_running_call_and_asks_no_model_after_it() {
 }
 
 #[test]
-fn an_interrupt_of_a_mind_whose_body_is_away_runs_none_of_what_was_asked() {
+fn an_interrupt_of_a_mind_whose_hand_is_away_runs_none_of_what_was_asked() {
     let mut host = Host::new();
     host.attach(&hello("boot-1"));
     host.prompt("list the files");
@@ -958,13 +958,13 @@ fn an_interrupt_of_a_mind_whose_body_is_away_runs_none_of_what_was_asked() {
 }
 
 #[test]
-fn a_call_interrupted_while_the_body_was_away_is_cancelled_when_it_is_back() {
+fn a_call_interrupted_while_the_hand_was_away_is_cancelled_when_it_is_back() {
     let mut host = waiting_on_a_call();
     host.mind.detach();
     host.interrupt();
     host.sent();
 
-    // The body is back, and still runs the call.
+    // The hand is back, and still runs the call.
     host.attach(&Hello {
         last_id: 1,
         running: vec![1],
@@ -983,13 +983,13 @@ fn a_call_interrupted_while_the_body_was_away_is_cancelled_when_it_is_back() {
 }
 
 #[test]
-fn a_call_the_body_never_read_does_not_run_once_its_turn_is_interrupted() {
+fn a_call_the_hand_never_read_does_not_run_once_its_turn_is_interrupted() {
     let mut host = waiting_on_a_call();
     host.mind.detach();
     host.interrupt();
     host.sent();
 
-    // The call was lost on its way: the body has read nothing.
+    // The call was lost on its way: the hand has read nothing.
     host.attach(&hello("boot-1"));
     assert!(host.sent().is_empty());
     assert!(matches!(
@@ -1061,7 +1061,7 @@ fn a_conversation_that_grew_too_long_is_summed_up_mid_turn() {
             text: "Listed the files: a.txt.".into(),
             usage: costing(120, 10),
             // The step it follows was asked for when the history held two
-            // items, and made the body's first call.
+            // items, and made the hand's first call.
             from: 2,
             boot: Some("boot-1".into()),
             last_call: 1,
@@ -1232,7 +1232,7 @@ fn a_mind_given_only_the_end_of_its_history_carries_on_as_one_given_it_all() {
     assert_eq!((host.mind.starts_at(), host.mind.length()), (2, 6));
     assert_eq!(host.mind.state(), State::Thinking);
 
-    // The summary says which body the history knew, so the same one is
+    // The summary says which hand the history knew, so the same one is
     // not recorded again, and which call was the last, so the next is new.
     host.attach(&Hello {
         last_id: 1,

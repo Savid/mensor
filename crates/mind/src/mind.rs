@@ -11,7 +11,7 @@ use crate::{Block, Content, Item, Message, ModelReply, ModelRequest, Outcome, St
 pub enum Output {
     /// Store this item at the end of the history.
     Append(Item),
-    /// Send this to the body.
+    /// Send this to the hand.
     Send(FromMind),
     /// Ask the model, and answer with [`Mind::replied`] or [`Mind::failed`].
     Ask(ModelRequest),
@@ -51,7 +51,7 @@ pub enum State {
     Idle,
     /// It has a model to ask, or is asking it.
     Thinking,
-    /// It has a call for its body, or waits on one.
+    /// It has a call for its hand, or waits on one.
     Working,
 }
 
@@ -153,7 +153,7 @@ impl Mind {
 
     /// A mind with this history, as stored: its items from index `from`,
     /// which is 0 for all of it, or else the index a store gives with a
-    /// history's tail. It does nothing until its body says hello.
+    /// history's tail. It does nothing until its hand says hello.
     pub fn load(from: u64, items: Vec<Item>, settings: Settings) -> Self {
         let mut mind = Self {
             before: from,
@@ -195,7 +195,7 @@ impl Mind {
         self.before + index(self.items.len())
     }
 
-    /// Whether a body is connected and settled.
+    /// Whether a hand is connected and settled.
     pub fn is_attached(&self) -> bool {
         self.attached
     }
@@ -253,14 +253,14 @@ impl Mind {
         })
     }
 
-    /// Takes a body's `hello` and settles every call the mind waits on.
+    /// Takes a hand's `hello` and settles every call the mind waits on.
     ///
-    /// Results the body holds are stored, calls it may have run without a
+    /// Results the hand holds are stored, calls it may have run without a
     /// result are stored as unknown, and only then is anything sent: acks for
-    /// what the body holds, and again each call it never read.
+    /// what the hand holds, and again each call it never read.
     ///
-    /// A turn interrupted while the body was away is stopped now: a call the
-    /// body never read does not run, and one it still runs is cancelled.
+    /// A turn interrupted while the hand was away is stopped now: a call the
+    /// hand never read does not run, and one it still runs is cancelled.
     pub fn attach(&mut self, hello: &Hello) -> Vec<Output> {
         let pending = self.pending();
         let ids: Vec<CallId> = pending.iter().map(|(id, _)| *id).collect();
@@ -277,11 +277,11 @@ impl Mind {
             let outcome = match settled {
                 Settled::Take(reply) => Outcome::from(reply),
                 Settled::Unknown if plan.new_boot => Outcome::Unknown(
-                    "the body restarted after it was sent this call, and remembers nothing of it"
+                    "the hand restarted after it was sent this call, and remembers nothing of it"
                         .into(),
                 ),
                 Settled::Unknown => {
-                    Outcome::Unknown("the body read this call but holds no result for it".into())
+                    Outcome::Unknown("the hand read this call but holds no result for it".into())
                 }
                 Settled::Wait => {
                     if interrupted {
@@ -290,7 +290,7 @@ impl Mind {
                     continue;
                 }
                 Settled::Resend if interrupted => Outcome::NotRun(
-                    "the turn was interrupted before the body read this call".into(),
+                    "the turn was interrupted before the hand read this call".into(),
                 ),
                 Settled::Resend => {
                     resend.push(id);
@@ -332,13 +332,13 @@ impl Mind {
         outputs
     }
 
-    /// The body's connection dropped. The mind starts nothing until the body
+    /// The hand's connection dropped. The mind starts nothing until the hand
     /// says hello again.
     pub fn detach(&mut self) {
         self.attached = false;
     }
 
-    /// Takes a result from the body. The first result for a call is stored
+    /// Takes a result from the hand. The first result for a call is stored
     /// and acked; any other is only acked.
     pub fn result(&mut self, result: CallResult) -> Vec<Output> {
         let mut outputs = Vec::new();
@@ -386,7 +386,7 @@ impl Mind {
                     error: "the model wrote no summary of the conversation".into(),
                 }
             } else {
-                // A mind carries on from the last step's prompts, the body
+                // A mind carries on from the last step's prompts, the hand
                 // the history last recorded and the last call it made.
                 let from = match self.round().first() {
                     Some(Item::Step { seen, .. }) => *seen,
@@ -434,10 +434,10 @@ impl Mind {
     /// Stops the turn.
     ///
     /// The reply to a request the model is still answering is dropped, tool
-    /// uses that had not become calls do not run, and the body is told to
+    /// uses that had not become calls do not run, and the hand is told to
     /// cancel every call it runs. The mind is then paused: it stores what
-    /// the body returns for those calls, and asks no model until it is
-    /// prompted. A body that is away is told when it next says hello. A mind
+    /// the hand returns for those calls, and asks no model until it is
+    /// prompted. A hand that is away is told when it next says hello. A mind
     /// with nothing to stop does nothing.
     pub fn interrupt(&mut self) -> Vec<Output> {
         let mut outputs = Vec::new();
@@ -531,7 +531,7 @@ impl Mind {
                     input,
                 } if self.attached => {
                     let Some(tool) = self.tools.iter().find(|tool| tool.name == name) else {
-                        let outcome = Outcome::NotRun(format!("the body has no tool named {name}"));
+                        let outcome = Outcome::NotRun(format!("the hand has no tool named {name}"));
                         self.append(
                             Item::Outcome {
                                 tool_use,
@@ -784,7 +784,7 @@ impl Mind {
             .collect()
     }
 
-    /// The body process the history last recorded. A summary says which
+    /// The hand process the history last recorded. A summary says which
     /// it was when it was written, for a mind that holds nothing older.
     pub(crate) fn recorded_boot(&self) -> Option<&str> {
         let last = self.items.iter().rev().find_map(|item| match item {

@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use mensor_body::Core;
+use mensor_hand::Core;
 use mensor_mind::{Item, prompt_under, tail_from};
 
 /// Why an object's storage could not do something.
@@ -17,11 +17,11 @@ pub struct Stored {
     /// The end of the history, oldest first: the items from the index its
     /// last summary names, or all of it when it holds no summary.
     pub items: Vec<Item>,
-    /// What the body remembered, if a body was ever kept.
-    pub body: Option<Core>,
+    /// What the hand remembered, if a hand was ever kept.
+    pub hand: Option<Core>,
 }
 
-/// Where one object keeps its history and what its body remembers.
+/// Where one object keeps its history and what its hand remembers.
 ///
 /// An object writes in a fixed order: an item is appended before anything
 /// it describes is done. A storage that commits several writes together
@@ -31,14 +31,14 @@ pub struct Stored {
 /// A storage holds every item, and an object only the end of its history,
 /// so a storage also answers what the object no longer can.
 pub trait Storage {
-    /// The end of the history, and what the body remembers.
+    /// The end of the history, and what the hand remembers.
     fn load(&mut self) -> Result<Stored, StorageError>;
 
     /// Adds these items to the end of the history.
     fn append(&mut self, items: &[Item]) -> Result<(), StorageError>;
 
-    /// Replaces what the body remembers.
-    fn keep(&mut self, body: &Core) -> Result<(), StorageError>;
+    /// Replaces what the hand remembers.
+    fn keep(&mut self, hand: &Core) -> Result<(), StorageError>;
 
     /// The history from index `from`, `limit` items of it at the most.
     fn read(&self, from: u64, limit: usize) -> Result<Vec<Item>, StorageError>;
@@ -80,8 +80,8 @@ impl Storage for MemoryStorage {
         Ok(())
     }
 
-    fn keep(&mut self, body: &Core) -> Result<(), StorageError> {
-        self.stored.borrow_mut().body = Some(body.clone());
+    fn keep(&mut self, hand: &Core) -> Result<(), StorageError> {
+        self.stored.borrow_mut().hand = Some(hand.clone());
         Ok(())
     }
 

@@ -2,13 +2,13 @@ use mensor_protocol::{CallId, Hello};
 
 use crate::{Item, Mind, Outcome, Output, Settings};
 
-/// A mind made for a cloned body.
+/// A mind made for a cloned hand.
 #[derive(Clone, Debug)]
 pub struct Fork {
     /// How many of the parent's items the new mind shares. Its own items
     /// follow from this index.
     pub inherited: u64,
-    /// The new mind, already attached to its body.
+    /// The new mind, already attached to its hand.
     pub mind: Mind,
     /// What the new mind's host must do, starting with the first items of
     /// its own.
@@ -19,7 +19,7 @@ pub struct Fork {
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ForkError {
     /// The clone has read a call its parent's mind never made, so it is not
-    /// a clone of that mind's body.
+    /// a clone of that mind's hand.
     #[error("the clone has read call {0}, which this mind never made")]
     UnknownCall(CallId),
 }
@@ -42,7 +42,7 @@ pub struct Parting {
 ///
 /// A clone whose boot the history records kept its memory, and says how far
 /// it had read. Everything up to that call is shared. What follows the call
-/// is shared too, up to the next thing that touched the body (the next
+/// is shared too, up to the next thing that touched the hand (the next
 /// call, or a new boot), unless the clone still runs the call or holds its
 /// result: then its own outcome may differ from the one the history holds,
 /// and nothing after the call is shared.
@@ -62,14 +62,14 @@ pub struct Cut {
     /// Where the clone had read to: the last call it read, or its boot if
     /// it had read none.
     read: Option<u64>,
-    /// The next thing after that to touch the body.
+    /// The next thing after that to touch the hand.
     next: Option<u64>,
     /// Each summary read: its index, and the index it names.
     summaries: Vec<(u64, u64)>,
 }
 
 impl Cut {
-    /// A search for where the body that says `hello` parted from the one
+    /// A search for where the hand that says `hello` parted from the one
     /// it is a clone of.
     pub fn new(hello: &Hello) -> Self {
         let last = hello.last_id;
@@ -134,14 +134,14 @@ impl Cut {
     }
 }
 
-/// The mind for a clone of a body, in the making.
+/// The mind for a clone of a hand, in the making.
 ///
 /// It is made from the end of the history the clone shares. If the clone
-/// has lost calls its parent's body went on to finish, a host then reads it
+/// has lost calls its parent's hand went on to finish, a host then reads it
 /// the parent's later items, a page at a time, for how those calls ended.
 ///
 /// Tool uses that had not yet become calls do not run. The new mind is then
-/// paused: it settles what its body still holds or runs, and calls no model
+/// paused: it settles what its hand still holds or runs, and calls no model
 /// until it is prompted.
 #[derive(Clone, Debug)]
 pub struct Forking {
@@ -204,7 +204,7 @@ impl Forking {
         }
     }
 
-    /// The new mind, attached to its body, and what its host must do.
+    /// The new mind, attached to its hand, and what its host must do.
     pub fn end(self) -> Fork {
         let mut mind = self.mind;
         let mut outputs = Vec::new();
@@ -233,7 +233,7 @@ impl Forking {
             None => "forked".into(),
         };
         if !self.remembers {
-            reason.push_str(", as a copy of its body made without its memory");
+            reason.push_str(", as a copy of its hand made without its memory");
         }
         mind.append(Item::Paused { reason }, &mut outputs);
         outputs.extend(mind.attach(&self.hello));

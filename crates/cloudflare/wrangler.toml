@@ -1,5 +1,5 @@
 # mensor on Cloudflare Workers. Each pair is one Durable Object: its mind,
-# its body and its files, in the object's own SQLite database.
+# its hand and its files, in the object's own SQLite database.
 name = "mensor"
 main = "build/index.js"
 compatibility_date = "2026-10-01"

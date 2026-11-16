@@ -359,7 +359,7 @@ mod tests {
                 "a",
                 Outcome::NotRun("forked before this call started".into()),
             ),
-            outcome("b", Outcome::Unknown("the body restarted".into())),
+            outcome("b", Outcome::Unknown("the hand restarted".into())),
         ];
         let Content::ToolResult {
             text: not_run,
@@ -381,7 +381,7 @@ mod tests {
         else {
             panic!("not an error result");
         };
-        assert!(unknown.contains("unknown: the body restarted") && unknown.contains("Check"));
+        assert!(unknown.contains("unknown: the hand restarted") && unknown.contains("Check"));
     }
 
     #[test]

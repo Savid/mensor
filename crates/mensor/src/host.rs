@@ -89,7 +89,7 @@ pub async fn open(hosting: Hosting) -> Result<(Host, TcpListener), String> {
     let listener = TcpListener::bind(hosting.listen)
         .await
         .map_err(|error| format!("{} could not be listened on: {error}", hosting.listen))?;
-    tracing::info!(listen = %hosting.listen, model = %hosting.model, "serving bodies and the API");
+    tracing::info!(listen = %hosting.listen, model = %hosting.model, "serving hands and the API");
     tokio::spawn(async {
         let mut every = tokio::time::interval(TRIM_EVERY);
         loop {
@@ -130,7 +130,7 @@ fn trim() {}
 /// Hosts minds until the process is asked to stop.
 pub async fn serve(hosting: Hosting) -> Result<(), String> {
     let (host, listener) = open(hosting).await?;
-    // Bodies hold their connections open, so the host does not wait for
+    // Hands hold their connections open, so the host does not wait for
     // them to finish: every history is already stored.
     tokio::select! {
         served = host.serve(listener, std::future::pending()) => {

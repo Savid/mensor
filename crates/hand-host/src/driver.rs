@@ -2,27 +2,27 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use mensor_body::{Capabilities, Core, Effect};
-use mensor_protocol::{Call, CallId, CallResult, FromBody, Name, Refusal, Reply};
+use mensor_hand::{Capabilities, Core, Effect};
+use mensor_protocol::{Call, CallId, CallResult, FromHand, Name, Refusal, Reply};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::{Instant, sleep_until};
 
 use crate::transport::{Dial, DialError, Incoming, Link};
 
-/// Asked before every dial for the name the body should have now. A clone's
+/// Asked before every dial for the name the hand should have now. A clone's
 /// answer differs from the name it holds, and it is renamed before it says
 /// hello. `None` keeps the name.
 pub type NameSource = Arc<dyn Fn() -> Option<Name> + Send + Sync>;
 
-/// How a body runs.
+/// How a hand runs.
 #[derive(Clone)]
 pub struct Config {
-    /// How the body reaches its mind.
+    /// How the hand reaches its mind.
     pub dial: Arc<dyn Dial>,
-    /// What the body can do.
+    /// What the hand can do.
     pub capabilities: Capabilities,
-    /// Asked before every dial for the body's name.
+    /// Asked before every dial for the hand's name.
     pub name: Option<NameSource>,
     /// How long to wait between dials.
     pub backoff: Backoff,
@@ -31,7 +31,7 @@ pub struct Config {
 }
 
 impl Config {
-    /// A body that reaches its mind through `dial`, with these capabilities.
+    /// A hand that reaches its mind through `dial`, with these capabilities.
     pub fn new(dial: impl Dial + 'static, capabilities: Capabilities) -> Self {
         Self {
             dial: Arc::new(dial),
@@ -78,21 +78,21 @@ impl Backoff {
     }
 }
 
-/// Why a body gave up.
+/// Why a hand gave up.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// The host's address or the token cannot be used.
     #[error("the host's address or token cannot be used: {0}")]
     Config(String),
-    /// The host turned the body away, and dialling again would not help.
-    #[error("the mind's host refused this body: {}", .0.reason())]
+    /// The host turned the hand away, and dialling again would not help.
+    #[error("the mind's host refused this hand: {}", .0.reason())]
     Refused(Refusal),
-    /// The host did not accept the body's token.
-    #[error("the mind's host did not accept this body's token")]
+    /// The host did not accept the hand's token.
+    #[error("the mind's host did not accept this hand's token")]
     Unauthorized,
 }
 
-/// A random boot for a body process that starts from nothing.
+/// A random boot for a hand process that starts from nothing.
 ///
 /// # Panics
 ///
@@ -117,14 +117,14 @@ enum Control {
     Stop,
 }
 
-/// A way to reach a running body.
+/// A way to reach a running hand.
 #[derive(Clone, Debug)]
 pub struct Handle {
     control: mpsc::UnboundedSender<Control>,
 }
 
 impl Handle {
-    /// Feeds the body a new name, because it is a clone. It drops its
+    /// Feeds the hand a new name, because it is a clone. It drops its
     /// connection and says hello again under the new name.
     pub fn rename(&self, name: Name) {
         let _ = self.control.send(Control::Rename(name));
@@ -135,7 +135,7 @@ impl Handle {
         let _ = self.control.send(Control::Redial);
     }
 
-    /// A copy of what the body remembers right now. A core started from it
+    /// A copy of what the hand remembers right now. A core started from it
     /// is a clone, once it is fed a new name.
     pub async fn snapshot(&self) -> Option<Core> {
         let (reply, answer) = oneshot::channel();
@@ -143,13 +143,13 @@ impl Handle {
         answer.await.ok()
     }
 
-    /// Stops the body. Calls it is running are dropped.
+    /// Stops the hand. Calls it is running are dropped.
     pub fn stop(&self) {
         let _ = self.control.send(Control::Stop);
     }
 }
 
-/// Starts a body on its own task.
+/// Starts a hand on its own task.
 pub fn start(core: Core, config: Config) -> (Handle, JoinHandle<Result<(), Error>>) {
     let (control, controls) = mpsc::unbounded_channel();
     let driver = Driver::new(core, config, controls);
@@ -171,9 +171,9 @@ enum Ended {
     Dropped,
     /// Dial again at once.
     Renamed,
-    /// The body was told to stop.
+    /// The hand was told to stop.
     Stopped,
-    /// The host refused the body.
+    /// The host refused the hand.
     Refused(Refusal),
 }
 
@@ -199,13 +199,13 @@ impl Driver {
             let ended = match self.dial().await {
                 Ok(link) => {
                     attempt = 0;
-                    tracing::info!(body = %self.core.name(), "connected to the mind's host");
+                    tracing::info!(hand = %self.core.name(), "connected to the mind's host");
                     self.serve(link).await
                 }
                 Err(DialError::Fail(error)) => return Err(error),
                 Err(DialError::Refused(refusal)) => Ended::Refused(refusal),
                 Err(DialError::Retry(reason)) => {
-                    tracing::debug!(body = %self.core.name(), %reason, "the dial failed");
+                    tracing::debug!(hand = %self.core.name(), %reason, "the dial failed");
                     Ended::Dropped
                 }
             };
@@ -216,7 +216,7 @@ impl Driver {
                     self.wait(wait).await
                 }
                 Ended::Refused(refusal) if !refusal.is_final() => {
-                    tracing::info!(body = %self.core.name(), reason = refusal.reason(), "refused for now");
+                    tracing::info!(hand = %self.core.name(), reason = refusal.reason(), "refused for now");
                     attempt += 1;
                     self.wait(self.config.backoff.max).await
                 }
@@ -232,7 +232,7 @@ impl Driver {
         }
     }
 
-    /// Asks for the body's name, then opens a connection and says hello.
+    /// Asks for the hand's name, then opens a connection and says hello.
     async fn dial(&mut self) -> Result<Box<dyn Link>, DialError> {
         if let Some(name) = self.config.name.as_ref().and_then(|source| source()) {
             self.core.rename(name);
@@ -262,7 +262,7 @@ impl Driver {
                 },
                 Some((id, reply)) = self.finished.recv() => {
                     if let Some(result) = self.finish(id, reply)
-                        && link.send(FromBody::Result(result)).await.is_err()
+                        && link.send(FromHand::Result(result)).await.is_err()
                     {
                         return Ended::Dropped;
                     }
@@ -301,22 +301,22 @@ impl Driver {
     }
 
     /// Does what the core asks, and returns what must be sent to the mind.
-    fn perform(&mut self, effect: Effect) -> Option<FromBody> {
+    fn perform(&mut self, effect: Effect) -> Option<FromHand> {
         match effect {
-            Effect::Start(call) => self.start(call).map(FromBody::Result),
+            Effect::Start(call) => self.start(call).map(FromHand::Result),
             Effect::Cancel(id) => {
                 if let Some(task) = self.tasks.remove(&id) {
                     task.abort();
                 }
                 self.core
                     .finished(id, Reply::Error("cancelled".into()))
-                    .map(FromBody::Result)
+                    .map(FromHand::Result)
             }
             Effect::Send(message) => Some(message),
         }
     }
 
-    /// Starts a call on its own task. A call the body cannot start finishes
+    /// Starts a call on its own task. A call the hand cannot start finishes
     /// at once, with the error to send.
     fn start(&mut self, call: Call) -> Option<CallResult> {
         let Call {
@@ -326,7 +326,7 @@ impl Driver {
             input,
         } = call;
         let Some(provider) = self.config.capabilities.get(&capability) else {
-            let error = format!("this body has no capability named {capability}");
+            let error = format!("this hand has no capability named {capability}");
             return self.core.finished(id, Reply::Error(error));
         };
         let done = self.done.clone();

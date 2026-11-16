@@ -4,16 +4,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use mensor_api::{PAGE, PairStatus, Prompted};
+use mensor_api::{MindStatus, PAGE, Prompted};
 use mensor_mind::{
     Conflict, Cut, Fork, ForkError, Forking, Item, Mind, Origin, Pair, Settings, Store, StoreError,
 };
-use mensor_protocol::{FromBody, Hello, InvalidName, Name, Refusal, VERSION};
+use mensor_protocol::{FromHand, Hello, InvalidName, Name, Refusal, VERSION};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 
 use crate::model::Model;
-use crate::pair::{self, Command, Link, Outgoing, Start, Told, blocking};
+use crate::task::{self, Command, Link, Outgoing, Start, Told, blocking};
 
 /// How a host runs.
 #[derive(Clone, Debug)]
@@ -28,10 +28,10 @@ pub struct Config {
     pub mind: Settings,
     /// How long a new connection has to say hello.
     pub hello_timeout: Duration,
-    /// How long a connection may stay silent before it is dropped. A body
+    /// How long a connection may stay silent before it is dropped. A hand
     /// pings more often than this.
     pub idle_timeout: Duration,
-    /// How long a pair stays in memory with no body connected, nobody
+    /// How long a pair stays in memory with no hand connected, nobody
     /// following it and no model asked. After that only its store holds
     /// it, until something concerns it again.
     pub rest_after: Duration,
@@ -95,26 +95,26 @@ pub enum HostError {
     Name(#[from] InvalidName),
 }
 
-/// A body's connection, accepted.
+/// A hand's connection, accepted.
 struct Attached {
     commands: mpsc::UnboundedSender<Command>,
     link: u64,
 }
 
-/// Why a body was not connected.
+/// Why a hand was not connected.
 #[derive(Debug, thiserror::Error)]
 pub enum Rejected {
-    /// The host turned the body away.
-    #[error("the host refused the body: {}", .0.reason())]
+    /// The host turned the hand away.
+    #[error("the host refused the hand: {}", .0.reason())]
     Refused(Refusal),
     /// The host failed.
-    #[error("the host could not attach the body: {0}")]
+    #[error("the host could not attach the hand: {0}")]
     Failed(String),
 }
 
-/// A body's connection to its mind, whatever carries it: a WebSocket, or
-/// nothing at all when the body runs in the host's own process. Dropping it
-/// detaches the body.
+/// A hand's connection to its mind, whatever carries it: a WebSocket, or
+/// nothing at all when the hand runs in the host's own process. Dropping it
+/// detaches the hand.
 pub struct Connection {
     commands: mpsc::UnboundedSender<Command>,
     link: u64,
@@ -122,17 +122,17 @@ pub struct Connection {
 }
 
 impl Connection {
-    /// Hands the mind a message from the body. `false` once the pair has
+    /// Hands the mind a message from the hand. `false` once the pair has
     /// stopped.
-    pub fn send(&self, message: FromBody) -> bool {
-        let command = Command::FromBody {
+    pub fn send(&self, message: FromHand) -> bool {
+        let command = Command::FromHand {
             link: self.link,
             message,
         };
         self.commands.send(command).is_ok()
     }
 
-    /// What the host has for the body next, or `None` once the pair has
+    /// What the host has for the hand next, or `None` once the pair has
     /// stopped. A caller may drop this future and call again without losing
     /// a message.
     pub async fn next(&mut self) -> Option<Outgoing> {
@@ -156,7 +156,7 @@ impl std::fmt::Debug for Connection {
 
 impl Host {
     /// Opens a host over a store. Every pair the store holds rests until
-    /// its body dials in or something is asked of it.
+    /// its hand dials in or something is asked of it.
     pub fn open(
         store: Arc<dyn Store>,
         model: Arc<dyn Model>,
@@ -185,7 +185,7 @@ impl Host {
         &self.inner.config
     }
 
-    /// Serves bodies and the API on `listener` until `shutdown` resolves.
+    /// Serves hands and the API on `listener` until `shutdown` resolves.
     pub async fn serve(
         self,
         listener: TcpListener,
@@ -204,7 +204,7 @@ impl Host {
     }
 
     /// Every pair, in the order of their names.
-    pub async fn pairs(&self) -> Vec<PairStatus> {
+    pub async fn pairs(&self) -> Vec<MindStatus> {
         let known: Vec<Known> = {
             let pairs = self.inner.pairs.lock().await;
             pairs.values().map(Known::of).collect()
@@ -219,7 +219,7 @@ impl Host {
     }
 
     /// One pair.
-    pub async fn pair(&self, name: &Name) -> Result<PairStatus, HostError> {
+    pub async fn pair(&self, name: &Name) -> Result<MindStatus, HostError> {
         let known = {
             let pairs = self.inner.pairs.lock().await;
             let slot = pairs.get(name);
@@ -230,7 +230,7 @@ impl Host {
 
     /// What a pair is doing. A pair that is awake says. One that rests is
     /// read from the store, and stays at rest.
-    async fn status(&self, known: Known) -> Result<PairStatus, HostError> {
+    async fn status(&self, known: Known) -> Result<MindStatus, HostError> {
         let Known { pair, awake } = known;
         let stopped = || HostError::Stopped(pair.name.clone());
         if let Some(commands) = awake {
@@ -239,7 +239,7 @@ impl Host {
                 .send(Command::Status { reply })
                 .map_err(|_| stopped())?;
             let status = answer.await.map_err(|_| stopped())?;
-            return Ok(PairStatus {
+            return Ok(MindStatus {
                 pair,
                 state: status.state,
                 attached: status.attached,
@@ -252,7 +252,7 @@ impl Host {
         let read = blocking(move || {
             let (from, items) = store.recent(&pair.name)?;
             let (state, length) = Mind::status(from, items);
-            Ok(PairStatus {
+            Ok(MindStatus {
                 pair,
                 state,
                 attached: false,
@@ -284,10 +284,10 @@ impl Host {
         }
     }
 
-    /// Stops a pair's turn: the model's reply is given up and the body is
-    /// told to cancel what it runs. The pair is idle once the body has
+    /// Stops a pair's turn: the model's reply is given up and the hand is
+    /// told to cancel what it runs. The pair is idle once the hand has
     /// answered for those calls, which the status returned may not show yet.
-    pub async fn interrupt(&self, name: &Name) -> Result<PairStatus, HostError> {
+    pub async fn interrupt(&self, name: &Name) -> Result<MindStatus, HostError> {
         let commands = self.reach(name).await?;
         commands
             .send(Command::Interrupt)
@@ -331,11 +331,11 @@ impl Host {
     fn wake(&self, slot: &mut Slot) -> mpsc::UnboundedSender<Command> {
         let awake = slot
             .awake
-            .get_or_insert_with(|| pair::spawn(&slot.pair, Start::Stored, &self.inner));
+            .get_or_insert_with(|| task::spawn(&slot.pair, Start::Stored, &self.inner));
         awake.clone()
     }
 
-    /// Connects a body that has said `hello`, over whatever carries it.
+    /// Connects a hand that has said `hello`, over whatever carries it.
     pub async fn connect(&self, hello: Hello) -> Result<Connection, Rejected> {
         if hello.v != VERSION {
             return Err(Rejected::Refused(Refusal::Version));
@@ -351,10 +351,10 @@ impl Host {
             Err(rejected) => {
                 match &rejected {
                     Rejected::Refused(refusal) => {
-                        tracing::info!(body = %name, reason = refusal.reason(), "a body was refused");
+                        tracing::info!(hand = %name, reason = refusal.reason(), "a hand was refused");
                     }
                     Rejected::Failed(error) => {
-                        tracing::error!(body = %name, %error, "a body could not be attached");
+                        tracing::error!(hand = %name, %error, "a hand could not be attached");
                     }
                 }
                 Err(rejected)
@@ -362,11 +362,11 @@ impl Host {
         }
     }
 
-    /// Takes a body's `hello` and joins the connection to a mind.
+    /// Takes a hand's `hello` and joins the connection to a mind.
     ///
-    /// A name the host knows is that pair's body reconnecting. A new name
+    /// A name the host knows is that pair's hand reconnecting. A new name
     /// with no `was` starts a pair. A new name with a `was` is a clone: the
-    /// mind of the body it names forks, unless the lineage has all the
+    /// mind of the hand it names forks, unless the lineage has all the
     /// clones it may.
     async fn attach(
         &self,
@@ -407,7 +407,7 @@ impl Host {
                     .await
                     .map_err(internal)?;
                 tracing::info!(pair = %name, "a new pair");
-                let commands = pair::spawn(&pair, Start::Stored, inner);
+                let commands = task::spawn(&pair, Start::Stored, inner);
                 let _ = commands.send(Command::Attach {
                     hello: Box::new(hello),
                     link,
@@ -452,7 +452,7 @@ impl Host {
                     first: fork.outputs,
                     link,
                 };
-                (pair.clone(), pair::spawn(&pair, start, inner))
+                (pair.clone(), task::spawn(&pair, start, inner))
             }
         };
         let awake = Some(commands.clone());
@@ -461,7 +461,7 @@ impl Host {
     }
 }
 
-/// Makes the mind for a clone of `parent`'s body.
+/// Makes the mind for a clone of `parent`'s hand.
 ///
 /// The parent's history is read a page at a time and never held whole:
 /// once through to find where the two part, then the end of what they

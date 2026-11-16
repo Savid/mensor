@@ -1,15 +1,15 @@
-//! The body core: what a body remembers, and the capabilities it offers.
+//! The hand core: what a hand remembers, and the capabilities it offers.
 //!
-//! A body does what one mind asks. The [`Core`] is the small part every body
+//! A hand does what one mind asks. The [`Core`] is the small part every hand
 //! shares, wherever it runs: its name, the ids it has read, the calls it is
 //! running and the results it holds until the mind acks them. Everything a
-//! body can actually do is a [`Capability`] added to it.
+//! hand can actually do is a [`Capability`] added to it.
 //!
 //! The core is a state machine with no I/O. A host feeds it what arrives and
 //! does what it answers:
 //!
 //! ```
-//! use mensor_body::{Core, Effect, Limits};
+//! use mensor_hand::{Core, Effect, Limits};
 //! use mensor_protocol::{Call, FromMind, Name, Reply};
 //! use serde_json::json;
 //!
@@ -29,9 +29,9 @@
 //! ```
 //!
 //! The core is safe to copy at any instant: a copy holds the same results and
-//! refuses the same ids. Whoever copies a body feeds the copy a new name with
+//! refuses the same ids. Whoever copies a hand feeds the copy a new name with
 //! [`Core::rename`], and the copy's next [`Hello`](mensor_protocol::Hello) tells
-//! the mind's host which body it was cloned from.
+//! the mind's host which hand it was cloned from.
 
 mod capability;
 mod core;

@@ -12,15 +12,15 @@ pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 /// The id of a call. A mind numbers its calls from 1 and never reuses one.
 pub type CallId = u64;
 
-/// A message a body sends.
+/// A message a hand sends.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum FromBody {
+pub enum FromHand {
     /// The first message on every connection.
     Hello(Box<Hello>),
     /// A call finished.
     Result(CallResult),
-    /// A call the body would not start.
+    /// A call the hand would not start.
     Refused(Refused),
 }
 
@@ -35,28 +35,28 @@ pub enum FromMind {
         /// The call to stop.
         id: CallId,
     },
-    /// These results are stored: the body may forget them.
+    /// These results are stored: the hand may forget them.
     Ack {
         /// The ids of the stored results.
         ids: Vec<CallId>,
     },
 }
 
-/// What a body says about itself when it connects.
+/// What a hand says about itself when it connects.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Hello {
-    /// The protocol version the body speaks.
+    /// The protocol version the hand speaks.
     pub v: u32,
-    /// The body's name. One the mind's host has not seen is a new body.
+    /// The hand's name. One the mind's host has not seen is a new hand.
     pub name: Name,
-    /// The name this body had before it was cloned and fed a new one.
+    /// The name this hand had before it was cloned and fed a new one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub was: Option<Name>,
-    /// Random per body process. A clone made with its memory keeps it; a body
+    /// Random per hand process. A clone made with its memory keeps it; a hand
     /// that restarted has a new one, and remembers nothing of earlier calls.
     pub boot: String,
-    /// The highest call id this body has read, or 0.
+    /// The highest call id this hand has read, or 0.
     pub last_id: CallId,
     /// The calls still running.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -64,16 +64,16 @@ pub struct Hello {
     /// The results not yet acked, oldest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub held: Vec<CallResult>,
-    /// What this body can do.
+    /// What this hand can do.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<CapabilityDecl>,
 }
 
-/// A request for a body to do one thing.
+/// A request for a hand to do one thing.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Call {
-    /// Above every id the body has read.
+    /// Above every id the hand has read.
     pub id: CallId,
     /// The capability asked, by name.
     pub capability: String,
@@ -83,7 +83,7 @@ pub struct Call {
     pub input: Value,
 }
 
-/// How a call ended on the body.
+/// How a call ended on the hand.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CallResult {
     /// The call this answers.
@@ -99,11 +99,11 @@ pub struct CallResult {
 pub enum Reply {
     /// The operation ran and gave this.
     Output(Value),
-    /// The operation failed, or the body could not run it.
+    /// The operation failed, or the hand could not run it.
     Error(String),
 }
 
-/// A call a body would not start.
+/// A call a hand would not start.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Refused {
     /// The refused call.
@@ -112,7 +112,7 @@ pub struct Refused {
     pub reason: String,
 }
 
-/// One thing a body can do, as its [`Hello`] declares it.
+/// One thing a hand can do, as its [`Hello`] declares it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CapabilityDecl {
     /// The capability's name, such as `commands` or `files`.
@@ -154,7 +154,7 @@ fn encode<T: Serialize>(message: &T) -> String {
     serde_json::to_string(message).expect("a message of the protocol is always JSON")
 }
 
-impl FromBody {
+impl FromHand {
     /// Reads one message.
     pub fn decode(text: &str) -> Result<Self, DecodeError> {
         decode(text)
@@ -204,19 +204,19 @@ mod tests {
     #[test]
     fn a_hello_reads_as_it_is_written() {
         let text = r#"{"type":"hello","v":1,"name":"b7","was":"a1","boot":"9f3c","lastId":41}"#;
-        let FromBody::Hello(hello) = FromBody::decode(text).unwrap() else {
+        let FromHand::Hello(hello) = FromHand::decode(text).unwrap() else {
             panic!("not a hello");
         };
         assert_eq!(hello.name, name("b7"));
         assert_eq!(hello.was, Some(name("a1")));
         assert_eq!(hello.last_id, 41);
         assert!(hello.running.is_empty() && hello.held.is_empty());
-        assert_eq!(FromBody::Hello(hello).encode(), text);
+        assert_eq!(FromHand::Hello(hello).encode(), text);
     }
 
     #[test]
     fn a_result_carries_an_output_or_an_error() {
-        let done = FromBody::Result(CallResult {
+        let done = FromHand::Result(CallResult {
             id: 7,
             reply: Reply::Output(json!({"exit": 0})),
         });
@@ -224,9 +224,9 @@ mod tests {
             done.encode(),
             r#"{"type":"result","id":7,"output":{"exit":0}}"#
         );
-        assert_eq!(FromBody::decode(&done.encode()).unwrap(), done);
+        assert_eq!(FromHand::decode(&done.encode()).unwrap(), done);
 
-        let failed = FromBody::Result(CallResult {
+        let failed = FromHand::Result(CallResult {
             id: 8,
             reply: Reply::Error("spawn".into()),
         });
@@ -234,7 +234,7 @@ mod tests {
             failed.encode(),
             r#"{"type":"result","id":8,"error":"spawn"}"#
         );
-        assert_eq!(FromBody::decode(&failed.encode()).unwrap(), failed);
+        assert_eq!(FromHand::decode(&failed.encode()).unwrap(), failed);
     }
 
     #[test]
@@ -280,6 +280,6 @@ mod tests {
     #[test]
     fn a_bad_name_refuses_the_hello() {
         let text = r#"{"type":"hello","v":1,"name":"a/b","boot":"x","lastId":0}"#;
-        assert!(matches!(FromBody::decode(text), Err(DecodeError::Json(_))));
+        assert!(matches!(FromHand::decode(text), Err(DecodeError::Json(_))));
     }
 }

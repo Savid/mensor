@@ -98,7 +98,7 @@ pub struct Tool {
     pub operation: String,
 }
 
-/// The tools a body's capabilities give the model.
+/// The tools a hand's capabilities give the model.
 ///
 /// A tool is named after its operation, such as `bash` or `read`. When two
 /// capabilities both have an operation of one name, each of those tools is

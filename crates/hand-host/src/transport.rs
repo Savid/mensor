@@ -4,7 +4,7 @@ use std::sync::Once;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use mensor_protocol::{FromBody, FromMind, Hello, MAX_FRAME_BYTES, Refusal};
+use mensor_protocol::{FromHand, FromMind, Hello, MAX_FRAME_BYTES, Refusal};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -18,10 +18,10 @@ use crate::Error;
 /// A future a transport returns.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-/// A way for a body to reach its mind.
+/// A way for a hand to reach its mind.
 ///
-/// The protocol names no transport, so a body is given one. [`WebSocket`]
-/// dials a host over the network. A host in the same process hands the body
+/// The protocol names no transport, so a hand is given one. [`WebSocket`]
+/// dials a host over the network. A host in the same process hands the hand
 /// a transport that passes messages in memory.
 pub trait Dial: Send + Sync {
     /// Opens a connection and says `hello` on it.
@@ -31,7 +31,7 @@ pub trait Dial: Send + Sync {
 /// One connection to a mind. Dropping it ends the connection.
 pub trait Link: Send {
     /// Sends one message.
-    fn send(&mut self, message: FromBody) -> BoxFuture<'_, Result<(), Gone>>;
+    fn send(&mut self, message: FromHand) -> BoxFuture<'_, Result<(), Gone>>;
 
     /// Waits for what the mind sends next. A caller may drop this future and
     /// call again without losing a message.
@@ -68,7 +68,7 @@ pub struct Gone;
 pub enum DialError {
     /// Dialling again may work.
     Retry(String),
-    /// The host turned the body away.
+    /// The host turned the hand away.
     Refused(Refusal),
     /// Dialling again cannot work.
     Fail(Error),
@@ -154,7 +154,7 @@ impl Dial for WebSocket {
                 Ok(Err(error)) => return Err(DialError::Retry(error.to_string())),
                 Err(_) => return Err(DialError::Retry("the dial timed out".into())),
             };
-            let hello = FromBody::Hello(Box::new(hello)).encode();
+            let hello = FromHand::Hello(Box::new(hello)).encode();
             socket
                 .send(Message::text(hello))
                 .await
@@ -167,7 +167,7 @@ impl Dial for WebSocket {
 struct Socket(WebSocketStream<MaybeTlsStream<TcpStream>>);
 
 impl Link for Socket {
-    fn send(&mut self, message: FromBody) -> BoxFuture<'_, Result<(), Gone>> {
+    fn send(&mut self, message: FromHand) -> BoxFuture<'_, Result<(), Gone>> {
         Box::pin(async move {
             self.0
                 .send(Message::text(message.encode()))

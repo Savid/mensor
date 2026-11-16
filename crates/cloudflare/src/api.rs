@@ -9,15 +9,15 @@ use mensor_protocol::Name;
 /// What a request asks of one pair.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Route {
-    /// `POST /v1/pairs/{name}/prompt`
+    /// `POST /v1/minds/{name}/prompt`
     Prompt(Name),
-    /// `POST /v1/pairs/{name}/interrupt`
+    /// `POST /v1/minds/{name}/interrupt`
     Interrupt(Name),
-    /// `GET /v1/pairs/{name}`
+    /// `GET /v1/minds/{name}`
     Status(Name),
-    /// `GET /v1/pairs/{name}/history`
+    /// `GET /v1/minds/{name}/history`
     History(Name),
-    /// `GET /v1/pairs/{name}/events`
+    /// `GET /v1/minds/{name}/events`
     Events(Name),
 }
 
@@ -38,13 +38,13 @@ impl Route {
 pub(crate) fn route(method: &str, path: &str) -> Result<Route, Problem> {
     let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
     let (name, rest) = match parts[..] {
-        ["v1", "pairs"] => {
+        ["v1", "minds"] => {
             return Err(Problem::new(
                 501,
                 "each pair is an object of its own, and none of them lists the others",
             ));
         }
-        ["v1", "pairs", name, ref rest @ ..] => (name, rest),
+        ["v1", "minds", name, ref rest @ ..] => (name, rest),
         _ => return Err(Problem::new(404, format!("nothing is served at {path}"))),
     };
     let name = Name::new(name).map_err(|error| Problem::new(404, error.to_string()))?;
@@ -112,35 +112,35 @@ mod tests {
 
     #[test]
     fn each_path_is_one_question_about_one_pair() {
-        assert_eq!(route("GET", "/v1/pairs/a1"), Ok(Route::Status(name("a1"))));
+        assert_eq!(route("GET", "/v1/minds/a1"), Ok(Route::Status(name("a1"))));
         assert_eq!(
-            route("POST", "/v1/pairs/a1/prompt"),
+            route("POST", "/v1/minds/a1/prompt"),
             Ok(Route::Prompt(name("a1")))
         );
         assert_eq!(
-            route("POST", "/v1/pairs/a1/interrupt"),
+            route("POST", "/v1/minds/a1/interrupt"),
             Ok(Route::Interrupt(name("a1")))
         );
         assert_eq!(
-            route("GET", "/v1/pairs/a1/history"),
+            route("GET", "/v1/minds/a1/history"),
             Ok(Route::History(name("a1")))
         );
         assert_eq!(
-            route("GET", "/v1/pairs/a1/events/"),
+            route("GET", "/v1/minds/a1/events/"),
             Ok(Route::Events(name("a1")))
         );
-        assert_eq!(route("GET", "/v1/pairs/a1").unwrap().name(), &name("a1"));
+        assert_eq!(route("GET", "/v1/minds/a1").unwrap().name(), &name("a1"));
     }
 
     #[test]
     fn what_is_not_served_says_why() {
         let status = |method, path| route(method, path).unwrap_err().status;
-        assert_eq!(status("GET", "/v1/pairs"), 501);
+        assert_eq!(status("GET", "/v1/minds"), 501);
         assert_eq!(status("GET", "/"), 404);
-        assert_eq!(status("GET", "/v1/pairs/a1/files"), 404);
-        assert_eq!(status("GET", "/v1/pairs/not a name"), 404);
-        assert_eq!(status("GET", "/v1/pairs/a1/prompt"), 405);
-        assert_eq!(status("POST", "/v1/pairs/a1"), 405);
+        assert_eq!(status("GET", "/v1/minds/a1/files"), 404);
+        assert_eq!(status("GET", "/v1/minds/not a name"), 404);
+        assert_eq!(status("GET", "/v1/minds/a1/prompt"), 405);
+        assert_eq!(status("POST", "/v1/minds/a1"), 405);
     }
 
     #[test]

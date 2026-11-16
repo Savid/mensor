@@ -12,7 +12,7 @@ use crate::{CallFuture, Capability};
 /// alone: [`Files`] names the path.
 pub type FsFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'a>>;
 
-/// Where a body's files are kept: a disk, rows in a database, anything that
+/// Where a hand's files are kept: a disk, rows in a database, anything that
 /// can hold bytes under a path.
 pub trait FileSystem: Send + Sync {
     /// The whole content of the file at `path`.
@@ -31,7 +31,7 @@ pub trait FileSystem: Send + Sync {
 /// [`FileSystem`] keeps them.
 ///
 /// Its operations are `read`, `write`, `edit` and `list`, the same on every
-/// body, so a model uses a file in a database as it uses one on a disk.
+/// hand, so a model uses a file in a database as it uses one on a disk.
 #[derive(Clone, Debug)]
 pub struct Files<F> {
     files: F,

@@ -33,7 +33,7 @@ tools: ## Install the pinned cargo-deny and worker-build
 	cargo install --locked cargo-deny@0.20.2 worker-build@0.9.0
 
 .PHONY: build
-build: ## The release binaries, at target/release: mensor, mensor-mind and mensor-body
+build: ## The release binaries, at target/release: mensor, mensor-mind and mensor-hand
 	cargo build --release --locked -p mensor
 
 .PHONY: build-cloudflare

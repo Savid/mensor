@@ -1,10 +1,10 @@
 //! What the `mensor` binaries are built from, beyond the hosts themselves.
 //!
-//! `mensor` hosts minds, runs a body, or does both in one process.
-//! `mensor-mind` only hosts minds and `mensor-body` only runs a body: each
+//! `mensor` hosts minds, runs a hand, or does both in one process.
+//! `mensor-mind` only hosts minds and `mensor-hand` only runs a hand: each
 //! is built from its half of this crate, and holds nothing of the other.
 
-pub mod body;
+pub mod hand;
 pub mod host;
 pub mod local;
 
@@ -16,8 +16,8 @@ use tokio::signal::unix::{SignalKind, signal};
 /// never taken from a flag, where every user of the machine could read it.
 pub const TOKEN: &str = "MENSOR_TOKEN";
 
-/// The variables no command a body runs is given: the host's token, and the
-/// model's credentials when the body shares a process with its mind.
+/// The variables no command a hand runs is given: the host's token, and the
+/// model's credentials when the hand shares a process with its mind.
 pub const CREDENTIALS: [&str; 4] = [
     TOKEN,
     "ANTHROPIC_API_KEY",

@@ -1,6 +1,6 @@
 [package]
 name = "mensor"
-description = "Run a mind's host, a body that dials one, or both in one process"
+description = "Run a mind's host, a hand that dials one, or both in one process"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,19 +9,19 @@ publish.workspace = true
 repository.workspace = true
 
 # The two halves alone. Their names are those of the library crates
-# `mensor-mind` and `mensor-body`, so only those are documented.
+# `mensor-mind` and `mensor-hand`, so only those are documented.
 [[bin]]
 name = "mensor-mind"
 doc = false
 
 [[bin]]
-name = "mensor-body"
+name = "mensor-hand"
 doc = false
 
 [dependencies]
 clap.workspace = true
-mensor-body.workspace = true
-mensor-body-host.workspace = true
+mensor-hand.workspace = true
+mensor-hand-host.workspace = true
 mensor-mind.workspace = true
 mensor-mind-host.workspace = true
 mensor-model.workspace = true

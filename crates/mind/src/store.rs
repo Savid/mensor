@@ -10,10 +10,10 @@ use crate::Item;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "origin", rename_all = "snake_case")]
 pub enum Origin {
-    /// With nothing: a new body said hello.
+    /// With nothing: a new hand said hello.
     Root,
     /// With the first `inherited` items of another pair's history, because
-    /// its body is a clone of that pair's.
+    /// its hand is a clone of that pair's.
     Fork {
         /// The pair whose history is shared.
         parent: Name,
@@ -22,10 +22,10 @@ pub enum Origin {
     },
 }
 
-/// A mind and its body, known by the body's name.
+/// A mind and its hand, known by the hand's name.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pair {
-    /// The body's name.
+    /// The hand's name.
     pub name: Name,
     /// Where the pair's history begins.
     #[serde(flatten)]

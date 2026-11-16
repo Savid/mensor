@@ -2,11 +2,11 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::future::Future;
 
-use mensor_body::{Capabilities, Core, Effect, Limits};
+use mensor_hand::{Capabilities, Core, Effect, Limits};
 use mensor_mind::{
     Conflict, Item, Mind, ModelError, ModelReply, ModelRequest, Output, Settings, State,
 };
-use mensor_protocol::{Call, CallId, CapabilityDecl, FromBody, FromMind, Name, Reply};
+use mensor_protocol::{Call, CallId, CapabilityDecl, FromHand, FromMind, Name, Reply};
 
 use crate::{Storage, StorageError, Stored};
 
@@ -24,7 +24,7 @@ pub trait Model {
 pub enum Work {
     /// Ask the model, and answer with [`Object::replied`].
     Ask(ModelRequest),
-    /// Run this call on the body's capabilities, and answer with
+    /// Run this call on the hand's capabilities, and answer with
     /// [`Object::finished`].
     Call(Call),
 }
@@ -40,12 +40,12 @@ pub enum PromptError {
     Storage(#[from] StorageError),
 }
 
-/// One pair in one place: a mind, what its body remembers, and the storage
+/// One pair in one place: a mind, what its hand remembers, and the storage
 /// that holds both.
 #[derive(Debug)]
 pub struct Object<S> {
     mind: Mind,
-    body: Core,
+    hand: Core,
     declared: Vec<CapabilityDecl>,
     storage: S,
     work: VecDeque<Work>,
@@ -55,24 +55,24 @@ impl<S: Storage> Object<S> {
     /// Opens the object stored in `storage`. `None` when nothing is stored
     /// there: no pair has started.
     ///
-    /// An object that is opened again is the same body, with everything it
+    /// An object that is opened again is the same hand, with everything it
     /// remembered. Calls it was running when it stopped are lost, and the
-    /// mind is told so. `declared` is what the body can do now, and
+    /// mind is told so. `declared` is what the hand can do now, and
     /// `settings` what the mind is told.
     pub fn open(
         declared: Vec<CapabilityDecl>,
         settings: Settings,
         mut storage: S,
     ) -> Result<Option<Self>, StorageError> {
-        let Stored { from, items, body } = storage.load()?;
-        let Some(mut body) = body else {
+        let Stored { from, items, hand } = storage.load()?;
+        let Some(mut hand) = hand else {
             return Ok(None);
         };
-        if !body.interrupted().is_empty() {
-            storage.keep(&body)?;
+        if !hand.interrupted().is_empty() {
+            storage.keep(&hand)?;
         }
         let mind = Mind::load(from, items, settings);
-        Self::settled(mind, body, declared, storage).map(Some)
+        Self::settled(mind, hand, declared, storage).map(Some)
     }
 
     /// Opens the object stored in `storage`, or starts one named `name`
@@ -84,30 +84,30 @@ impl<S: Storage> Object<S> {
         settings: Settings,
         mut storage: S,
     ) -> Result<Self, StorageError> {
-        let Stored { from, items, body } = storage.load()?;
-        let mut body = if let Some(body) = body {
-            body
+        let Stored { from, items, hand } = storage.load()?;
+        let mut hand = if let Some(hand) = hand {
+            hand
         } else {
-            let body = Core::new(name, boot(), Limits::default());
-            storage.keep(&body)?;
-            body
+            let hand = Core::new(name, boot(), Limits::default());
+            storage.keep(&hand)?;
+            hand
         };
-        if !body.interrupted().is_empty() {
-            storage.keep(&body)?;
+        if !hand.interrupted().is_empty() {
+            storage.keep(&hand)?;
         }
         let mind = Mind::load(from, items, settings);
-        Self::settled(mind, body, declared, storage)
+        Self::settled(mind, hand, declared, storage)
     }
 
     fn settled(
         mind: Mind,
-        body: Core,
+        hand: Core,
         declared: Vec<CapabilityDecl>,
         storage: S,
     ) -> Result<Self, StorageError> {
         let mut object = Self {
             mind,
-            body,
+            hand,
             declared,
             storage,
             work: VecDeque::new(),
@@ -118,7 +118,7 @@ impl<S: Storage> Object<S> {
 
     /// The pair's name.
     pub fn name(&self) -> &Name {
-        self.body.name()
+        self.hand.name()
     }
 
     /// How many items the history holds.
@@ -187,16 +187,16 @@ impl<S: Storage> Object<S> {
 
     /// Reports how a call ended.
     pub fn finished(&mut self, id: CallId, reply: Reply) -> Result<(), StorageError> {
-        let Some(result) = self.body.finished(id, reply) else {
+        let Some(result) = self.hand.finished(id, reply) else {
             return Ok(());
         };
         let outputs = self.mind.result(result);
         self.perform(outputs)
     }
 
-    /// The body says hello, and the mind settles every call it waits on.
+    /// The hand says hello, and the mind settles every call it waits on.
     fn settle(&mut self) -> Result<(), StorageError> {
-        let hello = self.body.hello(self.declared.clone());
+        let hello = self.hand.hello(self.declared.clone());
         let outputs = self.mind.attach(&hello);
         self.perform(outputs)
     }
@@ -231,7 +231,7 @@ impl<S: Storage> Object<S> {
         }
         if refused {
             // What a dropped connection does between a server and a remote
-            // body: the two say hello again, and the call the body would not
+            // hand: the two say hello again, and the call the hand would not
             // start settles as one it may have run.
             self.mind.detach();
             self.settle()?;
@@ -239,7 +239,7 @@ impl<S: Storage> Object<S> {
         Ok(())
     }
 
-    /// Hands the body one message from the mind. `true` when the body
+    /// Hands the hand one message from the mind. `true` when the hand
     /// refused it. The calls it is told to stop join `cancelled`.
     fn deliver(
         &mut self,
@@ -247,17 +247,17 @@ impl<S: Storage> Object<S> {
         cancelled: &mut Vec<CallId>,
     ) -> Result<bool, StorageError> {
         let mut refused = false;
-        for effect in self.body.receive(message) {
+        for effect in self.hand.receive(message) {
             match effect {
                 Effect::Start(call) => self.work.push_back(Work::Call(call)),
                 Effect::Cancel(id) => cancelled.push(id),
-                Effect::Send(FromBody::Refused(_)) => refused = true,
-                // A body's other messages are reported through `finished`
+                Effect::Send(FromHand::Refused(_)) => refused = true,
+                // A hand's other messages are reported through `finished`
                 // and `settle`.
                 Effect::Send(_) => {}
             }
         }
-        self.storage.keep(&self.body)?;
+        self.storage.keep(&self.hand)?;
         Ok(refused)
     }
 
@@ -293,7 +293,7 @@ pub async fn step<S: Storage, M: Model>(
             let reply = match capabilities.get(&call.capability) {
                 Some(capability) => capability.call(&call.operation, call.input).await,
                 None => Reply::Error(format!(
-                    "this body has no capability named {}",
+                    "this hand has no capability named {}",
                     call.capability
                 )),
             };

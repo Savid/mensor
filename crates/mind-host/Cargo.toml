@@ -1,6 +1,6 @@
 [package]
 name = "mensor-mind-host"
-description = "A server that hosts minds: one task each, an endpoint for bodies and an API"
+description = "A server that hosts minds: one task each, an endpoint for hands and an API"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

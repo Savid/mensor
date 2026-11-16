@@ -1,16 +1,16 @@
 # Protocol v1
 
-What a mind and a body say to each other. `mensor-protocol` implements it.
+What a mind and a hand say to each other. `mensor-protocol` implements it.
 
-The protocol joins one mind to one body and keeps nothing itself. Every
+The protocol joins one mind to one hand and keeps nothing itself. Every
 guarantee comes from what the two ends remember: the mind its history, the
-body the ids it has read and the results it holds.
+hand the ids it has read and the results it holds.
 
 ## Transport
 
 - The protocol names no transport. Over a network the binding is a
-  WebSocket: the body dials `GET /v1/attach` on the mind's host, and each
-  message is one text frame. A body in its mind's own process, or in one
+  WebSocket: the hand dials `GET /v1/attach` on the mind's host, and each
+  message is one text frame. A hand in its mind's own process, or in one
   object with it, passes the same messages in memory, and the rest of this
   section does not apply to it.
 - A host with a token requires `Authorization: Bearer <token>` on the
@@ -18,11 +18,11 @@ body the ids it has read and the results it holds.
 - One connection per name. A newer one replaces the older.
 - Each message is one JSON object with a `type`. Fields are camelCase. A
   field a reader does not know is ignored.
-- The body speaks first, with a `hello`, within 10 s. The mind sends nothing
+- The hand speaks first, with a `hello`, within 10 s. The mind sends nothing
   until it has settled that hello.
-- The body pings every 20 s. A host drops a connection silent for 60 s.
+- The hand pings every 20 s. A host drops a connection silent for 60 s.
 
-## Body to mind
+## Hand to mind
 
 **`hello`**, first on every connection:
 
@@ -34,27 +34,27 @@ body the ids it has read and the results it holds.
 | Field | Meaning |
 | --- | --- |
 | `v` | The protocol version. A host refuses another before it reads the rest. |
-| `name` | The body's name: 1 to 64 letters, digits, `-`, `_` or `.`, starting with a letter or digit. |
-| `was` | The name the body had before it was cloned and fed this one. |
-| `boot` | Random per body process. A clone made with its memory keeps it. A body that restarted has a new one and remembers no earlier call. |
-| `lastId` | The highest call id the body has read, or 0. |
+| `name` | The hand's name: 1 to 64 letters, digits, `-`, `_` or `.`, starting with a letter or digit. |
+| `was` | The name the hand had before it was cloned and fed this one. |
+| `boot` | Random per hand process. A clone made with its memory keeps it. A hand that restarted has a new one and remembers no earlier call. |
+| `lastId` | The highest call id the hand has read, or 0. |
 | `running` | The calls still running. |
 | `held` | The results not yet acked, oldest first. |
-| `capabilities` | What the body can do: each a `name` and its `operations`, each of those a `name`, a `description` and the JSON Schema of its `input`. |
+| `capabilities` | What the hand can do: each a `name` and its `operations`, each of those a `name`, a `description` and the JSON Schema of its `input`. |
 
 **`result`**, a call finished. It carries `output`, any JSON the operation
 returned, or `error`, a string:
 
 ```json
 {"type":"result","id":41,"output":{"exit":0,"stdout":"ok\n","stderr":""}}
-{"type":"result","id":42,"error":"this body has no capability named fetch"}
+{"type":"result","id":42,"error":"this hand has no capability named fetch"}
 ```
 
 **`refused`** `{"type":"refused","id":41,"reason":"…"}`: a call whose id is
 not above `lastId`. It did not start. The host drops the connection, and the
 next hello settles the call.
 
-## Mind to body
+## Mind to hand
 
 **`call`**, do one thing:
 
@@ -66,19 +66,19 @@ next hello settles the call.
 follows, as an error.
 
 **`ack`** `{"type":"ack","ids":[40,41]}`: these results are stored, and the
-body may forget them.
+hand may forget them.
 
 ## Delivery
 
 - **At most once.** The mind stores a call before it sends it, under ids that
-  only grow. The body starts a call only if its id is above `lastId`.
-- **At least once.** The body sends a result when its call ends, if it is
+  only grow. The hand starts a call only if its id is above `lastId`.
+- **At least once.** The hand sends a result when its call ends, if it is
   connected, and repeats it in every hello until it is acked. The mind stores
   the first result for a call and only acks any other.
-- **Calls outlive connections.** A dropped connection stops nothing. The body
+- **Calls outlive connections.** A dropped connection stops nothing. The hand
   dials again, waiting 100 ms and doubling up to 5 s, each wait cut by a
   random part.
-- **Retention.** A body holds at most 16 MiB less 64 KiB of results. Past
+- **Retention.** A hand holds at most 16 MiB less 64 KiB of results. Past
   that the oldest go, and settle as unknown. One result larger than that
   becomes an error that says so.
 
@@ -86,7 +86,7 @@ body may forget them.
 
 `pending` is every call in the mind's history with no outcome yet.
 
-1. **The boot changed** from the one the mind last stored: the body restarted
+1. **The boot changed** from the one the mind last stored: the hand restarted
    and remembers none of the pending calls. Each may have run, so each is
    recorded as unknown, and nothing is sent again.
 2. Otherwise, for each pending call, the first row that matches:
@@ -114,7 +114,7 @@ A host decides what a hello means from its `name` and `was`:
 | new, with a `was` it knows | forks that pair's mind for the clone |
 | new, with a `was` it does not know | refuses for now: the original may yet attach |
 
-Whoever copies a body must feed the copy a new name. A copy that dials under
+Whoever copies a hand must feed the copy a new name. A copy that dials under
 the old name is a reconnect, and takes the original's place.
 
 A forked mind shares its parent's history up to a point the clone's hello
@@ -134,17 +134,17 @@ mind asks no model until it is prompted.
 
 ## Refusals
 
-A host that turns a body away closes the WebSocket with one of these codes.
-A body dials again only after one that is not final.
+A host that turns a hand away closes the WebSocket with one of these codes.
+A hand dials again only after one that is not final.
 
 | Code | Meaning | Final |
 | --- | --- | --- |
-| 4000 | The body sent something the protocol does not define | yes |
-| 4001 | The body speaks another version | yes |
+| 4000 | The hand sent something the protocol does not define | yes |
+| 4001 | The hand speaks another version | yes |
 | 4002 | The lineage has all the clones it may | yes |
-| 4003 | `was` names a body the host does not know | no |
+| 4003 | `was` names a hand the host does not know | no |
 | 4004 | A newer connection has this name | yes |
-| 4005 | Not a clone of the body it names: it has read a call that body's mind never made | yes |
+| 4005 | Not a clone of the hand it names: it has read a call that hand's mind never made | yes |
 
 ## Limits
 

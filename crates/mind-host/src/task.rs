@@ -6,7 +6,7 @@ use mensor_mind::{
     Conflict, Item, Mind, ModelReply, ModelRequest, Output, Pair, Settings, State, Store,
     StoreError,
 };
-use mensor_protocol::{FromBody, FromMind, Hello, Name, Refusal};
+use mensor_protocol::{FromHand, FromMind, Hello, Name, Refusal};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::AbortHandle;
 use tokio::time::timeout;
@@ -30,9 +30,9 @@ pub(crate) enum Command {
         hello: Box<Hello>,
         link: Link,
     },
-    FromBody {
+    FromHand {
         link: u64,
-        message: FromBody,
+        message: FromHand,
     },
     Detached {
         link: u64,
@@ -68,16 +68,16 @@ pub(crate) enum Told {
     Wrote(Arc<str>),
 }
 
-/// One connection to a body: its id, and the way to write to it.
+/// One connection to a hand: its id, and the way to write to it.
 pub(crate) struct Link {
     pub(crate) id: u64,
     pub(crate) outbound: mpsc::UnboundedSender<Outgoing>,
 }
 
-/// Something a mind's host has for a connected body.
+/// Something a mind's host has for a connected hand.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Outgoing {
-    /// A message for the body.
+    /// A message for the hand.
     Message(FromMind),
     /// The host is ending the connection, for this reason.
     Close(Refusal),
@@ -87,7 +87,7 @@ pub enum Outgoing {
 pub(crate) enum Start {
     /// The end of its history, read from the store.
     Stored,
-    /// A mind just forked, the outputs that made it, and its body's
+    /// A mind just forked, the outputs that made it, and its hand's
     /// connection.
     Forked {
         mind: Box<Mind>,
@@ -128,7 +128,7 @@ pub(crate) async fn blocking<T: Send + 'static>(
 /// Wakes one pair: starts its task, and gives the way to reach it.
 ///
 /// The task serves commands until the pair has had nothing to stay awake
-/// for (no body, no follower, no model asked) for as long as the host lets
+/// for (no hand, no follower, no model asked) for as long as the host lets
 /// it rest, or until its history cannot be read or stored. Either way it
 /// then leaves the host's memory, and the next thing that concerns the
 /// pair wakes it from its store.
@@ -248,27 +248,27 @@ impl Task {
                 if let Some(old) = self.link.replace(link) {
                     let _ = old.outbound.send(Outgoing::Close(Refusal::Replaced));
                 }
-                tracing::info!(pair = %self.name, boot = %hello.boot, last_id = hello.last_id, "the body attached");
+                tracing::info!(pair = %self.name, boot = %hello.boot, last_id = hello.last_id, "the hand attached");
                 let outputs = self.mind.attach(&hello);
                 self.perform(outputs).await?;
             }
-            Command::FromBody { link, message } if self.is_current(link) => match message {
-                FromBody::Result(result) => {
+            Command::FromHand { link, message } if self.is_current(link) => match message {
+                FromHand::Result(result) => {
                     let outputs = self.mind.result(result);
                     self.perform(outputs).await?;
                 }
-                FromBody::Refused(refused) => {
-                    tracing::warn!(pair = %self.name, call = refused.id, reason = %refused.reason, "the body refused a call");
+                FromHand::Refused(refused) => {
+                    tracing::warn!(pair = %self.name, call = refused.id, reason = %refused.reason, "the hand refused a call");
                     self.drop_link(Refusal::Protocol);
                 }
-                FromBody::Hello(_) => self.drop_link(Refusal::Protocol),
+                FromHand::Hello(_) => self.drop_link(Refusal::Protocol),
             },
             Command::Detached { link } if self.is_current(link) => {
-                tracing::info!(pair = %self.name, "the body detached");
+                tracing::info!(pair = %self.name, "the hand detached");
                 self.link = None;
                 self.mind.detach();
             }
-            Command::FromBody { .. } | Command::Detached { .. } => {}
+            Command::FromHand { .. } | Command::Detached { .. } => {}
             Command::Model { seen, result } => {
                 self.asking.take_if(|(asked, _)| *asked == seen);
                 let outputs = match result {
@@ -311,7 +311,7 @@ impl Task {
         self.link.as_ref().is_some_and(|current| current.id == link)
     }
 
-    /// Ends the current connection. The body settles again when it redials.
+    /// Ends the current connection. The hand settles again when it redials.
     fn drop_link(&mut self, refusal: Refusal) {
         if let Some(link) = self.link.take() {
             let _ = link.outbound.send(Outgoing::Close(refusal));

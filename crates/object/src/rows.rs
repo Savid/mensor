@@ -1,6 +1,6 @@
 //! Files kept as rows: one row per file, keyed by its whole path.
 //!
-//! A database has no directories, so a host that keeps a body's files in a
+//! A database has no directories, so a host that keeps a hand's files in a
 //! table needs two rules: which key a path means, and what a directory
 //! holds. These are those rules, with no I/O, for any such host to share.
 

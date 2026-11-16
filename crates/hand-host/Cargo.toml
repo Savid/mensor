@@ -1,6 +1,6 @@
 [package]
-name = "mensor-body-host"
-description = "A body on a real machine: it dials its mind, and runs commands and reads files"
+name = "mensor-hand-host"
+description = "A hand on a real machine: it dials its mind, and runs commands and reads files"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,7 +11,7 @@ repository.workspace = true
 [dependencies]
 futures-util.workspace = true
 getrandom.workspace = true
-mensor-body.workspace = true
+mensor-hand.workspace = true
 mensor-protocol.workspace = true
 nix.workspace = true
 rustls.workspace = true

@@ -1,15 +1,15 @@
 use std::collections::{BTreeSet, VecDeque};
 
 use mensor_protocol::{
-    Call, CallId, CallResult, CapabilityDecl, FromBody, FromMind, Hello, MAX_FRAME_BYTES, Name,
+    Call, CallId, CallResult, CapabilityDecl, FromHand, FromMind, Hello, MAX_FRAME_BYTES, Name,
     Refused, Reply, VERSION,
 };
 use serde::{Deserialize, Serialize};
 
-/// The bounds a body keeps.
+/// The bounds a hand keeps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Limits {
-    /// The most bytes of results a body holds, as they are written in
+    /// The most bytes of results a hand holds, as they are written in
     /// messages. Held results travel in one `hello`, so this stays below
     /// [`MAX_FRAME_BYTES`].
     pub max_held_bytes: usize,
@@ -23,7 +23,7 @@ impl Default for Limits {
     }
 }
 
-/// Something the host of a body must do.
+/// Something the host of a hand must do.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
     /// Start this call, and report how it ends with [`Core::finished`].
@@ -31,10 +31,10 @@ pub enum Effect {
     /// Stop this running call, then report it with [`Core::finished`].
     Cancel(CallId),
     /// Send this to the mind.
-    Send(FromBody),
+    Send(FromHand),
 }
 
-/// What a body remembers.
+/// What a hand remembers.
 ///
 /// The core serializes whole, so a host whose memory can vanish keeps it
 /// wherever it keeps anything else.
@@ -57,11 +57,11 @@ struct Held {
 }
 
 impl Core {
-    /// A body that has read no call.
+    /// A hand that has read no call.
     ///
-    /// `boot` is random per body process: a host draws a new one each time it
-    /// starts a body from nothing, and keeps the old one when it restores a
-    /// body with everything it remembered.
+    /// `boot` is random per hand process: a host draws a new one each time it
+    /// starts a hand from nothing, and keeps the old one when it restores a
+    /// hand with everything it remembered.
     pub fn new(name: Name, boot: impl Into<String>, limits: Limits) -> Self {
         Self {
             name,
@@ -75,17 +75,17 @@ impl Core {
         }
     }
 
-    /// The body's name.
+    /// The hand's name.
     pub fn name(&self) -> &Name {
         &self.name
     }
 
-    /// The name this body had before it was last cloned.
+    /// The name this hand had before it was last cloned.
     pub fn was(&self) -> Option<&Name> {
         self.was.as_ref()
     }
 
-    /// The highest call id this body has read.
+    /// The highest call id this hand has read.
     pub fn last_id(&self) -> CallId {
         self.last_id
     }
@@ -95,11 +95,11 @@ impl Core {
         self.running.iter().copied()
     }
 
-    /// Feeds this body a new name, because it is a clone.
+    /// Feeds this hand a new name, because it is a clone.
     ///
-    /// Whoever copies a body must feed the copy a name no other body has. A
+    /// Whoever copies a hand must feed the copy a name no other hand has. A
     /// copy that connects under the old name is indistinguishable from the
-    /// original reconnecting, and the latest connection wins. The body
+    /// original reconnecting, and the latest connection wins. The hand
     /// remembers the name it had, which its `hello` reports as `was`.
     pub fn rename(&mut self, name: Name) {
         if name != self.name {
@@ -129,7 +129,7 @@ impl Core {
                     "call {} is not above the last id read, {}",
                     call.id, self.last_id
                 );
-                vec![Effect::Send(FromBody::Refused(Refused {
+                vec![Effect::Send(FromHand::Refused(Refused {
                     id: call.id,
                     reason,
                 }))]
@@ -158,7 +158,7 @@ impl Core {
     pub fn interrupted(&mut self) -> Vec<CallId> {
         let lost: Vec<CallId> = self.running.iter().copied().collect();
         for id in &lost {
-            let error = "the body was restarted while this call ran: its outcome is unknown, \
+            let error = "the hand was restarted while this call ran: its outcome is unknown, \
                          and it may have run in part";
             self.finished(*id, Reply::Error(error.into()));
         }
@@ -180,7 +180,7 @@ impl Core {
         let mut bytes = written(&result);
         if bytes > self.limits.max_held_bytes {
             let error = format!(
-                "the result was {bytes} bytes, more than the {} a body holds",
+                "the result was {bytes} bytes, more than the {} a hand holds",
                 self.limits.max_held_bytes
             );
             result = CallResult {
@@ -204,7 +204,7 @@ impl Core {
 }
 
 fn written(result: &CallResult) -> usize {
-    FromBody::Result(result.clone()).encode().len()
+    FromHand::Result(result.clone()).encode().len()
 }
 
 #[cfg(test)]
@@ -234,7 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn a_new_body_has_read_nothing() {
+    fn a_new_hand_has_read_nothing() {
         let hello = core().hello(Vec::new());
         assert_eq!((hello.v, hello.last_id), (VERSION, 0));
         assert_eq!(hello.boot, "boot-1");
@@ -249,7 +249,7 @@ mod tests {
         for stale in [1, 2, 3] {
             let effects = core.receive(FromMind::Call(call(stale)));
             assert!(
-                matches!(&effects[..], [Effect::Send(FromBody::Refused(r))] if r.id == stale),
+                matches!(&effects[..], [Effect::Send(FromHand::Refused(r))] if r.id == stale),
                 "{effects:?}"
             );
         }
@@ -306,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn the_oldest_results_go_when_the_body_holds_too_much() {
+    fn the_oldest_results_go_when_the_hand_holds_too_much() {
         let mut core = Core::new(
             Name::new("a1").unwrap(),
             "boot-1",

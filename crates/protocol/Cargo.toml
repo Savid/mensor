@@ -1,6 +1,6 @@
 [package]
 name = "mensor-protocol"
-description = "The protocol a mind and a body speak"
+description = "The protocol a mind and a hand speak"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

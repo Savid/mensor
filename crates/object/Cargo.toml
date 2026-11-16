@@ -1,6 +1,6 @@
 [package]
 name = "mensor-object"
-description = "A mind and its body as one object, for a host that keeps a whole pair in one place"
+description = "A mind and its hand as one object, for a host that keeps a whole pair in one place"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,7 +9,7 @@ publish.workspace = true
 repository.workspace = true
 
 [dependencies]
-mensor-body.workspace = true
+mensor-hand.workspace = true
 mensor-mind.workspace = true
 mensor-protocol.workspace = true
 thiserror.workspace = true

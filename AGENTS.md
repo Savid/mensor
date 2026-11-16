@@ -1,11 +1,11 @@
 # mensor
 
 An agent as a pair: a mind that holds the history and calls the model, and a
-body that does what the mind asks. One mind drives one body. A clone of a
-body attaches under a new name and the mind forks to match. `mensor serve`
-hosts the minds; `mensor body` runs a body that dials them; `mensor run` does
+hand that does what the mind asks. One mind drives one hand. A clone of a
+hand attaches under a new name and the mind forks to match. `mensor serve`
+hosts the minds; `mensor hand` runs a hand that dials them; `mensor run` does
 both in one process. `crates/cloudflare` is the same pair as one Durable
-Object. What a mind and a body say to each other: `docs/protocol.md`.
+Object. What a mind and a hand say to each other: `docs/protocol.md`.
 
 ## Commands
 
@@ -18,7 +18,7 @@ make lint     # clippy on every target, pedantic, and the docs: warnings refused
 make test     # every test, the end-to-end ones included
 make deny     # cargo-deny: advisories, licences, duplicate versions, sources
 make tools    # installs the pinned cargo-deny and worker-build
-make build    # target/release/mensor, mensor-mind and mensor-body
+make build    # target/release/mensor, mensor-mind and mensor-hand
 make test-cloudflare    # builds the worker, then runs it on workerd under wrangler
 ```
 
@@ -31,20 +31,20 @@ While iterating, test the crate you touched: `cargo test -p mensor-mind`.
 
 ## Layout
 
-- `crates/protocol`, `crates/mind`, `crates/body`, `crates/model`,
+- `crates/protocol`, `crates/mind`, `crates/hand`, `crates/model`,
   `crates/api` and `crates/object` are pure: no I/O, no clock, no randomness, no Tokio, and
   they build for `wasm32-unknown-unknown`. A decision belongs there, as a
   function of what it is given. Their tests drive them directly.
-- `crates/mind-host` and `crates/body-host` are the hosts. They own the
+- `crates/mind-host` and `crates/hand-host` are the hosts. They own the
   tasks, sockets, processes and files, and perform what the pure crates
   decide, in the order given.
-- `crates/object` is a whole pair in one place: a mind and a body's core
+- `crates/object` is a whole pair in one place: a mind and a hand's core
   over a `Storage`, driven by `step`. `crates/cloudflare` is its only host:
   the Durable Object, its SQL, the model call over `fetch`, and the alarm
   that does the work. What can be decided without the platform goes in
   `crates/object` or in `crates/cloudflare/src/api.rs`, where a native test
   reaches it; `tests/workerd.rs` covers what only the runtime shows.
-- `crates/api` holds the bodies of the HTTP API's requests and answers.
+- `crates/api` holds the hands of the HTTP API's requests and answers.
   Both hosts serve them, so a change to one is a change to both: neither
   host declares a shape of its own.
 - A mind's host calls its store through `blocking` (`mind-host/src/pair.rs`),
@@ -55,13 +55,13 @@ While iterating, test the crate you touched: `cargo test -p mensor-mind`.
   request is written from structs that borrow the conversation, never
   through a `serde_json::Value` of it. Every request is streamed: a host
   hands the bytes to a `Reading`, which puts the events back together as
-  the body an unstreamed answer has, so each API has one reader of replies.
+  the hand an unstreamed answer has, so each API has one reader of replies.
 - What a pair tells those following it (its history grew, its model wrote
   this) goes down one ordered channel per follower, so the text of a reply
   is always told before the step that holds it. Keep it one channel.
 - `crates/mensor` is three binaries over one library: `host.rs` is all a
-  mind's host needs and `body.rs` all a body needs, so `mensor-mind` and
-  `mensor-body` each link one half. Nothing in `body.rs` may name
+  mind's host needs and `hand.rs` all a hand needs, so `mensor-mind` and
+  `mensor-hand` each link one half. Nothing in `hand.rs` may name
   `mensor-mind-host`, `mensor-model` or `mensor-store-sqlite`.
 - `crates/store-sqlite` is one `Store`. A new store implements the trait in
   `crates/mind/src/store.rs`. Its appends commit in groups: one thread
@@ -72,16 +72,16 @@ While iterating, test the crate you touched: `cargo test -p mensor-mind`.
   (`PRAGMA user_version`), and a file of another version is refused: a
   change to the tables raises the version and says how an old file moves.
 - `crates/mensor` is the binary. Its `tests/e2e.rs` joins a real host and
-  real bodies, over loopback and in memory, with a scripted model.
-- A transport is two halves. A body reaches its mind through a
-  `mensor_body_host::Dial`, which returns a `Link`. A mind's host takes a
-  body through `Host::connect`, which returns a `Connection`. The WebSocket
+  real hands, over loopback and in memory, with a scripted model.
+- A transport is two halves. A hand reaches its mind through a
+  `mensor_hand_host::Dial`, which returns a `Link`. A mind's host takes a
+  hand through `Host::connect`, which returns a `Connection`. The WebSocket
   is one pair; `crates/mensor/src/local.rs` joins the two in memory.
 - A mind's host performs `Output::Append` before any output after it. Never
   send what is not stored.
-- A capability implements `mensor_body::Capability`. It names itself and its
+- A capability implements `mensor_hand::Capability`. It names itself and its
   operations, and bounds its own output. `files` is one capability over a
-  `FileSystem`: a disk in `body-host`, rows in the worker.
+  `FileSystem`: a disk in `hand-host`, rows in the worker.
 - A protocol change updates `docs/protocol.md`, `crates/protocol` and both
   hosts, and bumps `VERSION` when an old reader would misread it.
 

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use futures_util::future::{Either, select};
-use mensor_body::{CallFuture, Capability};
+use mensor_hand::{CallFuture, Capability};
 use mensor_protocol::{CapabilityDecl, OperationDecl, Reply};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -77,7 +77,7 @@ impl Capability for Web {
             if operation != "fetch" {
                 return Reply::Error(format!("fetch has no operation named {operation}"));
             }
-            let input: Input = match mensor_body::input(&operation, input) {
+            let input: Input = match mensor_hand::input(&operation, input) {
                 Ok(input) => input,
                 Err(reply) => return reply,
             };

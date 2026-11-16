@@ -1,6 +1,6 @@
 [package]
-name = "mensor-body"
-description = "The body core: what a body remembers, and the capabilities it offers"
+name = "mensor-hand"
+description = "The hand core: what a hand remembers, and the capabilities it offers"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

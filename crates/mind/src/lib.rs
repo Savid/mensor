@@ -1,14 +1,14 @@
 //! The mind core: a journal, a turn loop and a fork, with no I/O.
 //!
 //! A mind is a history and a loop: ask the model, do what it asked for through
-//! the body, ask again. A [`Mind`] is that loop as a state machine. A host
-//! feeds it what happens (a prompt, a body's `hello`, a result, a model's
+//! the hand, ask again. A [`Mind`] is that loop as a state machine. A host
+//! feeds it what happens (a prompt, a hand's `hello`, a result, a model's
 //! reply) and it answers with [`Output`]s for the host to perform in order:
-//! store an [`Item`], send a message to the body, ask the model.
+//! store an [`Item`], send a message to the hand, ask the model.
 //!
 //! The history is the whole state. A mind rebuilt from its stored items with
 //! [`Mind::load`] carries on where the old one stopped, and a mind made by
-//! [`Forking`] shares its parent's history up to the point its cloned body
+//! [`Forking`] shares its parent's history up to the point its cloned hand
 //! had reached.
 //!
 //! A mind holds only the end of a long history. Once its model has summed a
@@ -19,10 +19,10 @@
 //! Four rules hold throughout:
 //!
 //! - **Store before send.** A call is an item in the history before it is
-//!   sent to the body, so the history always knows what the body may have done.
-//! - **No call runs twice.** A call the body may have run is never sent again:
+//!   sent to the hand, so the history always knows what the hand may have done.
+//! - **No call runs twice.** A call the hand may have run is never sent again:
 //!   its outcome is recorded as unknown and the model is told to look.
-//! - **One mind, one body.** A clone of the body gets a mind of its own.
+//! - **One mind, one hand.** A clone of the hand gets a mind of its own.
 //! - **New minds start idle.** A forked mind calls no model until prompted.
 //!
 //! This crate is pure: no I/O, no clock and no randomness.

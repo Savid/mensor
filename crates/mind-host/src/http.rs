@@ -13,28 +13,28 @@ use axum::{Json, Router};
 use futures_util::stream::{self, Stream};
 use futures_util::{SinkExt, StreamExt};
 use mensor_api::{
-    History, PAGE, PairStatus, Problem, PromptBody, PromptReply, Writing, authorized,
+    History, MindStatus, PAGE, Problem, PromptBody, PromptReply, Writing, authorized,
 };
 use mensor_mind::{Item, StoreError};
-use mensor_protocol::{FromBody, Hello, MAX_FRAME_BYTES, Name, Refusal, VERSION, version_of};
+use mensor_protocol::{FromHand, Hello, MAX_FRAME_BYTES, Name, Refusal, VERSION, version_of};
 use serde::Deserialize;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::time::timeout;
 
 use crate::host::{Host, HostError, Rejected};
-use crate::pair::{Outgoing, Told};
+use crate::task::{Outgoing, Told};
 
 impl Host {
     /// The attach endpoint and the API as an [`axum`] router.
     pub fn router(&self) -> Router {
         Router::new()
             .route("/v1/attach", get(attach))
-            .route("/v1/pairs", get(pairs))
-            .route("/v1/pairs/{name}", get(pair))
-            .route("/v1/pairs/{name}/prompt", post(prompt))
-            .route("/v1/pairs/{name}/interrupt", post(interrupt))
-            .route("/v1/pairs/{name}/history", get(history))
-            .route("/v1/pairs/{name}/events", get(events))
+            .route("/v1/minds", get(pairs))
+            .route("/v1/minds/{name}", get(pair))
+            .route("/v1/minds/{name}/prompt", post(prompt))
+            .route("/v1/minds/{name}/interrupt", post(interrupt))
+            .route("/v1/minds/{name}/history", get(history))
+            .route("/v1/minds/{name}/events", get(events))
             .layer(middleware::from_fn_with_state(self.clone(), guard))
             .with_state(self.clone())
     }
@@ -79,14 +79,14 @@ async fn guard(State(host): State<Host>, request: Request, next: Next) -> Respon
     next.run(request).await
 }
 
-async fn pairs(State(host): State<Host>) -> Json<Vec<PairStatus>> {
+async fn pairs(State(host): State<Host>) -> Json<Vec<MindStatus>> {
     Json(host.pairs().await)
 }
 
 async fn pair(
     State(host): State<Host>,
     Path(name): Path<String>,
-) -> Result<Json<PairStatus>, HostError> {
+) -> Result<Json<MindStatus>, HostError> {
     Ok(Json(host.pair(&Name::new(name)?).await?))
 }
 
@@ -103,7 +103,7 @@ async fn prompt(
 async fn interrupt(
     State(host): State<Host>,
     Path(name): Path<String>,
-) -> Result<Json<PairStatus>, HostError> {
+) -> Result<Json<MindStatus>, HostError> {
     Ok(Json(host.interrupt(&Name::new(name)?).await?))
 }
 
@@ -196,7 +196,7 @@ async fn attach(State(host): State<Host>, upgrade: WebSocketUpgrade) -> Response
         .on_upgrade(move |socket| serve(host, socket))
 }
 
-/// Serves one body's connection: reads its `hello`, joins it to a mind, then
+/// Serves one hand's connection: reads its `hello`, joins it to a mind, then
 /// carries messages both ways until either end is gone.
 async fn serve(host: Host, mut socket: WebSocket) {
     let hello = match timeout(host.config().hello_timeout, hello(&mut socket)).await {
@@ -234,14 +234,14 @@ async fn serve(host: Host, mut socket: WebSocket) {
                 None => break,
             },
             frame = timeout(idle, frames.next()) => match frame {
-                Ok(Some(Ok(Message::Text(text)))) => match FromBody::decode(&text) {
+                Ok(Some(Ok(Message::Text(text)))) => match FromHand::decode(&text) {
                     Ok(message) => {
                         if !connection.send(message) {
                             break;
                         }
                     }
                     Err(error) => {
-                        tracing::warn!(body = %name, %error, "a body sent what the protocol does not define");
+                        tracing::warn!(hand = %name, %error, "a hand sent what the protocol does not define");
                         let refusal = Refusal::Protocol;
                         let frame = CloseFrame { code: refusal.code(), reason: refusal.reason().into() };
                         let _ = sink.send(Message::Close(Some(frame))).await;
@@ -262,8 +262,8 @@ async fn hello(socket: &mut WebSocket) -> Result<Hello, Refusal> {
         match socket.recv().await {
             Some(Ok(Message::Text(text))) => {
                 return match version_of(&text) {
-                    Some(VERSION) => match FromBody::decode(&text) {
-                        Ok(FromBody::Hello(hello)) => Ok(*hello),
+                    Some(VERSION) => match FromHand::decode(&text) {
+                        Ok(FromHand::Hello(hello)) => Ok(*hello),
                         _ => Err(Refusal::Protocol),
                     },
                     Some(_) => Err(Refusal::Version),

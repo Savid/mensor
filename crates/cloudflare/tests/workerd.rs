@@ -276,9 +276,9 @@ impl Worker {
                         return Ok(());
                     }
                     let status = response.status();
-                    let body = response.text().await.unwrap_or_default();
-                    let body: String = body.chars().take(300).collect();
-                    format!("{status} {kind:?}: {body}")
+                    let hand = response.text().await.unwrap_or_default();
+                    let hand: String = hand.chars().take(300).collect();
+                    format!("{status} {kind:?}: {hand}")
                 }
                 Err(error) => error.to_string(),
             };
@@ -301,15 +301,15 @@ impl Worker {
     }
 
     fn pair(&self, pair: &str, rest: &str) -> String {
-        format!("{}/v1/pairs/{pair}{rest}", self.url)
+        format!("{}/v1/minds/{pair}{rest}", self.url)
     }
 
-    async fn prompt(&self, pair: &str, body: Value) -> (StatusCode, Value) {
+    async fn prompt(&self, pair: &str, hand: Value) -> (StatusCode, Value) {
         let sent = self
             .http
             .post(self.pair(pair, "/prompt"))
             .bearer_auth(TOKEN)
-            .json(&body);
+            .json(&hand);
         let response = sent.send().await.unwrap();
         let (status, answer) = (response.status(), response.text().await.unwrap());
         let read = serde_json::from_str(&answer);
@@ -436,7 +436,7 @@ async fn a_pair_runs_whole_turns_inside_one_object() {
     let (model, model_url) = Model::serve().await;
     let worker = Worker::start(directory.path(), &model_url).await;
 
-    // A prompt starts the pair. The model writes a file through the body.
+    // A prompt starts the pair. The model writes a file through the hand.
     let haiku = json!({"path": "notes/haiku.txt", "content": "an old pond\n"});
     model
         .then(uses("tu_1", "write", &haiku))
@@ -458,7 +458,7 @@ async fn a_pair_runs_whole_turns_inside_one_object() {
         &json!({"output": "wrote 12 bytes to notes/haiku.txt"})
     );
 
-    // The model was given the credential, the system prompt and the body's
+    // The model was given the credential, the system prompt and the hand's
     // operations as tools, and was told how its call ended.
     let (headers, first) = model.request(0);
     assert_eq!(headers["x-api-key"], "key-for-tests");
@@ -635,7 +635,7 @@ async fn a_call_in_flight_when_its_object_is_killed_is_lost_and_never_run_again(
     })
     .await;
 
-    // The runtime dies while the body's call is still running.
+    // The runtime dies while the hand's call is still running.
     worker.kill();
     let worker = Worker::start(directory.path(), &model_url).await;
 
@@ -692,7 +692,7 @@ async fn an_interrupt_ends_the_turn_and_frees_the_object_at_once() {
         ["attached", "prompt", "paused", "prompt", "step"]
     );
 
-    // While the body fetches a page that never arrives.
+    // While the hand fetches a page that never arrives.
     let page = json!({"url": format!("{model_url}/slow")});
     model.then(uses("tu_1", "fetch", &page));
     worker

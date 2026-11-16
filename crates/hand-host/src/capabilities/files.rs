@@ -1,11 +1,11 @@
 use std::path::{Path, PathBuf};
 
-use mensor_body::{FileSystem, FsFuture};
+use mensor_hand::{FileSystem, FsFuture};
 
-/// A body's files on its own machine's disk, for the `files` capability.
+/// A hand's files on its own machine's disk, for the `files` capability.
 ///
-/// A relative path is taken from the body's directory. Nothing confines a
-/// path to that directory: keeping a body inside bounds is the job of
+/// A relative path is taken from the hand's directory. Nothing confines a
+/// path to that directory: keeping a hand inside bounds is the job of
 /// whoever runs it.
 #[derive(Clone, Debug)]
 pub struct Disk {
@@ -64,7 +64,7 @@ fn said(error: impl std::fmt::Display) -> String {
 
 #[cfg(test)]
 mod tests {
-    use mensor_body::{Capability, Files};
+    use mensor_hand::{Capability, Files};
     use mensor_protocol::Reply;
     use serde_json::{Value, json};
 

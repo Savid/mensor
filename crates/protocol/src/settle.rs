@@ -1,15 +1,15 @@
 use crate::{CallId, Hello, Reply};
 
-/// What becomes of one call the mind still waits on, once a body says hello.
+/// What becomes of one call the mind still waits on, once a hand says hello.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Settled {
-    /// The body holds its result: take it.
+    /// The hand holds its result: take it.
     Take(Reply),
-    /// The body is still running it: wait for its result.
+    /// The hand is still running it: wait for its result.
     Wait,
-    /// The body never read it: send it again under the same id.
+    /// The hand never read it: send it again under the same id.
     Resend,
-    /// The body read it but holds no result, or is a body that restarted. It
+    /// The hand read it but holds no result, or is a hand that restarted. It
     /// may have run, so nothing is sent again.
     Unknown,
 }
@@ -19,10 +19,10 @@ pub enum Settled {
 pub struct Plan {
     /// Each call the mind waits on, in the order given, and what becomes of it.
     pub calls: Vec<(CallId, Settled)>,
-    /// The results to ack once those taken are stored: every one the body
+    /// The results to ack once those taken are stored: every one the hand
     /// holds, including any the mind already had.
     pub ack: Vec<CallId>,
-    /// Whether this is a body process the mind has not recorded: its first,
+    /// Whether this is a hand process the mind has not recorded: its first,
     /// or one that restarted.
     pub new_boot: bool,
 }
@@ -33,12 +33,12 @@ pub struct Plan {
 /// the boot the mind last stored, and `pending` the calls in its history with
 /// no result yet.
 ///
-/// 1. The boot changed: the body restarted and remembers none of the pending
+/// 1. The boot changed: the hand restarted and remembers none of the pending
 ///    calls. Each may have run, so each is [`Settled::Unknown`].
 /// 2. Otherwise, for each pending call, the first that holds:
-///    - the body holds its result: [`Settled::Take`];
-///    - the body is running it: [`Settled::Wait`];
-///    - its id is above the body's `lastId`: [`Settled::Resend`];
+///    - the hand holds its result: [`Settled::Take`];
+///    - the hand is running it: [`Settled::Wait`];
+///    - its id is above the hand's `lastId`: [`Settled::Resend`];
 ///    - otherwise it was read and is gone: [`Settled::Unknown`].
 pub fn settle(recorded: Option<&str>, pending: &[CallId], hello: &Hello) -> Plan {
     let new_boot = recorded != Some(hello.boot.as_str());
@@ -128,7 +128,7 @@ mod tests {
     }
 
     #[test]
-    fn a_body_that_restarted_knows_no_pending_call() {
+    fn a_hand_that_restarted_knows_no_pending_call() {
         let plan = settle(Some("b1"), &[41, 42], &hello("b2", 0, &[], &[]));
         assert_eq!(
             plan.calls,

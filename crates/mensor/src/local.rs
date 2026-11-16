@@ -1,11 +1,11 @@
-//! A body in its mind's own process.
+//! A hand in its mind's own process.
 //!
 //! The protocol is the same as over a network. Only the transport differs:
 //! messages pass through memory, with no socket between the two.
 
-use mensor_body_host::{BoxFuture, Dial, DialError, Gone, Incoming, Link};
+use mensor_hand_host::{BoxFuture, Dial, DialError, Gone, Incoming, Link};
 use mensor_mind_host::{Connection, Host, Outgoing, Rejected};
-use mensor_protocol::{FromBody, Hello};
+use mensor_protocol::{FromHand, Hello};
 
 /// Reaches a [`Host`] in the same process.
 #[derive(Clone)]
@@ -35,7 +35,7 @@ impl Dial for Local {
 struct Direct(Connection);
 
 impl Link for Direct {
-    fn send(&mut self, message: FromBody) -> BoxFuture<'_, Result<(), Gone>> {
+    fn send(&mut self, message: FromHand) -> BoxFuture<'_, Result<(), Gone>> {
         let sent = self.0.send(message);
         Box::pin(async move { if sent { Ok(()) } else { Err(Gone) } })
     }

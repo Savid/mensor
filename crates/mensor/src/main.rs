@@ -1,20 +1,20 @@
-//! Run a mind's host, a body that dials one, or both in one process.
+//! Run a mind's host, a hand that dials one, or both in one process.
 
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
-use mensor::body::{Body, Does, alive};
+use mensor::hand::{Does, Hand, alive};
 use mensor::host::{Hosting, open};
 use mensor::local::Local;
-use mensor_body::{Core, Limits};
-use mensor_body_host::boot;
+use mensor_hand::{Core, Limits};
+use mensor_hand_host::boot;
 use mensor_protocol::Name;
 
 #[derive(Parser)]
 #[command(
     name = "mensor",
     version,
-    about = "Run a mind's host, a body that attaches to one, or both together"
+    about = "Run a mind's host, a hand that attaches to one, or both together"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -23,13 +23,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Host minds: serve the endpoint bodies attach to, and the API.
+    /// Host minds: serve the endpoint hands attach to, and the API.
     Serve(Hosting),
-    /// Run a body on this machine, and dial a mind's host.
-    Body(Body),
-    /// Host minds and run one body, in this one process.
+    /// Run a hand on this machine, and dial a mind's host.
+    Hand(Hand),
+    /// Host minds and run one hand, in this one process.
     ///
-    /// The body's commands run on this machine as this user, beside a
+    /// The hand's commands run on this machine as this user, beside a
     /// process that holds the model's credentials. Use it on a machine you
     /// trust the model with.
     Run(Run),
@@ -39,7 +39,7 @@ enum Command {
 struct Run {
     #[command(flatten)]
     host: Hosting,
-    /// The body's name, and so the pair's.
+    /// The hand's name, and so the pair's.
     #[arg(long, default_value = "local")]
     name: Name,
     #[command(flatten)]
@@ -51,7 +51,7 @@ async fn main() -> ExitCode {
     mensor::log();
     mensor::exit(match Cli::parse().command {
         Command::Serve(hosting) => mensor::host::serve(hosting).await,
-        Command::Body(body) => mensor::body::run(body).await,
+        Command::Hand(hand) => mensor::hand::run(hand).await,
         Command::Run(run) => self::run(run).await,
     })
 }

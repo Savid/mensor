@@ -9,14 +9,14 @@ use serde_json::Value;
 /// The future of one call to a capability. Dropping it stops the call.
 pub type CallFuture<'a> = Pin<Box<dyn Future<Output = Reply> + Send + 'a>>;
 
-/// Something a body can do.
+/// Something a hand can do.
 ///
 /// A capability is known by its name and its operations, not by where it
-/// runs: `files` may be a real disk on one body and rows in a database on
+/// runs: `files` may be a real disk on one hand and rows in a database on
 /// another. It decides its own details, such as how much output it keeps.
 /// The core around it handles ids, held results and acks.
 pub trait Capability: Send + Sync {
-    /// The capability's name and operations, as the body's `hello` lists them.
+    /// The capability's name and operations, as the hand's `hello` lists them.
     fn declare(&self) -> CapabilityDecl;
 
     /// Runs one operation. An operation the capability does not have, or
@@ -31,14 +31,14 @@ pub fn input<T: DeserializeOwned>(operation: &str, input: Value) -> Result<T, Re
         .map_err(|error| Reply::Error(format!("the input of {operation} is not valid: {error}")))
 }
 
-/// The capabilities one body has.
+/// The capabilities one hand has.
 #[derive(Clone, Default)]
 pub struct Capabilities {
     all: Vec<(String, Arc<dyn Capability>)>,
 }
 
 impl Capabilities {
-    /// A body that can do nothing.
+    /// A hand that can do nothing.
     pub fn new() -> Self {
         Self::default()
     }

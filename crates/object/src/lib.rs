@@ -1,20 +1,20 @@
-//! A mind and its body as one object.
+//! A mind and its hand as one object.
 //!
 //! Some hosts keep a whole pair in one place: a serverless object that owns
 //! a small database and is woken to do a piece of work. There is no socket
 //! to speak the protocol over, and no second process to dial in, but the
-//! rules are the ones a server and a remote body keep. An [`Object`] holds a
-//! [`Mind`](mensor_mind::Mind) and a body's [`Core`](mensor_body::Core) and
+//! rules are the ones a server and a remote hand keep. An [`Object`] holds a
+//! [`Mind`](mensor_mind::Mind) and a hand's [`Core`](mensor_hand::Core) and
 //! passes the protocol's messages between them in memory.
 //!
 //! The host supplies three things: a [`Storage`] for the history and for
-//! what the body remembers, a [`Model`], and the body's capabilities. It
+//! what the hand remembers, a [`Model`], and the hand's capabilities. It
 //! then calls [`step`] until there is nothing left to do:
 //!
 //! ```
 //! use std::cell::RefCell;
 //!
-//! use mensor_body::Capabilities;
+//! use mensor_hand::Capabilities;
 //! use mensor_mind::{Block, ModelError, ModelReply, ModelRequest, Settings, Stop, Usage};
 //! use mensor_object::{MemoryStorage, Model, Object, step};
 //! use mensor_protocol::Name;
@@ -44,7 +44,7 @@
 //! ```
 //!
 //! An object may stop at any instant and be opened again over the same
-//! storage. What it was doing then is settled as a body's reconnection is:
+//! storage. What it was doing then is settled as a hand's reconnection is:
 //! a model that was being asked is asked again, and a call that was running
 //! is recorded as lost, with an outcome nobody knows, and never run twice.
 //!

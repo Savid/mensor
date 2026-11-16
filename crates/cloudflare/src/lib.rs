@@ -1,19 +1,19 @@
 //! mensor on Cloudflare Workers: each pair is one Durable Object.
 //!
-//! A `Pair` object holds a mind, its body and the body's files in the
-//! object's own `SQLite` database. Nothing dials in: the mind and the body
+//! A `Pair` object holds a mind, its hand and the hand's files in the
+//! object's own `SQLite` database. Nothing dials in: the mind and the hand
 //! pass the protocol's messages in memory, through
-//! [`mensor_object::Object`]. The body's capabilities are `files`, kept as
+//! [`mensor_object::Object`]. The hand's capabilities are `files`, kept as
 //! rows in that database, and `fetch`.
 //!
 //! The Worker in front of the objects serves the API `mensor serve` does,
 //! for one pair at a time:
 //!
-//! - `POST /v1/pairs/{name}/prompt` stores a prompt. The first prompt to a
+//! - `POST /v1/minds/{name}/prompt` stores a prompt. The first prompt to a
 //!   name starts its pair.
-//! - `POST /v1/pairs/{name}/interrupt` stops its turn.
-//! - `GET /v1/pairs/{name}` says what the pair is doing.
-//! - `GET /v1/pairs/{name}/history` and `/events` read its history, the
+//! - `POST /v1/minds/{name}/interrupt` stops its turn.
+//! - `GET /v1/minds/{name}` says what the pair is doing.
+//! - `GET /v1/minds/{name}/history` and `/events` read its history, the
 //!   second as server-sent events.
 //!
 //! An object does its work on its alarm, so a prompt is answered before the
@@ -21,7 +21,7 @@
 //! carry on from what it stored.
 
 mod api;
-mod pair;
+mod mind;
 mod provider;
 mod sql;
 mod web;

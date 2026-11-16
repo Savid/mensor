@@ -8,8 +8,8 @@ use std::time::Duration;
 use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures_util::future::{Either, select};
 use futures_util::{StreamExt, stream};
-use mensor_api::{History, PAGE, PairStatus, Problem, PromptBody, PromptReply, Prompted};
-use mensor_body::{Capabilities, Files};
+use mensor_api::{History, MindStatus, PAGE, Problem, PromptBody, PromptReply, Prompted};
+use mensor_hand::{Capabilities, Files};
 use mensor_mind::{Origin, Settings};
 use mensor_object::{Object, PromptError, StorageError, step};
 use mensor_protocol::Name;
@@ -43,10 +43,10 @@ const WAKE: Duration = Duration::from_mins(8);
 
 type Shared = Rc<RefCell<Object<SqlStore>>>;
 
-/// One pair: a mind, its body and its files, in this object's database.
+/// One pair: a mind, its hand and its files, in this object's database.
 ///
 /// The alarm is the object's only worker. A prompt is stored and sets the
-/// alarm; the alarm asks the model and runs the body's calls until the mind
+/// alarm; the alarm asks the model and runs the hand's calls until the mind
 /// is idle. An object that is stopped mid-work wakes on the same alarm and
 /// carries on from what it stored.
 #[durable_object]
@@ -303,8 +303,8 @@ impl Pair {
         let object = self.known(name)?;
         self.wake(&object).await?;
         let object = object.borrow();
-        // A pair here is never a fork, and its body is always with it.
-        let status = PairStatus {
+        // A pair here is never a fork, and its hand is always with it.
+        let status = MindStatus {
             pair: mensor_mind::Pair {
                 name: object.name().clone(),
                 origin: Origin::Root,
@@ -456,7 +456,7 @@ async fn follow(
     }
 }
 
-/// A string no other body has. It marks one body's memory, and guards
+/// A string no other hand has. It marks one hand's memory, and guards
 /// nothing, so the platform's ordinary random numbers are enough.
 fn boot() -> String {
     // The 52 random bits of each number the platform draws.

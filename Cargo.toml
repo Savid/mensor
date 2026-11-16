@@ -12,8 +12,8 @@ repository = "https://github.com/Savid/todo"
 
 [workspace.dependencies]
 mensor-api = { path = "crates/api" }
-mensor-body = { path = "crates/body" }
-mensor-body-host = { path = "crates/body-host" }
+mensor-hand = { path = "crates/hand" }
+mensor-hand-host = { path = "crates/hand-host" }
 mensor-model = { path = "crates/model" }
 mensor-mind = { path = "crates/mind" }
 mensor-mind-host = { path = "crates/mind-host" }
@@ -27,7 +27,7 @@ futures-channel = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 getrandom = "0.3"
 nix = { version = "0.31", default-features = false, features = ["signal"] }
-# No crypto of its own: a host installs ring, as the body does, which is a
+# No crypto of its own: a host installs ring, as the hand does, which is a
 # third the size of the default.
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
 rusqlite = { version = "0.42", features = ["bundled"] }
