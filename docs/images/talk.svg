@@ -1,0 +1,137 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 428" width="880" height="428" role="img" aria-label="A parent m forks two children with a prompt each, then waits, at rest and needing no hand. Each child writes a haiku and ends its turn; wait returns what each said. m tells one child to add a title, which reaches it as a prompt from its parent, waits for it alone, and hears the title back.">
+  <title>Parents and children</title>
+  <style>
+    svg {
+      --bg: #f8f8fb; --frame: #e3e3ec; --panel: #f0f0f6; --surface: #ffffff;
+      --ink: #1c1d2b; --muted: #5c5f73; --faint: #8e91a5; --line: #d0d2dd; --wire: #4a4d63;
+      --mind: #6246d0; --mind-soft: #f0ecff; --mind-edge: #c6baf5;
+      --hand: #bd4f0b; --hand-soft: #fff0e4; --hand-edge: #f1c29e;
+      --model: #08776b; --model-soft: #e3f4f0; --model-edge: #9fd6cb;
+      --ok: #1d7a39; --ok-soft: #e6f4ea; --ok-edge: #a7d8b4;
+      --warn: #b3261e; --warn-soft: #fdeceb; --warn-edge: #f2b8b4;
+    }
+    @media (prefers-color-scheme: dark) {
+      svg {
+        --bg: #0f1118; --frame: #262938; --panel: #141722; --surface: #1a1d29;
+        --ink: #e8e9f1; --muted: #a2a5ba; --faint: #737790; --line: #353a4d; --wire: #b4b7ca;
+        --mind: #ab98ff; --mind-soft: #1f1a38; --mind-edge: #4b3f95;
+        --hand: #ff9f5e; --hand-soft: #2b1b0f; --hand-edge: #74401b;
+        --model: #4fd3bc; --model-soft: #0f2824; --model-edge: #22635a;
+        --ok: #5fd07c; --ok-soft: #10261a; --ok-edge: #245c35;
+        --warn: #ff8a80; --warn-soft: #2f1416; --warn-edge: #7a2a2a;
+      }
+    }
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif; font-size: 13px; fill: var(--ink); }
+    .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace; }
+    .title { font-size: 14px; font-weight: 600; }
+    .sub { font-size: 12px; fill: var(--muted); }
+    .lbl { font-size: 11.5px; fill: var(--muted); }
+    .note { font-size: 11.5px; fill: var(--muted); font-style: italic; }
+    .eyebrow { font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em; fill: var(--faint); }
+    .b { font-weight: 600; }
+    .mind { fill: var(--mind); } .hand { fill: var(--hand); } .model { fill: var(--model); }
+    .ok { fill: var(--ok); } .warn { fill: var(--warn); } .muted { fill: var(--muted); } .faint { fill: var(--faint); }
+    .bg { fill: var(--bg); stroke: var(--frame); }
+    .panel { fill: var(--panel); stroke: var(--line); }
+    .slot { fill: none; stroke: var(--line); stroke-dasharray: 4 4; }
+    .node { fill: var(--surface); stroke: var(--line); }
+    .node.k-mind { stroke: var(--mind-edge); } .node.k-hand { stroke: var(--hand-edge); } .node.k-model { stroke: var(--model-edge); }
+    .soft.k-mind { fill: var(--mind-soft); stroke: var(--mind-edge); }
+    .soft.k-hand { fill: var(--hand-soft); stroke: var(--hand-edge); }
+    .soft.k-model { fill: var(--model-soft); stroke: var(--model-edge); }
+    .soft.k-ok { fill: var(--ok-soft); stroke: var(--ok-edge); }
+    .soft.k-warn { fill: var(--warn-soft); stroke: var(--warn-edge); }
+    .soft.k-plain { fill: var(--panel); stroke: var(--line); }
+    .badge.k-mind { fill: var(--mind-soft); } .badge.k-hand { fill: var(--hand-soft); }
+    .badge.k-model { fill: var(--model-soft); } .badge.k-plain { fill: var(--panel); }
+    .ic { color: var(--muted); } .ic.k-mind { color: var(--mind); } .ic.k-hand { color: var(--hand); }
+    .ic.k-model { color: var(--model); } .ic.k-warn { color: var(--warn); }
+    .wire { fill: none; stroke: var(--wire); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+    .wire.k-mind { stroke: var(--mind); } .wire.k-hand { stroke: var(--hand); } .wire.k-model { stroke: var(--model); }
+    .wire.k-warn { stroke: var(--warn); } .wire.k-faint { stroke: var(--faint); }
+    .dash { stroke-dasharray: 5 4; }
+    .dot { stroke-dasharray: 1 4; }
+    .track { fill: none; stroke: var(--mind); stroke-width: 2.5; stroke-linecap: round; }
+    .lane { fill: none; stroke: var(--hand); stroke-width: 1.5; stroke-linecap: round; }
+    .life { fill: none; stroke: var(--line); stroke-width: 1.25; stroke-dasharray: 3 4; }
+    .tick.p { fill: var(--faint); } .tick.s { fill: var(--mind); } .tick.o { fill: var(--hand); }
+    .bar.k-mind { fill: var(--mind-soft); stroke: var(--mind); } .bar.k-hand { fill: var(--hand-soft); stroke: var(--hand); }
+    .gem.k-mind { fill: var(--mind); } .gem.k-hand { fill: var(--hand); } .gem.k-warn { fill: var(--warn); }
+    .gem.k-bg { fill: var(--bg); }
+    .tip { fill: var(--wire); } .tip.k-mind { fill: var(--mind); } .tip.k-hand { fill: var(--hand); }
+    .tip.k-model { fill: var(--model); } .tip.k-faint { fill: var(--faint); } .tip.k-warn { fill: var(--warn); }
+  </style>
+  <defs>
+    <filter id="lift" x="-10%" y="-20%" width="120%" height="150%">
+      <feDropShadow dx="0" dy="1.5" stdDeviation="2" flood-color="#1c1a3a" flood-opacity="0.08"/>
+    </filter>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="tip" d="M0,1 L9,5 L0,9 L2.6,5 Z"/></marker>
+    <marker id="a-mind" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="tip k-mind" d="M0,1 L9,5 L0,9 L2.6,5 Z"/></marker>
+    <marker id="a-hand" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="tip k-hand" d="M0,1 L9,5 L0,9 L2.6,5 Z"/></marker>
+    <marker id="a-model" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="tip k-model" d="M0,1 L9,5 L0,9 L2.6,5 Z"/></marker>
+    <marker id="a-faint" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="tip k-faint" d="M0,1 L9,5 L0,9 L2.6,5 Z"/></marker>
+    <marker id="a-warn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="tip k-warn" d="M0,1 L9,5 L0,9 L2.6,5 Z"/></marker>
+    <symbol id="i-mind" viewBox="-8 -8 16 16"><circle r="6.2" fill="none" stroke="currentColor" stroke-width="1.5"/><circle r="2.6" fill="currentColor"/></symbol>
+    <symbol id="i-hand" viewBox="-8 -8 16 16"><path d="M-5.5,-4 L-1.5,0 L-5.5,4 M0.5,4.5 L6,4.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-model" viewBox="-8 -8 16 16"><path d="M0,-7 C0.9,-2 2,-0.9 7,0 C2,0.9 0.9,2 0,7 C-0.9,2 -2,0.9 -7,0 C-2,-0.9 -0.9,-2 0,-7 Z" fill="currentColor"/></symbol>
+    <symbol id="i-store" viewBox="-8 -8 16 16"><g fill="none" stroke="currentColor" stroke-width="1.4"><ellipse cy="-4.5" rx="5.5" ry="2"/><path d="M-5.5,-4.5 V4.5 C-5.5,7.2 5.5,7.2 5.5,4.5 V-4.5"/><path d="M-5.5,0 C-5.5,2.6 5.5,2.6 5.5,0"/></g></symbol>
+    <symbol id="i-you" viewBox="-8 -8 16 16"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cy="-3" r="3"/><path d="M-6,6.5 C-6,1.2 6,1.2 6,6.5"/></g></symbol>
+    <symbol id="i-key" viewBox="-8 -8 16 16"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="-3" r="3.2"/><path d="M0.2,0 H6.5 M4.5,0 V2.8 M6.5,0 V2.2"/></g></symbol>
+    <symbol id="i-worker" viewBox="-8 -8 16 16"><path d="M1.5,-7 L-4.5,1 H-0.2 L-1.5,7 L4.5,-1 H0.2 Z" fill="currentColor"/></symbol>
+    <symbol id="i-alarm" viewBox="-8 -8 16 16"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle r="6"/><path d="M0,-3.5 V0 L2.6,1.8"/></g></symbol>
+    <symbol id="i-cut" viewBox="-8 -8 16 16"><path d="M-4,-4 L4,4 M4,-4 L-4,4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  </defs>
+  <rect class="bg" x="0.5" y="0.5" width="879" height="427" rx="16"/>
+
+  <!-- The parent from the start; each child from the fork that makes it -->
+  <rect class="node k-mind" x="160" y="28" width="120" height="48" rx="10" filter="url(#lift)"/>
+  <circle class="badge k-mind" cx="186" cy="52.0" r="13"/>
+  <use href="#i-mind" class="ic k-mind" x="178" y="44" width="16" height="16"/>
+  <text x="208" y="49.0" class="title"><tspan class="mono mind">m</tspan></text>
+  <text x="208" y="66.0" class="sub">parent</text>
+  <path class="life" d="M220,76 L220,404"/>
+  <rect class="node k-mind" x="420" y="92" width="160" height="40" rx="10" filter="url(#lift)"/>
+  <circle class="badge k-mind" cx="446" cy="112.0" r="13"/>
+  <use href="#i-mind" class="ic k-mind" x="438" y="104" width="16" height="16"/>
+  <text x="468" y="117.0" class="title"><tspan class="mono mind">m.k3x9q2ab</tspan></text>
+  <path class="life" d="M500,132 L500,404"/>
+  <rect class="node k-mind" x="660" y="132" width="160" height="40" rx="10" filter="url(#lift)"/>
+  <circle class="badge k-mind" cx="686" cy="152.0" r="13"/>
+  <use href="#i-mind" class="ic k-mind" x="678" y="144" width="16" height="16"/>
+  <text x="708" y="157.0" class="title"><tspan class="mono mind">m.p8d1rx0q</tspan></text>
+  <path class="life" d="M740,172 L740,404"/>
+
+  <!-- fork, then wait at rest -->
+  <rect class="bar k-mind" x="215" y="96" width="10" height="84" rx="3"/>
+  <text x="204" y="116" class="lbl mono mind b" text-anchor="end">fork</text>
+  <path class="wire k-mind" d="M225,112 L420,112" marker-end="url(#a-mind)"/>
+  <path class="wire k-mind" d="M225,152 L660,152" marker-end="url(#a-mind)"/>
+  <text x="240" y="106" class="note">“Write a haiku about rain…”</text>
+  <text x="240" y="146" class="note">“Write a haiku about the sun…”</text>
+  <text x="204" y="180" class="lbl mono mind b" text-anchor="end">wait</text>
+  <text x="204" y="216" class="note" text-anchor="end">at rest</text>
+  <text x="204" y="232" class="note" text-anchor="end">needs no hand</text>
+  <rect class="bar k-mind" x="495" y="132" width="10" height="80" rx="3"/>
+  <text x="514" y="176" class="lbl">writes poem.txt</text>
+  <path class="wire k-mind dash" d="M495,212 L225,212" marker-end="url(#a-mind)"/>
+  <text x="240" y="206" class="lbl">said “Soft rain taps the roof…”</text>
+  <rect class="bar k-mind" x="735" y="172" width="10" height="72" rx="3"/>
+  <text x="754" y="210" class="lbl">writes poem.txt</text>
+  <path class="wire k-mind dash" d="M735,244 L225,244" marker-end="url(#a-mind)"/>
+  <text x="240" y="238" class="lbl">said “Golden sun climbs high…”</text>
+
+  <!-- tell one child, and wait for it alone -->
+  <rect class="bar k-mind" x="215" y="252" width="10" height="56" rx="3"/>
+  <text x="204" y="276" class="lbl mono mind b" text-anchor="end">tell</text>
+  <path class="wire k-mind" d="M225,272 L495,272" marker-end="url(#a-mind)"/>
+  <text x="240" y="266" class="note">“Add a title as the first line…”</text>
+  <rect class="bar k-mind" x="495" y="272" width="10" height="68" rx="3"/>
+  <text x="514" y="292" class="lbl">arrives as a prompt:</text>
+  <text x="514" y="308" class="lbl mono">“(From your parent m) …”</text>
+  <text x="204" y="308" class="lbl mono mind b" text-anchor="end">wait</text>
+  <path class="wire k-mind dash" d="M495,340 L225,340" marker-end="url(#a-mind)"/>
+  <text x="240" y="334" class="lbl">said “Silver Threads”</text>
+  <rect class="bar k-mind" x="215" y="348" width="10" height="36" rx="3"/>
+  <text x="204" y="372" class="lbl" text-anchor="end">ends its turn</text>
+  <text x="240" y="372" class="note">“I like the rain haiku better…”</text>
+</svg>

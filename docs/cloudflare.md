@@ -6,17 +6,7 @@ the hand's files in the object's own SQLite database. Nothing dials in and
 nothing is hosted: a prompt wakes the object, and it sleeps when the mind is
 idle.
 
-```mermaid
-flowchart LR
-  client["client"] -- "POST /v1/minds/a1/prompt" --> worker["Worker"]
-  worker -- "by name" --> object
-  subgraph object["Durable Object a1"]
-    mind["mind"] -- "call, in memory" --> hand["hand local"]
-    hand --> db[("SQLite: history, hand, files")]
-    mind --> db
-  end
-  mind -- "fetch" --> model["the model"]
-```
+![A request reaches a Worker, which finds the Durable Object named after the mind. Inside, the mind and its hand pass calls in memory, and the history, the hand's memory and its files are tables in the object's SQLite.](images/cloudflare.svg)
 
 The mind and the hand are the ones a server and a remote hand run. They
 pass the protocol's messages in memory, through `mensor_object::Object`, so

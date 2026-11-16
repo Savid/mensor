@@ -73,6 +73,8 @@ hand may forget them.
 
 ## Delivery
 
+![A hand says hello with the last id it read. Calls are stored before they are sent, and results acked once stored. The connection drops while call 41 runs; the next hello carries its held result.](images/protocol.svg)
+
 - **At most once.** The mind stores a call before it sends it, under ids
   that only grow. One mind numbers the calls of all its hands, so each hand
   sees ids that rise. The hand starts a call only if its id is above
@@ -91,6 +93,8 @@ hand may forget them.
 ## Settling a hello
 
 `pending` is every call the mind sent this hand that has no outcome yet.
+
+![A hello with lastId 41, running 41 and held 40: call 39 is unknown, the mind takes 40's result, waits for 41, and sends 42 again.](images/settle.svg)
 
 1. **The boot changed** from the one the mind last stored for this hand: the
    hand restarted and remembers none of the pending calls. Each may have

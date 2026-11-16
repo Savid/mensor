@@ -131,6 +131,12 @@ While iterating, test the crate you touched: `cargo test -p mensor-mind`.
 - A workerd test starts the worker with `--var` values made for it and an
   empty environment.
 
+## Docs
+
+- Diagrams are SVGs in `docs/images`, written by hand: colours are CSS
+  variables, redefined under `prefers-color-scheme: dark`, background
+  included. No mermaid. A change to what a diagram shows updates it.
+
 ## Secrets
 
 - Never print, log or commit a model key or the host's token. Check a

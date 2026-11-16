@@ -5,6 +5,8 @@ history and calls the model. A hand runs commands and edits files on a
 machine. One mind drives up to four hands at once, and the model names the
 hand for each call.
 
+![You prompt a mind over HTTP. The mind holds the history, calls the model and stores every item; hands on other machines dial in, take calls and send back results.](docs/images/overview.svg)
+
 The mind also has tools of its own:
 
 | Tool | Does |
@@ -14,18 +16,6 @@ The mind also has tools of its own:
 | `tell` | Sends a message to the mind's parent or one of its children. |
 | `clone_hand` | Clones a hand into the same mind, as another hand. |
 | `release_hand` | Lets a hand go. |
-
-```mermaid
-flowchart LR
-  subgraph host["mensor serve"]
-    M["mind m"]
-    C["mind m.k3x9q2ab"]
-  end
-  a1["hand a1"] --> M
-  b2["hand b2"] --> M
-  a1c["hand a1, a clone"] --> C
-  M -. "fork" .-> C
-```
 
 ## Quick start
 
@@ -92,6 +82,8 @@ Without it, the host refuses to listen anywhere but loopback.
 
 ## Forks and clones
 
+![fork branches the history into a child mind per prompt, each with a hand on a copy of the directory. clone_hand gives the same mind a second hand on a copy, until release_hand lets it go and deletes the copy.](docs/images/fork.svg)
+
 - The mind's own tools run after the hand tools of their step, one at a
   time. A fork runs alone: no other tool of the mind's runs in its step.
 - `fork` and `clone_hand` use a hand's `clone` capability, which copies the
@@ -110,6 +102,8 @@ Without it, the host refuses to listen anywhere but loopback.
   original directory is never deleted. Run one process per directory.
 
 ## Parents and children
+
+![A parent forks two children, waits at rest while they work, hears what each said, tells one to add a title, and waits for that one alone.](docs/images/talk.svg)
 
 - `tell` reaches the other mind as a prompt marked "(From your parent m)" or
   "(From your child m.k3x9q2ab)". A message sent again after a restart is
@@ -186,6 +180,8 @@ Commands never see the host's token or the model's credentials. A hand is
 not a sandbox: confining it is up to whoever runs it.
 
 ## Layout
+
+![What each runtime is built from: the hosts on top, and under them the pure crates, the same ones wherever they are needed.](docs/images/crates.svg)
 
 | Crate | Holds |
 | --- | --- |
