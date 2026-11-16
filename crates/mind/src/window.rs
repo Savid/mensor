@@ -83,6 +83,12 @@ fn conversation(
     // what the last step before it had seen.
     let (steps_from, prompts_from) = match summary {
         Some((at, text, from, hands, kin)) => {
+            // A summary a child shares with its parent names the parent's
+            // kin: the child's own follow it.
+            let parted = items[at..]
+                .iter()
+                .any(|item| matches!(item, Item::Parted { .. }));
+            let kin = if parted { (None, &Vec::new()) } else { kin };
             user.extend(summed_up(text, hands, kin));
             told.extend(hands.keys());
             let from = usize::try_from(from.saturating_sub(before)).unwrap_or(usize::MAX);
@@ -324,6 +330,43 @@ mod tests {
             text: text.into(),
             from: None,
         }
+    }
+
+    #[test]
+    fn a_child_is_not_told_its_parents_kin_from_a_summary_they_share() {
+        let name = |name: &str| Name::new(name).unwrap();
+        let items = [
+            Item::Summary {
+                text: "So far.".into(),
+                usage: Usage::default(),
+                from: 0,
+                hands: BTreeMap::new(),
+                last_call: 0,
+                forks_left: 10,
+                parent: Some(name("g")),
+                children: vec![name("g.aaaaaaaa")],
+            },
+            Item::Parted {
+                parent: name("g.bbbbbbbb"),
+                left: 4,
+            },
+            Item::Prompt {
+                key: None,
+                text: "go".into(),
+                from: Some(name("g.bbbbbbbb")),
+            },
+        ];
+        let told: Vec<String> = window(&items, 0, 1000)
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter_map(|content| match content {
+                Content::Text(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(told.len(), 2, "{told:?}");
+        assert!(told[0].ends_with("So far."));
+        assert_eq!(told[1], "(From your parent g.bbbbbbbb:)\n\ngo");
     }
 
     fn step(seen: u64, content: Vec<Block>) -> Item {

@@ -1535,8 +1535,8 @@ async fn a_parent_that_waits_through_a_host_restart_hears_from_its_child() {
     hands.ended().await.unwrap();
     first.stop().await;
 
-    // A new host wakes the parent, which waits with no hand. The hands
-    // come back: the child's command is lost, and it answers.
+    // A new host wakes the parent, which waits with no hand. Only the
+    // child's hand comes back: its command is lost, and it answers.
     let second = Server::over(open(), Config::default(), "127.0.0.1:0").await;
     eventually("the parent is awake", || async {
         second.host.awake().await == 1
@@ -1545,13 +1545,106 @@ async fn a_parent_that_waits_through_a_host_restart_hears_from_its_child() {
     for _ in 0..2 {
         second.model.then_with(waiting_through);
     }
-    let _hands = second.cloning_hand("m", "a1", &dir, &clones);
-    eventually("the parent hears from its child", || async {
-        said(&second.history("m")) == ["It answered."]
-    })
+    let copy = only_in(&clones.join(child.as_str()));
+    let (_child_hand, _child_task) = second.hand(fresh(child.as_str(), "a1"), &copy);
+    eventually(
+        "the parent hears from its child with no hand of its own",
+        || async {
+            second
+                .history("m")
+                .iter()
+                .any(|item| matches!(item, Item::Outcome { tool_use, .. } if tool_use == "tu_w"))
+        },
+    )
     .await;
     assert_eq!(
         outcome(&second.history("m"), "tu_w"),
+        &Outcome::Output(json!({child.as_str(): {"said": "Here."}}))
+    );
+    let status = second.status("m").await.unwrap();
+    assert_eq!((status.state, status.hands.len()), (State::Thinking, 0));
+
+    // Its hand back, it answers.
+    let (_hand, _task) = second.hand(fresh("m", "a1"), &dir);
+    eventually("the parent answers", || async {
+        said(&second.history("m")) == ["It answered."]
+    })
+    .await;
+}
+
+/// Answers a parent that forks and waits, and a child that takes a while.
+fn slow_child(request: &ModelRequest) -> ModelReply {
+    let told = told(request);
+    reply(if told.contains("\"you\"") {
+        if told.contains("exit") {
+            vec![text("Here.")]
+        } else {
+            vec![bash("tu_s", "sleep 3")]
+        }
+    } else if told.contains("Here.") {
+        vec![text("It answered.")]
+    } else if told.contains("\"children\"") {
+        vec![own("tu_w", "wait", json!({}))]
+    } else {
+        vec![own("tu_f", "fork", json!({"prompts": ["take your time"]}))]
+    })
+}
+
+#[tokio::test]
+async fn a_parent_that_rests_while_it_waits_hears_from_its_child() {
+    let server = Server::start(Config {
+        rest_after: Duration::from_millis(50),
+        ..Config::default()
+    })
+    .await;
+    for _ in 0..5 {
+        server.model.then_with(slow_child);
+    }
+    let root = tempfile::tempdir().unwrap();
+    let (dir, clones) = (root.path().join("work"), root.path().join("clones"));
+    std::fs::create_dir(&dir).unwrap();
+    let _hands = server.cloning_hand("m", "a1", &dir, &clones);
+    server.settled("m").await;
+    server.prompt("m", "fork and wait").await;
+    eventually("the parent waits", || async {
+        server
+            .status("m")
+            .await
+            .is_some_and(|status| !status.watching.is_empty())
+    })
+    .await;
+
+    // The parent lets its hand go, and rests while its child works. Told
+    // from the store, it still says whom it waits for.
+    server.host.release(&name("m"), name("a1")).await.unwrap();
+    let minds = server.host.minds().await;
+    let child = &minds
+        .iter()
+        .find(|status| status.mind.name != name("m"))
+        .unwrap()
+        .mind
+        .name;
+    eventually("the child works, and is the only mind awake", || async {
+        let working = server
+            .status(child.as_str())
+            .await
+            .is_some_and(|status| status.state == State::Working && status.hands == [name("a1")]);
+        working && server.host.awake().await == 1
+    })
+    .await;
+    let parent = server.status("m").await.unwrap();
+    assert_eq!(
+        (parent.state, parent.watching, parent.hands.len()),
+        (State::Working, vec![child.clone()], 0)
+    );
+
+    // The child rests; the parent wakes, hears it, and answers.
+    eventually("the parent answers", || async {
+        said(&server.history("m")) == ["It answered."]
+    })
+    .await;
+    assert_eq!(
+        outcome(&server.history("m"), "tu_w"),
         &Outcome::Output(json!({child.as_str(): {"said": "Here."}}))
     );
 }

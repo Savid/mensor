@@ -136,9 +136,11 @@ and so is every process a command left running.
 **A clone runs where its original does**, as a task of the same process,
 `mensor hand` or `mensor run`, and stops with it. The copies are the
 clones: started again, the process starts a hand on every whole copy of a
-mind of its own root. A copy is removed once its mind lets its clone go, or
-once its clone gives up on a child that was never made. The directory the
-first hand works in is never removed. Run one process for one directory.
+mind of its own root. A copy is removed once its mind lets its clone go. A
+clone that gives up on a child that never appears ends and keeps its copy,
+for whoever runs it to look at. The directory the first hand works in is
+never removed. Run one process for one directory, with a clones directory
+of its own: the default, `<dir>.clones`, is.
 
 ## Models
 
@@ -179,8 +181,8 @@ and a host loads, only the items from there.
 of its minds. A mind is loaded when a hand dials in or something is asked of
 it, and leaves memory a minute after it has no hand connected, nobody
 following it and no model asked. What a resting mind is doing is read from
-the store, and a host that starts wakes only a mind with something to do
-that needs no hand. With 20,000 minds stored, `mensor-mind` started in 12 ms and held
+the store, and a host that starts wakes, in the background, only a mind
+with something to do that needs no hand. With 20,000 minds stored, `mensor-mind` started in 12 ms and held
 10 MB; through a conversation of 36 MB it held 20 MB. What a host frees it
 gives back to the system twice a minute: 300 minds awake held 244 MB, and
 12 MB once they rested. A child stores none of its parent's items again: it

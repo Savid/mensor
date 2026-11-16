@@ -8,7 +8,9 @@ use serde_json::{Value, json};
 use crate::fork::{Fork, child_name, shares};
 use crate::tools::{CLONE, Does, Family, HAND, MAX_CHILDREN, MindTool, Table, split};
 use crate::window::{to_summarise, window};
-use crate::{Block, Content, HandRecord, Item, Message, ModelReply, ModelRequest, Outcome, Stop};
+use crate::{
+    Block, Content, HandRecord, Item, Latest, Message, ModelReply, ModelRequest, Outcome, Stop,
+};
 
 /// Something the host of a mind must do. A host performs a mind's outputs in
 /// the order given, and makes each [`Output::Append`] and [`Output::Fork`]
@@ -315,17 +317,19 @@ impl Mind {
     /// history's tail. It does nothing until it is [started](Mind::start),
     /// and asks no model until a hand says hello.
     pub fn load(name: Name, from: u64, items: Vec<Item>, settings: Settings) -> Self {
-        let mut mind = Self::whole(name, from, items, settings);
+        let mut mind = Self::whole(name, &[], from, items, settings);
         mind.shed();
         mind
     }
 
-    /// What the mind of a history is doing, told from its latest items
-    /// alone: those from index `from`, which a store gives as a history's
-    /// [`recent`](crate::Store::recent) items. A host says this of a mind it
-    /// has not loaded, which has no hand connected.
-    pub fn status(name: Name, from: u64, items: Vec<Item>) -> Status {
-        Self::whole(name, from, items, Settings::default()).status_now()
+    /// What the mind of a history is doing, told from what a store gives as
+    /// its [`recent`](crate::Store::recent) items: the latest of it, and
+    /// the items before them that say what it knows of its hands and kin. A
+    /// host says this of a mind it has not loaded, which has no hand
+    /// connected.
+    pub fn status(name: Name, latest: Latest) -> Status {
+        let Latest { known, from, items } = latest;
+        Self::whole(name, &known, from, items, Settings::default()).status_now()
     }
 
     /// What the mind is doing.
@@ -866,8 +870,16 @@ impl Mind {
         Ok(outputs)
     }
 
-    /// A mind that holds `items`, from index `from`, with nothing shed.
-    fn whole(name: Name, from: u64, items: Vec<Item>, settings: Settings) -> Self {
+    /// A mind that holds `items`, from index `from`, with nothing shed. It
+    /// first learns what `known` says, each item at its index: what came
+    /// before `items`, as far as it tells of the hands and the kin.
+    fn whole(
+        name: Name,
+        known: &[(u64, Item)],
+        from: u64,
+        items: Vec<Item>,
+        settings: Settings,
+    ) -> Self {
         let mut mind = Self {
             name,
             before: from,
@@ -882,36 +894,15 @@ impl Mind {
             telling: None,
             watching: None,
         };
+        for (at, item) in known {
+            note(&mut mind.hands, &mut mind.kin, item, *at);
+        }
         // What the last summary carries, then what came after it.
         let summary = mind
             .items
             .iter()
             .rposition(|item| matches!(item, Item::Summary { .. }));
-        if let Some(Item::Summary {
-            hands,
-            forks_left,
-            parent,
-            children,
-            ..
-        }) = summary.map(|at| &mind.items[at])
-        {
-            for (name, record) in hands {
-                let hand = Hand {
-                    record: record.clone(),
-                    attached: false,
-                    joined: 0,
-                    released: record.released.then_some(0),
-                };
-                mind.hands.insert(name.clone(), hand);
-            }
-            mind.kin = Kin {
-                parent: parent.clone(),
-                children: children.clone(),
-                forks_left: *forks_left,
-            };
-        }
-        let after = summary.map_or(0, |at| at + 1);
-        for (at, item) in (mind.before..).zip(&mind.items).skip(after) {
+        for (at, item) in (mind.before..).zip(&mind.items).skip(summary.unwrap_or(0)) {
             note(&mut mind.hands, &mut mind.kin, item, at);
         }
         mind
@@ -1326,14 +1317,17 @@ impl Mind {
         // The first of the mind's own tools that has not ended. The others
         // wait their turn.
         let mut own = None;
-        // A fork runs alone among the mind's own tools.
+        // A fork runs alone among the mind's own tools: one that has not
+        // ended, or is a call.
         let fork = content.iter().find_map(|block| match block {
-            Block::ToolUse { id, name, input } => {
+            Block::ToolUse { id, name, input }
+                if self.outcome_of(id).is_none() || self.call_of(id).is_some() =>
+            {
                 let named = split(input).0;
                 let meant = self.meant(&table, name, named.as_ref(), at);
                 matches!(meant, Some((Does::Mind(MindTool::Fork), _))).then_some(id)
             }
-            Block::Text { .. } | Block::Other { .. } => None,
+            Block::ToolUse { .. } | Block::Text { .. } | Block::Other { .. } => None,
         });
         for block in content {
             let Block::ToolUse { id, name, input } = block else {
@@ -1360,7 +1354,7 @@ impl Mind {
             }
             let (named, rest) = split(input);
             let Some((does, holders)) = self.meant(&table, name, named.as_ref(), at) else {
-                return skip(not_meant(&table, name, named.as_ref()));
+                return skip(not_meant(&table, name));
             };
             match does {
                 Does::Mind(_) if fork.is_some_and(|fork| fork != id) => {
@@ -1955,6 +1949,28 @@ impl Mind {
 /// its kin.
 fn note(hands: &mut BTreeMap<Name, Hand>, kin: &mut Kin, item: &Item, at: u64) {
     match item {
+        // What a summary carries is what the mind knew when it was written.
+        Item::Summary {
+            hands: recorded,
+            forks_left,
+            parent,
+            children,
+            ..
+        } => {
+            for (name, record) in recorded {
+                hands.entry(name.clone()).or_insert_with(|| Hand {
+                    record: record.clone(),
+                    attached: false,
+                    joined: 0,
+                    released: record.released.then_some(0),
+                });
+            }
+            *kin = Kin {
+                parent: parent.clone(),
+                children: children.clone(),
+                forks_left: *forks_left,
+            };
+        }
         Item::Attached {
             hand,
             boot,
@@ -2005,35 +2021,35 @@ fn note(hands: &mut BTreeMap<Name, Hand>, kin: &mut Kin, item: &Item, at: u64) {
             }
             kin.forks_left = *left;
         }
+        // A child's history holds its parent's: the parent's children are
+        // its siblings.
         Item::Parted { parent, left } => {
-            kin.parent = Some(parent.clone());
-            kin.forks_left = *left;
+            *kin = Kin {
+                parent: Some(parent.clone()),
+                children: Vec::new(),
+                forks_left: *left,
+            };
         }
         _ => {}
     }
 }
 
-/// Why a use named `name` means no tool: no tool has the name, or it is
-/// one each of several hands knows by another tool, and the use named
-/// none of them.
-fn not_meant(table: &Table, name: &str, named: Option<&Result<Name, String>>) -> String {
-    let mut holders: Vec<Name> = table
-        .find_all(name)
+/// Why a use named `name` means no tool: no tool has the name, or hands
+/// coming and going have made it mean several, which have names of their
+/// own.
+fn not_meant(table: &Table, name: &str) -> String {
+    let tools: Vec<String> = table
+        .named(name)
         .into_iter()
-        .flat_map(|(_, holders)| holders.iter().cloned())
+        .map(|(tool, holders)| format!("{tool} ({})", join(holders)))
         .collect();
-    holders.sort();
-    holders.dedup();
-    match named {
-        _ if holders.is_empty() => format!("there is no tool named {name}"),
-        Some(Ok(hand)) => format!(
-            "{hand} cannot do {name}. These hands can: {}.",
-            join(&holders)
-        ),
-        _ => format!(
-            "say which hand runs this. These hands can do {name}: {}.",
-            join(&holders)
-        ),
+    if tools.is_empty() {
+        format!("there is no tool named {name}")
+    } else {
+        format!(
+            "{name} now means more than one tool: {}. Ask for one of them by its name.",
+            tools.join(", ")
+        )
     }
 }
 

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mensor_hand::{Capabilities, Core, Effect};
-use mensor_protocol::{Call, CallId, CallResult, FromHand, Refusal, Reply};
+use mensor_protocol::{Call, CallId, CallResult, FromHand, Hello, Refusal, Reply};
 use tokio::sync::mpsc;
 use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::{Instant, sleep_until};
@@ -198,7 +198,12 @@ impl Driver {
         let mut refused_since = None;
         loop {
             let hello = self.core.hello(self.config.capabilities.declare());
-            let ended = match self.config.dial.dial(hello).await {
+            let dialled = match self.dial(hello).await {
+                Ok(dialled) => dialled,
+                Err(Closed::Stopped) => return Ok(Ended::Stopped),
+                Err(_) => continue,
+            };
+            let ended = match dialled {
                 Ok(link) => {
                     tracing::debug!(%mind, %hand, "dialled the mind's host");
                     let ended = self.serve(link).await;
@@ -249,6 +254,27 @@ impl Driver {
                     return Err(Error::Refused(refusal));
                 }
                 Closed::Dropped | Closed::Redial | Closed::Refused(_) => {}
+            }
+        }
+    }
+
+    /// Dials the mind's host, until the dial ends or a control cuts it
+    /// short: told to stop, a hand stops at once, however long a dial takes.
+    async fn dial(&mut self, hello: Hello) -> Result<Result<Box<dyn Link>, DialError>, Closed> {
+        let dial = Arc::clone(&self.config.dial);
+        let dialling = dial.dial(hello);
+        tokio::pin!(dialling);
+        loop {
+            tokio::select! {
+                dialled = &mut dialling => return Ok(dialled),
+                Some((id, reply)) = self.finished.recv() => {
+                    self.finish(id, reply);
+                }
+                control = self.controls.recv(), if !self.unheld => {
+                    if let Some(closed) = self.control(control.as_ref()) {
+                        return Err(closed);
+                    }
+                }
             }
         }
     }
@@ -390,5 +416,38 @@ impl Drop for Driver {
         for (_, task) in self.tasks.drain() {
             task.abort();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mensor_hand::{Core, Limits};
+    use mensor_protocol::Name;
+
+    use super::*;
+    use crate::BoxFuture;
+
+    /// A host that never answers a dial.
+    struct Silent;
+
+    impl Dial for Silent {
+        fn dial(&self, _: Hello) -> BoxFuture<'_, Result<Box<dyn Link>, DialError>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_hand_told_to_stop_stops_while_it_dials() {
+        let core = Core::new(
+            Name::new("m").unwrap(),
+            Name::new("a1").unwrap(),
+            boot(),
+            Limits::default(),
+        );
+        let (handle, ended) = start(core, Config::new(Silent, Capabilities::new()));
+        tokio::task::yield_now().await;
+        handle.stop();
+        let ended = tokio::time::timeout(Duration::from_secs(5), ended).await;
+        assert!(matches!(ended, Ok(Ok(Ok(Ended::Stopped)))), "{ended:?}");
     }
 }

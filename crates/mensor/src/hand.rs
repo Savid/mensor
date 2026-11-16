@@ -4,13 +4,14 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
 
 use clap::Args;
 use mensor_hand::{Capabilities, Core, Limits};
-use mensor_hand_host::capabilities::{Cloning, Commands, Disk, Files, Spawn, Started, copies};
+use mensor_hand_host::capabilities::{
+    Cloning, Commands, Disk, Files, Spawn, Started, copies, remove_tree,
+};
 use mensor_hand_host::{BoxFuture, Config, Dial, Ended, Error, Handle, WebSocket, boot};
-use mensor_protocol::{Name, Refusal};
+use mensor_protocol::Name;
 use tokio::sync::watch;
 
 use crate::{CREDENTIALS, stopped, token};
@@ -130,8 +131,9 @@ pub async fn run(hand: Hand) -> Result<(), String> {
 /// clones directory as `<clones>/<mind>/<hand>.<code>`. The copies are what
 /// the clones are: [`Hands::start`] starts a hand on each copy whose mind
 /// shares the root of the one it starts, and a copy is removed once its
-/// mind lets its clone go, or its clone gives up on a mind its fork never
-/// made. A copy whose clone is stopped is kept, to be started again.
+/// mind lets its clone go. Any other copy is kept: one whose clone is
+/// stopped starts again, and one whose clone gave up on its mind is left
+/// for whoever runs the hands to look at.
 #[derive(Clone)]
 pub struct Hands {
     inner: Arc<Inner>,
@@ -140,15 +142,21 @@ pub struct Hands {
 struct Inner {
     dial: Arc<dyn Dial>,
     does: Does,
-    /// How long a clone dials a mind not made yet before it gives up.
-    give_up: Option<Duration>,
-    /// Each hand that runs, by a number of its own.
-    running: Mutex<BTreeMap<u64, Handle>>,
+    running: Mutex<Running>,
     next: AtomicU64,
     /// How many hands run.
     count: watch::Sender<usize>,
     /// How the first hand started ended, once it has.
     first: Mutex<Option<Result<(), String>>>,
+}
+
+#[derive(Default)]
+struct Running {
+    /// Each hand that runs, by a number of its own.
+    hands: BTreeMap<u64, Handle>,
+    /// Whether the hands were told to stop: a clone started after that is
+    /// stopped at once.
+    stopping: bool,
 }
 
 impl Hands {
@@ -160,23 +168,12 @@ impl Hands {
             inner: Arc::new(Inner {
                 dial: Arc::new(dial),
                 does,
-                give_up: None,
                 running: Mutex::default(),
                 next: AtomicU64::new(0),
                 count: watch::Sender::new(0),
                 first: Mutex::default(),
             }),
         }
-    }
-
-    /// The same, with clones that give up on a mind not made yet after
-    /// `give_up`, not two minutes.
-    pub fn giving_up(dial: impl Dial + 'static, does: Does, give_up: Duration) -> Self {
-        let mut hands = Self::new(dial, does);
-        if let Some(inner) = Arc::get_mut(&mut hands.inner) {
-            inner.give_up = Some(give_up);
-        }
-        hands
     }
 
     /// Starts the hand `hand` of the mind `mind` in the directory, then one
@@ -195,14 +192,12 @@ impl Hands {
         Ok(())
     }
 
-    /// Stops every hand. A clone's copy is kept.
+    /// Stops every hand, and every clone started from now on. A clone's
+    /// copy is kept.
     pub fn stop(&self) {
-        let running = self
-            .inner
-            .running
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        for handle in running.values() {
+        let mut running = self.inner.running();
+        running.stopping = true;
+        for handle in running.hands.values() {
             handle.stop();
         }
     }
@@ -221,7 +216,7 @@ impl Hands {
     }
 
     /// Starts one hand doing what `does` says. `copy` is the copy a clone
-    /// works in, removed once the clone is done with it.
+    /// works in, removed once its mind lets it go.
     fn run(
         &self,
         mind: Name,
@@ -232,17 +227,16 @@ impl Hands {
         let spawn: Arc<dyn Spawn> = Arc::new(self.clone());
         let capabilities = does.capabilities(&spawn)?;
         let core = Core::new(mind.clone(), hand.clone(), boot(), Limits::default());
-        let mut config = Config::over(Arc::clone(&self.inner.dial), capabilities);
-        if let Some(give_up) = self.inner.give_up {
-            config.give_up = give_up;
-        }
+        let config = Config::over(Arc::clone(&self.inner.dial), capabilities);
         let (handle, task) = mensor_hand_host::start(core, config);
         let id = self.inner.next.fetch_add(1, Ordering::Relaxed);
-        self.inner
-            .running
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(id, handle.clone());
+        {
+            let mut running = self.inner.running();
+            if running.stopping {
+                handle.stop();
+            }
+            running.hands.insert(id, handle.clone());
+        }
         self.inner.count.send_modify(|count| *count += 1);
         let inner = Arc::clone(&self.inner);
         tokio::spawn(async move {
@@ -253,24 +247,16 @@ impl Hands {
                 Ok(how) => tracing::info!(%mind, %hand, ?how, "a hand ended"),
                 Err(error) => tracing::warn!(%mind, %hand, %error, "a hand ended"),
             }
-            // A clone its mind let go, or whose mind was never made, is done
-            // with its copy.
-            let done = matches!(
-                ended,
-                Ok(Ended::Released) | Err(Error::Refused(Refusal::UnknownMind))
-            );
-            if let Some(copy) = copy.filter(|_| done) {
-                let removed =
-                    tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&copy)).await;
+            // A clone its mind let go is done with its copy. Any other keeps
+            // it: a clone that gave up on its mind may have dialled the wrong
+            // host, and its child's work is in it.
+            if let Some(copy) = copy.filter(|_| matches!(ended, Ok(Ended::Released))) {
+                let removed = tokio::task::spawn_blocking(move || remove_tree(&copy)).await;
                 if let Ok(Err(error)) = removed {
                     tracing::warn!(%mind, %hand, %error, "a clone's copy could not be removed");
                 }
             }
-            inner
-                .running
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .remove(&id);
+            inner.running().hands.remove(&id);
             if id == 0 {
                 *inner.first.lock().unwrap_or_else(PoisonError::into_inner) =
                     Some(ended.map(|_| ()).map_err(|error| error.to_string()));
@@ -278,6 +264,12 @@ impl Hands {
             inner.count.send_modify(|count| *count -= 1);
         });
         Ok(handle)
+    }
+}
+
+impl Inner {
+    fn running(&self) -> std::sync::MutexGuard<'_, Running> {
+        self.running.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 

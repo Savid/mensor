@@ -1,8 +1,9 @@
 //! What a mind does, driven the way a host drives it.
 
 use mensor_mind::{
-    Block, CLONE, Conflict, Content, Fork, HandRecord, Item, Message, Mind, ModelReply,
-    ModelRequest, Outcome, Output, Report, Role, Settings, State, Stop, Usage, tail_from,
+    Block, CLONE, Conflict, Content, Fork, HandRecord, Item, MemoryStore, Message, Mind,
+    MindRecord, ModelReply, ModelRequest, Origin, Outcome, Output, Report, Role, Settings, State,
+    Status, Stop, Store, Usage, tail_from,
 };
 use mensor_protocol::{
     Call, CallId, CallResult, CapabilityDecl, FromMind, Hello, Name, OperationDecl, Refusal, Reply,
@@ -1090,17 +1091,9 @@ fn what_a_mind_is_doing_is_told_from_the_latest_of_its_history_alone() {
         ]
     );
     for host in hosts {
-        // What a store gives as the latest of a history: the items from
-        // the index its last step had seen.
-        let seen = host.stored.iter().rev().find_map(|item| match item {
-            Item::Step { seen, .. } => Some(*seen),
-            _ => None,
-        });
-        let from = seen.unwrap_or(0);
-        let latest = host.stored[usize::try_from(from).unwrap()..].to_vec();
         // Told from a store, no hand is connected: a call still out waits
         // for its hand.
-        let told = Mind::status(name("m"), from, latest);
+        let told = told_from_store(&host.stored);
         assert_eq!(
             (told.state, told.length),
             (host.mind.state(), host.mind.length())
@@ -1837,18 +1830,8 @@ fn a_resting_mind_says_which_hand_its_turn_waits_for() {
     host.mind.detach(&name("b2"));
     host.reply(vec![on("tu_1", "a1", "ls"), on("tu_2", "b2", "ls")]);
     host.result(1, json!("a"));
-    // Told from its latest items alone, as a store gives them.
-    let seen = host
-        .stored
-        .iter()
-        .rev()
-        .find_map(|item| match item {
-            Item::Step { seen, .. } => Some(*seen),
-            _ => None,
-        })
-        .unwrap();
-    let latest = host.stored[usize::try_from(seen).unwrap()..].to_vec();
-    let status = Mind::status(name("m"), seen, latest);
+    // Told from its latest items, as a store gives them.
+    let status = told_from_store(&host.stored);
     assert_eq!(
         (status.state, status.waiting),
         (State::Working, vec![name("b2")])
@@ -2135,7 +2118,7 @@ fn a_mind_loaded_mid_wait_watches_again_and_says_a_message_again_as_the_same_pro
         Mind::load(name("m"), 0, again.stored.clone(), Settings::default()),
         again.stored.clone(),
     );
-    let status = Mind::status(name("m"), 0, again.stored.clone());
+    let status = told_from_store(&again.stored);
     assert_eq!(
         (status.state, status.watching, status.waiting),
         (State::Working, vec![children[1].clone()], Vec::new())
@@ -2183,7 +2166,7 @@ fn a_mind_at_rest_reports_what_it_said_last() {
     assert_eq!(host.mind.report(), None);
     host.reply(vec![text("Hi."), text("How can I help?")]);
     assert_eq!(
-        Mind::status(name("m"), 0, host.stored.clone()).report,
+        told_from_store(&host.stored).report,
         Some(Report::Said("Hi.\n\nHow can I help?".into()))
     );
     host.prompt("list the files");
@@ -2234,7 +2217,7 @@ fn a_summary_carries_a_minds_kin() {
 }
 
 #[test]
-fn a_name_two_hands_now_know_by_other_tools_asks_which_hand() {
+fn a_name_two_hands_now_know_by_other_tools_names_them() {
     let mut host = Host::new();
     host.attach(&reading("a1", "boot-a", "files"));
     host.attach(&reading("b2", "boot-b", "notes"));
@@ -2242,8 +2225,123 @@ fn a_name_two_hands_now_know_by_other_tools_asks_which_hand() {
     assert_eq!(shown(&host), ["files_read", "notes_read"]);
     host.reply(vec![own("tu_1", "read", json!({}))]);
     assert!(
-        matches!(outcome(&host.stored, "tu_1"), Outcome::NotRun(why) if why == "say which hand runs this. These hands can do read: a1, b2."),
+        matches!(outcome(&host.stored, "tu_1"), Outcome::NotRun(why) if why == "read now means more than one tool: files_read (a1), notes_read (b2). Ask for one of them by its name."),
         "{:?}",
         outcome(&host.stored, "tu_1")
+    );
+}
+
+/// What a mind with the history `stored` is doing, told as its host tells
+/// it of a mind that rests: from what a store gives as its recent items.
+fn told_from_store(stored: &[Item]) -> Status {
+    let store = MemoryStore::new();
+    let record = MindRecord {
+        name: name("m"),
+        origin: Origin::Root,
+    };
+    store.create(&record, stored).unwrap();
+    Mind::status(name("m"), store.recent(&name("m")).unwrap())
+}
+
+/// The child the fork `at` of a host's forks made, as its host would hold
+/// it, with its clone said hello.
+fn child_of(host: &Host, at: usize) -> Host {
+    let fork = host.forks[at].clone();
+    let mut stored = host.stored[..usize::try_from(fork.inherited).unwrap()].to_vec();
+    stored.extend(fork.items.clone());
+    let mut child = Host::around(
+        Mind::load(fork.name.clone(), 0, stored.clone(), Settings::default()),
+        stored,
+    );
+    child.attach(&Hello {
+        mind: fork.name,
+        ..cloning("a1", "boot-clone")
+    });
+    child
+}
+
+#[test]
+fn a_child_of_a_later_fork_takes_no_sibling_for_its_child() {
+    let (mut host, first) = forked();
+    host.reply(vec![text("Forked.")]);
+    host.prompt("once more");
+    host.reply(vec![own(
+        "tu_5",
+        "fork",
+        json!({"hand": "a1", "prompts": ["the third way"]}),
+    )]);
+    let (id, _) = clone_call(&mut host, "a1");
+    host.result_from("a1", id, Reply::Output(json!({})));
+
+    let mut third = child_of(&host, 2);
+    assert_eq!(
+        shown(&third),
+        ["bash", "fork", "clone_hand", "release_hand", "tell"]
+    );
+    third.reply(vec![own(
+        "tu_9",
+        "tell",
+        json!({"mind": first[0], "text": "hi"}),
+    )]);
+    assert!(
+        matches!(outcome(&third.stored, "tu_9"), Outcome::NotRun(why) if why.contains("You have no children.")),
+        "{:?}",
+        outcome(&third.stored, "tu_9")
+    );
+    // The parent has all three.
+    assert_eq!(host.mind.watching(), Vec::<Name>::new());
+    host.reply(vec![own("tu_6", "wait", json!({}))]);
+    assert_eq!(host.watched.last().unwrap().len(), 3);
+}
+
+#[test]
+fn a_resting_parent_says_which_children_it_waits_for() {
+    let (mut host, children) = forked();
+    host.reply(vec![own("tu_2", "wait", json!({}))]);
+    let status = told_from_store(&host.stored);
+    assert_eq!(
+        (status.state, status.watching, status.waiting),
+        (State::Working, children, Vec::new())
+    );
+}
+
+#[test]
+fn a_fork_that_ended_does_not_end_the_minds_other_tools() {
+    let (mut host, children) = forked();
+    // a1, the hand that could clone, is let go: fork is no tool.
+    let outputs = host.mind.release(&name("a1")).unwrap();
+    host.perform(outputs);
+    host.reply(vec![
+        own("tu_2", "wait", json!({})),
+        own("tu_3", "fork", json!({"hand": "b2", "prompts": ["x"]})),
+    ]);
+    assert!(matches!(outcome(&host.stored, "tu_3"), Outcome::NotRun(_)));
+    assert_eq!(host.watched.len(), 1);
+    // A hand that can clone joins: the fork that ended stays ended, and
+    // the wait goes on.
+    host.attach(&cloning("c3", "boot-c"));
+    assert_eq!(host.mind.watching(), children);
+    for child in &children {
+        let outputs = host.mind.rested(child, Report::Said("done".into()));
+        host.perform(outputs);
+    }
+    assert!(matches!(outcome(&host.stored, "tu_2"), Outcome::Output(_)));
+}
+
+#[test]
+fn a_name_one_hand_now_knows_by_two_tools_names_them() {
+    let mut host = Host::new();
+    let mut both = reading("a1", "boot-a", "files");
+    both.capabilities.push(capability("notes", "read"));
+    host.attach(&both);
+    host.prompt("read it");
+    host.reply(vec![own("tu_1", "read", json!({"hand": "a1"}))]);
+    assert_eq!(
+        outcome(&host.stored, "tu_1"),
+        &Outcome::NotRun(
+            "read now means more than one tool: files_read (a1), notes_read (a1). Ask for one of \
+             them by its name."
+                .into()
+        )
     );
 }

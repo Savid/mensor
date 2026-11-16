@@ -166,9 +166,9 @@ impl std::fmt::Debug for Connection {
 
 impl Host {
     /// Opens a host over a store. A mind with something to do that waits
-    /// for no hand is woken: one saying a message, waiting for its
-    /// children, or with its model to ask and every hand let go. Every other
-    /// mind rests until a hand dials in or something is asked of it.
+    /// for no hand is woken soon after: one saying a message, waiting for
+    /// its children, or with its model to ask and every hand let go. Every
+    /// other mind rests until a hand dials in or something is asked of it.
     pub async fn open(
         store: Arc<dyn Store>,
         model: Arc<dyn Model>,
@@ -198,29 +198,41 @@ impl Host {
         let host = Self {
             inner: Arc::new(inner),
         };
-        host.resume().await?;
+        host.resume();
         Ok(host)
     }
 
-    /// Wakes every mind that has something to do and waits for no hand.
-    async fn resume(&self) -> Result<(), StoreError> {
-        let names: Vec<Name> = self.inner.minds.lock().await.keys().cloned().collect();
-        for name in names {
-            let (store, of) = (Arc::clone(&self.inner.store), name.clone());
-            let status = blocking(move || {
-                let (from, items) = store.recent(&of)?;
-                Ok(Mind::status(of, from, items))
+    /// Wakes, in the background, every mind that has something to do and
+    /// waits for no hand. A mind whose history cannot be read is left to
+    /// rest, and fails when something wakes it.
+    fn resume(&self) {
+        let host = self.clone();
+        tokio::spawn(async move {
+            let names: Vec<Name> = host.inner.minds.lock().await.keys().cloned().collect();
+            let store = Arc::clone(&host.inner.store);
+            let working = blocking(move || {
+                let working = names.into_iter().filter(|name| match store.recent(name) {
+                    Ok(latest) => {
+                        let status = Mind::status(name.clone(), latest);
+                        status.state != State::Idle && status.waiting.is_empty()
+                    }
+                    Err(error) => {
+                        tracing::warn!(mind = %name, %error, "a mind's history could not be read");
+                        false
+                    }
+                });
+                Ok(working.collect::<Vec<_>>())
             })
-            .await?;
-            if status.state != State::Idle && status.waiting.is_empty() {
-                tracing::info!(mind = %name, "a mind with work to do is woken");
-                let mut minds = self.inner.minds.lock().await;
+            .await
+            .unwrap_or_default();
+            let mut minds = host.inner.minds.lock().await;
+            for name in working {
                 if let Some(slot) = minds.get_mut(&name) {
-                    self.wake(slot);
+                    tracing::info!(mind = %name, "a mind with work to do is woken");
+                    host.wake(slot);
                 }
             }
-        }
-        Ok(())
+        });
     }
 
     /// The host's configuration.
@@ -295,8 +307,7 @@ impl Host {
         // than it would be loaded with.
         let store = Arc::clone(&self.inner.store);
         let read = blocking(move || {
-            let (from, items) = store.recent(&record.name)?;
-            let status = Mind::status(record.name.clone(), from, items);
+            let status = Mind::status(record.name.clone(), store.recent(&record.name)?);
             Ok(MindStatus {
                 mind: record,
                 state: status.state,
@@ -476,10 +487,7 @@ impl Host {
             return Ok(answer.await.map_err(|_| stopped())?.report);
         }
         let (store, of) = (Arc::clone(&self.inner.store), name.clone());
-        let status = blocking(move || {
-            let (from, items) = store.recent(&of)?;
-            Ok(Mind::status(of, from, items))
-        });
+        let status = blocking(move || Ok(Mind::status(of.clone(), store.recent(&of)?)));
         Ok(status.await.map_err(HostError::Store)?.report)
     }
 

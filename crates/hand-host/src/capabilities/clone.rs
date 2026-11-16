@@ -11,8 +11,7 @@
 //! clone's, and [`copies`] finds them.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use mensor_hand::{CallFuture, Capability};
 use mensor_protocol::{CapabilityDecl, Name, OperationDecl, Reply};
@@ -134,7 +133,7 @@ impl Cloning {
             let (to, stop) = (dir.clone(), Arc::clone(&made.stop));
             let ended = tokio::task::spawn_blocking(move || {
                 copy_tree(&from, &part, &skip, &stop)?;
-                std::fs::rename(&part, &to)
+                whole(&part, &to, &stop)
             })
             .await;
             match ended {
@@ -177,7 +176,8 @@ pub struct Copied {
 
 /// Every whole copy under `clones` whose mind descends from `root`, and
 /// removes what a copy cut short left of its own. A clones directory that
-/// does not exist holds none.
+/// does not exist holds none. What cannot be read or removed is passed
+/// over, and logged.
 pub fn copies(clones: &Path, root: &str) -> std::io::Result<Vec<Copied>> {
     let mut found = Vec::new();
     let minds = match std::fs::read_dir(clones) {
@@ -185,46 +185,120 @@ pub fn copies(clones: &Path, root: &str) -> std::io::Result<Vec<Copied>> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(found),
         Err(error) => return Err(error),
     };
-    for entry in minds {
-        let entry = entry?;
-        let Some(mind) = entry
-            .file_name()
-            .to_str()
-            .and_then(|name| Name::new(name).ok())
-        else {
+    for entry in minds.flatten() {
+        let named = entry.file_name();
+        let Some(mind) = named.to_str().and_then(|name| Name::new(name).ok()) else {
             continue;
         };
-        if mind.root() != root || !entry.file_type()?.is_dir() {
+        if mind.root() != root || !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
             continue;
         }
-        for copy in std::fs::read_dir(entry.path())? {
-            let copy = copy?;
+        let copies = match std::fs::read_dir(entry.path()) {
+            Ok(copies) => copies,
+            Err(error) => {
+                tracing::warn!(dir = %entry.path().display(), %error, "copies cannot be read");
+                continue;
+            }
+        };
+        for copy in copies.flatten() {
             let (dir, name) = (copy.path(), copy.file_name());
             let Some(name) = name.to_str() else {
                 continue;
             };
-            if !copy.file_type()?.is_dir() {
+            if !copy.file_type().is_ok_and(|kind| kind.is_dir()) {
                 continue;
             }
-            if name.ends_with(PART) {
-                std::fs::remove_dir_all(&dir)?;
-                continue;
-            }
-            let hand = name
-                .rsplit_once('.')
-                .filter(|(_, code)| code.len() == 8 && code.bytes().all(|b| b.is_ascii_hexdigit()))
-                .and_then(|(hand, _)| Name::new(hand).ok());
-            if let Some(hand) = hand {
-                found.push(Copied {
-                    mind: mind.clone(),
-                    hand,
-                    dir,
-                });
+            match name.strip_suffix(PART).map(copy_of) {
+                Some(Some(_)) => {
+                    if let Err(error) = remove_tree(&dir) {
+                        let dir = dir.display();
+                        tracing::warn!(%dir, %error, "a copy cut short cannot be removed");
+                    }
+                }
+                Some(None) => {}
+                None => {
+                    if let Some(hand) = copy_of(name) {
+                        found.push(Copied {
+                            mind: mind.clone(),
+                            hand,
+                            dir,
+                        });
+                    }
+                }
             }
         }
     }
     found.sort_by(|a, b| a.dir.cmp(&b.dir));
     Ok(found)
+}
+
+/// The hand a copy named `name`, `<hand>.<code>`, is for.
+fn copy_of(name: &str) -> Option<Name> {
+    let (hand, code) = name.rsplit_once('.')?;
+    if code.len() != 8 || !code.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    Name::new(hand).ok()
+}
+
+/// Removes the tree at `path`, a directory in it that cannot be written to
+/// included, and nothing a link in it points to. A tree that is not there
+/// is removed.
+pub fn remove_tree(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            let _ = writable(path);
+            std::fs::remove_dir_all(path)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Lets its owner change every directory in the tree at `path`.
+fn writable(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.is_dir() {
+        return Ok(());
+    }
+    let mode = metadata.permissions().mode();
+    if mode & 0o700 != 0o700 {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode | 0o700))?;
+    }
+    for entry in std::fs::read_dir(path)?.flatten() {
+        let _ = writable(&entry.path());
+    }
+    Ok(())
+}
+
+/// Gives the copy made at `part` its whole name, `to`, unless its clone was
+/// undone. An undo that came first finds the copy gone, and one that comes
+/// after finds it under its whole name.
+fn whole(part: &Path, to: &Path, stop: &Stop) -> std::io::Result<()> {
+    let stopped = stop.0.lock().unwrap_or_else(PoisonError::into_inner);
+    if *stopped {
+        let _ = remove_tree(part);
+        return Err(std::io::Error::other("the clone was stopped"));
+    }
+    std::fs::rename(part, to)
+}
+
+/// Whether a clone was undone. It is set under its lock, which a copy holds
+/// while it takes its whole name.
+#[derive(Default)]
+struct Stop(Mutex<bool>);
+
+impl Stop {
+    fn is_set(&self) -> bool {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn set(&self) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = true;
+    }
 }
 
 /// What a copy is named while it is made.
@@ -259,7 +333,7 @@ struct Made {
     dirs: Vec<PathBuf>,
     started: Vec<Box<dyn Started>>,
     /// Tells a copy still being made to stop, and remove what it made.
-    stop: Arc<AtomicBool>,
+    stop: Arc<Stop>,
     kept: bool,
 }
 
@@ -274,14 +348,14 @@ impl Drop for Made {
         if self.kept {
             return;
         }
-        self.stop.store(true, Ordering::Relaxed);
+        self.stop.set();
         for started in self.started.drain(..) {
             started.stop();
         }
         let dirs = std::mem::take(&mut self.dirs);
         let remove = move || {
             for dir in dirs {
-                let _ = std::fs::remove_dir_all(&dir);
+                let _ = remove_tree(&dir);
             }
         };
         // Off the runtime's threads, where there is one: a large copy takes
@@ -296,7 +370,7 @@ impl Drop for Made {
 /// Copies the tree at `from` to `to`, which must not exist, leaving out
 /// `skip` if it is inside it, until `stop` is set. What was copied is
 /// removed again if the copy fails or is stopped.
-fn copy_tree(from: &Path, to: &Path, skip: &Path, stop: &AtomicBool) -> std::io::Result<()> {
+fn copy_tree(from: &Path, to: &Path, skip: &Path, stop: &Stop) -> std::io::Result<()> {
     std::fs::create_dir_all(skip)?;
     let skip = std::fs::canonicalize(skip)?;
     if skip == std::fs::canonicalize(from)? {
@@ -309,7 +383,7 @@ fn copy_tree(from: &Path, to: &Path, skip: &Path, stop: &AtomicBool) -> std::io:
     }
     let copied = copy_dir(from, to, &skip, stop);
     if copied.is_err() {
-        let _ = std::fs::remove_dir_all(to);
+        let _ = remove_tree(to);
     }
     copied
 }
@@ -317,10 +391,10 @@ fn copy_tree(from: &Path, to: &Path, skip: &Path, stop: &AtomicBool) -> std::io:
 /// Copies a directory: files, links as links, and directories with their
 /// permissions. A pipe, a socket or a device is no file to copy, and is
 /// left out.
-fn copy_dir(from: &Path, to: &Path, skip: &Path, stop: &AtomicBool) -> std::io::Result<()> {
+fn copy_dir(from: &Path, to: &Path, skip: &Path, stop: &Stop) -> std::io::Result<()> {
     std::fs::create_dir(to)?;
     for entry in std::fs::read_dir(from)? {
-        if stop.load(Ordering::Relaxed) {
+        if stop.is_set() {
             return Err(std::io::Error::other("the clone was stopped"));
         }
         let entry = entry?;
@@ -527,6 +601,45 @@ mod tests {
         assert!(found[0].dir.join("notes.txt").exists());
         assert!(!cut.exists());
         assert!(copies(&root.path().join("none"), "m").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_copy_undone_before_it_is_whole_never_takes_its_name() {
+        let root = tempfile::tempdir().unwrap();
+        let (part, to) = (
+            root.path().join("a1.0badc0de.part"),
+            root.path().join("a1.0badc0de"),
+        );
+        std::fs::create_dir(&part).unwrap();
+        let stop = Stop::default();
+        stop.set();
+        assert!(whole(&part, &to, &stop).is_err());
+        assert!(!part.exists() && !to.exists());
+
+        std::fs::create_dir(&part).unwrap();
+        whole(&part, &to, &Stop::default()).unwrap();
+        assert!(!part.exists() && to.exists());
+    }
+
+    #[test]
+    fn a_tree_with_a_directory_no_one_may_write_to_is_removed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let clones = root.path().join("clones");
+        let cut = clones.join("m/a1.0badc0de.part");
+        std::fs::create_dir_all(cut.join("cache")).unwrap();
+        std::fs::write(cut.join("cache/mod.go"), "package m").unwrap();
+        std::fs::set_permissions(cut.join("cache"), std::fs::Permissions::from_mode(0o555))
+            .unwrap();
+        // A directory named like no copy is not the clone's to remove.
+        let theirs = clones.join("m/notes.part");
+        std::fs::create_dir_all(&theirs).unwrap();
+
+        assert!(copies(&clones, "m").unwrap().is_empty());
+        assert!(!cut.exists());
+        assert!(theirs.exists());
+        remove_tree(&root.path().join("not there")).unwrap();
     }
 
     #[tokio::test]

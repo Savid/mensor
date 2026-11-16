@@ -248,6 +248,21 @@ impl Table {
         }
     }
 
+    /// The tools `name` may mean, by the names they have now, each with
+    /// the hands that can do it.
+    pub(crate) fn named(&self, name: &str) -> Vec<(&str, &[Name])> {
+        let found = self.find_all(name);
+        self.entries
+            .iter()
+            .filter(|(_, does, holders)| {
+                found.iter().any(|(of, by)| {
+                    std::ptr::eq(*of, does) && std::ptr::eq(*by, holders.as_slice())
+                })
+            })
+            .map(|(tool, _, holders)| (tool.name.as_str(), holders.as_slice()))
+            .collect()
+    }
+
     /// Every tool `name` may mean: the one so named, or else each hand
     /// tool it named before hands came or went, by its operation alone or
     /// as `<capability>_<operation>`.

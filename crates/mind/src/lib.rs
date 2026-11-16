@@ -44,5 +44,7 @@ pub use fork::Fork;
 pub use item::{Block, HandRecord, Item, Outcome, Stop, Usage};
 pub use mind::{Conflict, Mind, NoHand, Output, Prompted, Report, Settings, State, Status};
 pub use model::{Content, Message, ModelError, ModelReply, ModelRequest, Role, Tool};
-pub use store::{MemoryStore, MindRecord, Origin, Store, StoreError, prompt_under, tail_from};
+pub use store::{
+    KNOWING, Latest, MemoryStore, MindRecord, Origin, Store, StoreError, prompt_under, tail_from,
+};
 pub use tools::{CLONE, MAX_CHILDREN};

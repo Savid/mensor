@@ -32,6 +32,25 @@ pub struct MindRecord {
     pub origin: Origin,
 }
 
+/// The kinds of item that say what a mind knows of its hands and its kin.
+pub const KNOWING: [&str; 6] = [
+    "summary", "attached", "cloned", "released", "forked", "parted",
+];
+
+/// What a store says of a mind it is not asked to load, which
+/// [`Mind::status`](crate::Mind::status) is told from.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Latest {
+    /// The items before `from` that say what the mind knows of its hands
+    /// and its kin, each with its index: those a store's
+    /// [`known`](Store::known) gives.
+    pub known: Vec<(u64, Item)>,
+    /// The index the last step had seen, or 0.
+    pub from: u64,
+    /// The items from there.
+    pub items: Vec<Item>,
+}
+
 /// Why a store refused.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -91,18 +110,36 @@ pub trait Store: Send + Sync {
     }
 
     /// The latest of a mind's history, which is what [`Mind::status`] is
-    /// told from: the index its last step had seen and the items from
-    /// there, or all of it from 0 when it holds no step. That is the round
-    /// in progress and the prompts no step has answered, however much the
-    /// mind would hold.
+    /// told from: the items from the index its last step had seen, or all
+    /// of it from 0 when it holds no step, and what is [`known`](Store::known)
+    /// from before them. That is the round in progress, the prompts no step
+    /// has answered, and the mind's hands and kin, however much the mind
+    /// would hold.
     ///
     /// [`Mind::status`]: crate::Mind::status
-    fn recent(&self, name: &Name) -> Result<(u64, Vec<Item>), StoreError> {
+    fn recent(&self, name: &Name) -> Result<Latest, StoreError> {
         let from = match self.last(name, "step")? {
             Some(Item::Step { seen, .. }) => seen,
             _ => 0,
         };
-        Ok((from, self.read(name, from, usize::MAX)?))
+        let known = self.known(name)?;
+        let known = known.into_iter().filter(|(at, _)| *at < from).collect();
+        Ok(Latest {
+            known,
+            from,
+            items: self.read(name, from, usize::MAX)?,
+        })
+    }
+
+    /// The items that say what a mind knows of its hands and its kin, each
+    /// with its index: its last summary and every item of the
+    /// [kinds](KNOWING) from the index that summary names, or from 0.
+    fn known(&self, name: &Name) -> Result<Vec<(u64, Item)>, StoreError> {
+        let (from, items) = self.tail(name)?;
+        let known = (from..).zip(items);
+        Ok(known
+            .filter(|(_, item)| KNOWING.contains(&item.kind()))
+            .collect())
     }
 
     /// The text of the prompt a mind's history holds under `key`.
@@ -347,7 +384,7 @@ mod tests {
         let (from, items) = store.tail(&name("b7")).unwrap();
         assert_eq!((from, items.len()), (2, 4));
         // With no step in it, the latest of a history is all of it.
-        assert_eq!(store.recent(&name("b7")).unwrap().0, 0);
+        assert_eq!(store.recent(&name("b7")).unwrap().from, 0);
         assert_eq!(
             store.prompt(&name("b7"), "k").unwrap().as_deref(),
             Some("3")

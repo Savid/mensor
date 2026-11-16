@@ -92,7 +92,7 @@ While iterating, test the crate you touched: `cargo test -p mensor-mind`.
   clone of it as tasks of one process, over a WebSocket or in memory, and
   starts a clone again from its copy. The copies under `--clones` are the
   only record of the clones; a copy is removed only when its mind lets its
-  clone go or its child was never made.
+  clone go, and removing one copes with directories no one may write to.
 - What the model is shown, and what each tool does, is `mind/src/tools.rs`.
   A tool use for a hand that is not connected waits unissued: a call is
   stored only when it can be sent. The mind's own tools run after the hand
@@ -105,7 +105,9 @@ While iterating, test the crate you touched: `cargo test -p mensor-mind`.
   is the same prompt; the host delivers it on a task of its own, never
   awaiting another mind from inside a mind's task. `Output::Watch` is kept
   in the host's memory alone: a mind that waits watches again when it wakes,
-  and `Host::open` wakes every mind with work that needs no hand.
+  and `Host::open` wakes every mind with work that needs no hand. What a
+  resting mind is doing is told from `Store::recent`, which carries the
+  items that say who its hands and kin are (`Store::known`).
 - A protocol change updates `docs/protocol.md`, `crates/protocol` and both
   hosts.
 

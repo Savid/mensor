@@ -51,6 +51,8 @@ const SCHEMA: &str = "
         PRIMARY KEY (mind, at)
     ) STRICT, WITHOUT ROWID;
     CREATE INDEX summaries ON items (mind, at) WHERE kind = 'summary';
+    CREATE INDEX knowing ON items (mind, at)
+        WHERE kind IN ('summary', 'attached', 'cloned', 'released', 'forked', 'parted');
     CREATE INDEX keys ON items (mind, key) WHERE key IS NOT NULL;
     COMMIT;
 ";
@@ -322,6 +324,41 @@ fn last(
     Ok(None)
 }
 
+/// The items of a lineage from index `from` that say what its mind knows of
+/// its hands and kin, each with its index.
+fn known(
+    connection: &Connection,
+    lineage: &[(Name, u64, u64)],
+    from: u64,
+) -> Result<Vec<(u64, Item)>, StoreError> {
+    let mut select = connection
+        .prepare_cached(
+            "SELECT at, item FROM items WHERE mind = ?1 AND at >= ?2 AND at < ?3 \
+             AND kind IN ('summary', 'attached', 'cloned', 'released', 'forked', 'parted') \
+             ORDER BY at",
+        )
+        .map_err(backend)?;
+    let mut known = Vec::new();
+    for (mind, start, end) in lineage.iter().rev() {
+        let start = (*start).max(from);
+        if start >= *end {
+            continue;
+        }
+        let end = i64::try_from(*end).unwrap_or(i64::MAX);
+        let rows = select
+            .query_map(params![mind.as_str(), signed(start)?, end], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(backend)?;
+        for row in rows {
+            let (at, item) = row.map_err(backend)?;
+            let item = serde_json::from_str(&item).map_err(backend)?;
+            known.push((unsigned(at)?, item));
+        }
+    }
+    Ok(known)
+}
+
 /// The items of a lineage from index `from`, `limit` of them at the most.
 fn items(
     connection: &Connection,
@@ -454,6 +491,17 @@ impl Store for SqliteStore {
             return last(&connection, &lineage, indexed, None);
         }
         last(&connection, &lineage, ("items", "kind = ?4"), Some(kind))
+    }
+
+    fn known(&self, name: &Name) -> Result<Vec<(u64, Item)>, StoreError> {
+        let connection = self.reading();
+        let lineage = lineage(&connection, name)?;
+        let indexed = ("items INDEXED BY summaries", "kind = 'summary'");
+        let from = match last(&connection, &lineage, indexed, None)? {
+            Some(Item::Summary { from, .. }) => from,
+            _ => 0,
+        };
+        known(&connection, &lineage, from)
     }
 
     fn prompt(&self, name: &Name, key: &str) -> Result<Option<String>, StoreError> {
@@ -627,8 +675,8 @@ mod tests {
             usage: mensor_mind::Usage::default(),
         };
         store.append(&name("b7"), &[prompt("6"), step]).unwrap();
-        let (from, items) = store.recent(&name("b7")).unwrap();
-        assert_eq!((from, items.len()), (6, 2));
+        let latest = store.recent(&name("b7")).unwrap();
+        assert_eq!((latest.from, latest.items.len()), (6, 2));
         assert_eq!(store.last(&name("b7"), "no such kind").unwrap(), None);
         assert!(matches!(
             store.last(&name("b7"), "summary").unwrap(),
@@ -734,6 +782,60 @@ mod tests {
         drop(old);
         let refused = SqliteStore::open(&path).unwrap_err();
         assert!(refused.to_string().contains("new file"), "{refused}");
+    }
+
+    #[test]
+    fn what_a_mind_knows_is_read_through_its_parent_from_its_last_summary() {
+        let sqlite = SqliteStore::in_memory().unwrap();
+        let memory = mensor_mind::MemoryStore::new();
+        let released = Item::Released {
+            hand: name("b2"),
+            reason: "gone".into(),
+        };
+        let summary = Item::Summary {
+            text: "So far.".into(),
+            usage: mensor_mind::Usage::default(),
+            from: 2,
+            hands: std::collections::BTreeMap::new(),
+            last_call: 0,
+            forks_left: 64,
+            parent: None,
+            children: Vec::new(),
+        };
+        let parted = Item::Parted {
+            parent: name("a1"),
+            left: 31,
+        };
+        for store in [&sqlite as &dyn Store, &memory] {
+            store.create(&record("a1", Origin::Root), &[]).unwrap();
+            store
+                .append(&name("a1"), &[prompt("0"), released.clone(), prompt("2")])
+                .unwrap();
+            let child = record(
+                "b7",
+                Origin::Fork {
+                    parent: name("a1"),
+                    inherited: 3,
+                },
+            );
+            store
+                .create(&child, &[parted.clone(), prompt("4")])
+                .unwrap();
+            assert_eq!(
+                store.known(&name("b7")).unwrap(),
+                [(1, released.clone()), (3, parted.clone())]
+            );
+            // A summary that starts from 2 leaves out what came before it.
+            store
+                .append(&name("b7"), std::slice::from_ref(&summary))
+                .unwrap();
+            assert_eq!(
+                store.known(&name("b7")).unwrap(),
+                [(3, parted.clone()), (5, summary.clone())]
+            );
+            let latest = store.recent(&name("b7")).unwrap();
+            assert_eq!((latest.from, latest.items.len()), (0, 6));
+        }
     }
 
     #[test]
