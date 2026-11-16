@@ -159,7 +159,7 @@ impl<S: Storage> Object<S> {
             Some(key) if self.mind.starts_at() > 0 => self.storage.prompt(key)?,
             _ => None,
         };
-        let prompted = self.mind.prompt(key, text, earlier.as_deref())?;
+        let prompted = self.mind.prompt(key, text, None, earlier.as_deref())?;
         self.perform(prompted.outputs)?;
         Ok(prompted.existing)
     }
@@ -229,9 +229,10 @@ impl<S: Storage> Object<S> {
                     self.store(&mut items)?;
                     self.work.push_back(Work::Ask(request));
                 }
-                // The hand cannot clone, so its mind forks nothing and
-                // lets no hand go.
-                Output::Close { .. } | Output::Fork(_) => {}
+                // The hand cannot clone, so its mind forks nothing, lets no
+                // hand go, and has no parent or children to talk to.
+                Output::Close { .. } | Output::Fork(_) | Output::Tell { .. } | Output::Watch(_) => {
+                }
             }
         }
         self.store(&mut items)?;

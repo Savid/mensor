@@ -84,6 +84,8 @@ pub struct MindStatus {
     pub hands: Vec<Name>,
     /// The hands its turn waits for, because they are not connected.
     pub waiting: Vec<Name>,
+    /// The children a `wait` of its turn waits for.
+    pub watching: Vec<Name>,
     /// How many items its history holds.
     pub length: u64,
 }
@@ -170,12 +172,13 @@ mod tests {
             state: State::Working,
             hands: vec![Name::new("a1").unwrap()],
             waiting: vec![Name::new("b2").unwrap()],
+            watching: vec![Name::new("m.k3x9q2ab").unwrap()],
             length: 3,
         };
         assert_eq!(
             serde_json::to_value(status).unwrap(),
             json!({"name": "m", "origin": "root", "state": "working", "hands": ["a1"],
-                   "waiting": ["b2"], "length": 3})
+                   "waiting": ["b2"], "watching": ["m.k3x9q2ab"], "length": 3})
         );
         let reply = PromptReply {
             status: Prompted::Accepted,

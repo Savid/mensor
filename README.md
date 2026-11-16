@@ -8,8 +8,10 @@ somewhere else, and its model says which hand runs each call.
 A mind also has tools of its own. With `fork`, the model splits the work:
 it asks a hand to **clone** itself, and each clone starts a child mind that
 shares the history up to that point and carries on with its own prompt.
-With `clone_hand`, the clone joins the same mind instead, as another hand,
-and `release_hand` lets one go.
+With `wait`, the parent reads what its children said once they are done,
+and with `tell` a parent and its children send each other messages. With
+`clone_hand`, a clone joins the same mind instead, as another hand, and
+`release_hand` lets one go.
 
 ```mermaid
 flowchart LR
@@ -68,7 +70,7 @@ Ask it to fork, and each child appears beside it:
 
 ```bash
 curl -s -X POST $api/m/prompt -H 'content-type: application/json' \
-  -d '{"text":"Fork from a1: one child translates the haiku into French, one into German."}'
+  -d '{"text":"Fork from a1: one child translates the haiku into French, one into German. Wait for both, then pick the better one."}'
 curl -s $api                # m, and its children m.<code>
 ```
 
@@ -98,10 +100,10 @@ capability, which copies the hand's directory and starts a hand on the copy.
 The mind's own tools are offered only while one of its hands has that
 capability.
 
-- **The mind's tool runs last in its step.** It is sent once every other
-  call of the step has ended, so nothing runs on any hand while a hand is
-  copied, and a child shares a history with nothing pending. A step runs one
-  of the mind's own tools; any other ends as not run.
+- **The mind's tools run after the hand tools of their step**, one at a
+  time and in order, so nothing runs on any hand while a hand is copied. A
+  fork runs alone: the other tools of the mind's own in its step end as not
+  run, so a child shares a history with nothing pending.
 - **The children are made before the fork is stored.** If the host stops in
   between, the hand repeats its result when it says hello again, and the
   fork completes once: a child that already exists counts as made.
@@ -113,20 +115,30 @@ capability.
 - **Forks have a budget.** A mind that starts from nothing may fork
   `--max-forks` minds (64 unless set), its children's forks included: each
   fork shares what remains between the mind and its children.
-- **Children work on their own.** A parent is told its children's names and
-  hears nothing more from them. A prompt the parent is given while the
-  other calls of the fork's step still run is in the history the children
-  share, so they see it too.
+- **Parents and children talk.** `tell` sends a message to the mind's
+  parent or to one of its children. It arrives as a prompt marked as theirs,
+  and is stored once, however often a stop makes it be sent again. `wait`
+  waits until children have ended their turns, and gives what each said
+  last, or that it was stopped or its model failed. A child cannot wait
+  for its parent, so two minds never wait for each other, and an interrupt
+  ends a wait.
+- **A wait outlasts its host.** A host that starts wakes each mind with
+  something to do that needs no hand, such as a wait or a message on its
+  way, and a mind that waits watches its children again when it wakes.
+- A prompt the parent is given while the other calls of the fork's step
+  still run is in the history the children share, so they see it too.
 
-Clones are made in `--clones` (`<dir>.clones` unless set): each copy at
-`<clones>/<mind>/<hand>.<code>`, a code of its own so that nothing an earlier
-run left is in the way. A pipe, a socket or a device in the directory is
-left out of a copy, and so is every process a command left running.
-`mensor hand` starts each clone as a process of its own, in its own process
-group, with its own arguments but for its mind, its name and its directory,
-and logs it to `<copy>.log`; a clone outlives the hand that started it.
-`mensor run` starts them in its own process, and starts only `local` again
-when it restarts.
+Clones are made in `--clones` (`<dir>.clones` unless set): each copy as
+`<clones>/<mind>/<hand>.<code>.part`, named `<hand>.<code>` once it is
+whole. A pipe, a socket or a device in the directory is left out of a copy,
+and so is every process a command left running.
+
+**A clone runs where its original does**, as a task of the same process,
+`mensor hand` or `mensor run`, and stops with it. The copies are the
+clones: started again, the process starts a hand on every whole copy of a
+mind of its own root. A copy is removed once its mind lets its clone go, or
+once its clone gives up on a child that was never made. The directory the
+first hand works in is never removed. Run one process for one directory.
 
 ## Models
 
@@ -167,7 +179,8 @@ and a host loads, only the items from there.
 of its minds. A mind is loaded when a hand dials in or something is asked of
 it, and leaves memory a minute after it has no hand connected, nobody
 following it and no model asked. What a resting mind is doing is read from
-the store. With 20,000 minds stored, `mensor-mind` started in 12 ms and held
+the store, and a host that starts wakes only a mind with something to do
+that needs no hand. With 20,000 minds stored, `mensor-mind` started in 12 ms and held
 10 MB; through a conversation of 36 MB it held 20 MB. What a host frees it
 gives back to the system twice a minute: 300 minds awake held 244 MB, and
 12 MB once they rested. A child stores none of its parent's items again: it
@@ -253,7 +266,7 @@ shows each operation to the model as a tool that takes a `hand`.
 | --- | --- | --- |
 | `commands` | `bash` | Runs a command, with a timeout, and kills everything it started when cancelled |
 | `files` | `read`, `write`, `edit`, `list` | Reads and changes files under the hand's directory |
-| `clone` | `clone` | Copies the hand's directory and starts a hand on each copy. Not a tool: the mind's `fork` and `clone_hand` use it |
+| `clone` | `clone` | Copies the hand's directory and starts a hand on each copy, in the same process. Not a tool: the mind's `fork` and `clone_hand` use it |
 
 In a Durable Object the names are the same and the backing differs:
 
@@ -294,7 +307,7 @@ and an alarm.
 
 ## Not built yet
 
-- A parent waiting for its children, or prompting them.
+- A `wait` that gives up after a while. An interrupt ends one.
 - The Responses API.
 - Deleting a mind.
 - A clone made from outside, such as a VM snapshot, with a way to tell it

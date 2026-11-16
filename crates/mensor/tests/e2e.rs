@@ -6,14 +6,14 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use mensor::hand::Does;
-use mensor::local::{InProcess, Local};
+use mensor::hand::{Does, Hands};
+use mensor::local::Local;
 use mensor_hand::{Capabilities, Core, Limits};
 use mensor_hand_host::capabilities::{Commands, Disk, Files};
-use mensor_hand_host::{Backoff, Dial, Error, Handle, WebSocket, boot, start};
+use mensor_hand_host::{Backoff, Dial, Ended, Error, Handle, WebSocket, boot, start};
 use mensor_mind::{
     Block, Content, Item, MemoryStore, MindRecord, ModelReply, ModelRequest, Origin, Outcome, Role,
-    Settings, State, Stop, Store, Usage,
+    Settings, State, Stop, Store, StoreError, Usage,
 };
 use mensor_mind_host::{Config, Host, HostError, MindStatus, Prompted, Scripted};
 use mensor_protocol::{Name, Refusal};
@@ -37,7 +37,7 @@ impl Server {
 
     async fn over(store: Arc<dyn Store>, config: Config, address: &str) -> Self {
         let model = Arc::new(Scripted::new());
-        let host = Host::open(store, model.clone(), config).unwrap();
+        let host = Host::open(store, model.clone(), config).await.unwrap();
         let listener = TcpListener::bind(address).await.unwrap();
         let address = listener.local_addr().unwrap();
         let serving = host.clone();
@@ -64,7 +64,7 @@ impl Server {
     }
 
     /// Starts a hand with `core`, whose commands run in `dir`.
-    fn hand(&self, core: Core, dir: &Path) -> (Handle, JoinHandle<Result<(), Error>>) {
+    fn hand(&self, core: Core, dir: &Path) -> (Handle, JoinHandle<Result<Ended, Error>>) {
         self.hand_with(core, dir, None)
     }
 
@@ -73,27 +73,27 @@ impl Server {
         core: Core,
         dir: &Path,
         token: Option<&str>,
-    ) -> (Handle, JoinHandle<Result<(), Error>>) {
+    ) -> (Handle, JoinHandle<Result<Ended, Error>>) {
         let dial = WebSocket::new(self.attach()).token(token.map(str::to_owned));
         hand_through(dial, core, dir)
     }
 
     /// Starts a hand in the host's own process, with no socket between them.
-    fn local_hand(&self, core: Core, dir: &Path) -> (Handle, JoinHandle<Result<(), Error>>) {
+    fn local_hand(&self, core: Core, dir: &Path) -> (Handle, JoinHandle<Result<Ended, Error>>) {
         hand_through(Local::new(self.host.clone()), core, dir)
     }
 
     /// Starts a hand in the host's own process that can clone itself: its
     /// clones start in this process too, and are made in `clones`.
-    fn cloning_hand(&self, mind: &str, hand: &str, dir: &Path, clones: &Path) -> Handle {
+    fn cloning_hand(&self, mind: &str, hand: &str, dir: &Path, clones: &Path) -> Hands {
         let does = Does::new(
             dir,
             Some(clones.to_owned()),
             &["commands", "files", "clone"],
         );
-        InProcess::new(self.host.clone(), does)
-            .start(name(mind), name(hand))
-            .unwrap()
+        let hands = Hands::new(Local::new(self.host.clone()), does);
+        hands.start(name(mind), name(hand)).unwrap();
+        hands
     }
 
     async fn prompt(&self, mind: &str, text: &str) {
@@ -146,7 +146,7 @@ fn hand_through(
     dial: impl Dial + 'static,
     core: Core,
     dir: &Path,
-) -> (Handle, JoinHandle<Result<(), Error>>) {
+) -> (Handle, JoinHandle<Result<Ended, Error>>) {
     let capabilities = Capabilities::new()
         .with(Commands::new(dir))
         .with(Files::new(Disk::new(dir)));
@@ -172,7 +172,7 @@ where
 }
 
 /// How a hand ended, within ten seconds.
-async fn ended(task: JoinHandle<Result<(), Error>>) -> Result<(), Error> {
+async fn ended(task: JoinHandle<Result<Ended, Error>>) -> Result<Ended, Error> {
     timeout(Duration::from_secs(10), task)
         .await
         .expect("the hand did not end")
@@ -436,7 +436,7 @@ async fn a_hand_that_dies_mid_call_is_let_go_from_outside_and_the_turn_goes_on()
 
     // a1 is refused if it comes back, and its process ends quietly.
     let (_back, refused) = server.hand(fresh("m", "a1"), a.path());
-    assert!(ended(refused).await.is_ok());
+    assert_eq!(ended(refused).await.unwrap(), Ended::Released);
     let unknown = client()
         .post(server.api("/minds/m/release"))
         .json(&json!({"hand": "a1"}))
@@ -550,7 +550,7 @@ fn cloning_into_itself(request: &ModelRequest) -> ModelReply {
     } else if told.contains("local-2") {
         vec![
             on("tu_a", "local", "echo BOTH > where.txt; pwd"),
-            on("tu_b", "local-2", "echo BOTH > where.txt; pwd"),
+            on("tu_b", "local-2", "echo BOTH > where.txt; ls; pwd"),
         ]
     } else {
         vec![own("tu_c", "clone_hand", json!({}))]
@@ -584,14 +584,14 @@ async fn a_clone_joins_its_mind_works_beside_its_original_and_is_let_go() {
         outcome(&history, "tu_c"),
         &Outcome::Output(json!({"hand": "local-2"}))
     );
-    let copy = only_in(&clones.join("main"));
-    assert!(stdout(outcome(&history, "tu_b")).contains("local-2"));
-    assert_eq!(
-        std::fs::read_to_string(dir.join("where.txt")).unwrap(),
-        "BOTH\n"
+    // The clone worked in its own copy of the directory.
+    let there = stdout(outcome(&history, "tu_b"));
+    assert!(
+        there.contains("where.txt") && there.contains("main/local-2."),
+        "{there}"
     );
     assert_eq!(
-        std::fs::read_to_string(copy.join("where.txt")).unwrap(),
+        std::fs::read_to_string(dir.join("where.txt")).unwrap(),
         "BOTH\n"
     );
     assert!(
@@ -599,6 +599,11 @@ async fn a_clone_joins_its_mind_works_beside_its_original_and_is_let_go() {
             .iter()
             .any(|item| matches!(item, Item::Released { hand, .. } if *hand == name("local-2")))
     );
+    // Let go, the clone is done with its copy.
+    eventually("the clone's copy is removed", || async {
+        std::fs::read_dir(clones.join("main")).is_ok_and(|mut copies| copies.next().is_none())
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -757,7 +762,7 @@ async fn the_api_prompts_a_mind_and_follows_its_history() {
     assert_eq!(
         minds,
         json!([{"name": "m", "origin": "root", "state": "idle", "hands": ["a1"],
-                "waiting": [], "length": 3}])
+                "waiting": [], "watching": [], "length": 3}])
     );
 
     let history: Value = http
@@ -1114,6 +1119,7 @@ async fn a_long_history_is_read_a_page_at_a_time() {
         .map(|index| Item::Prompt {
             key: None,
             text: format!("prompt {index}"),
+            from: None,
         })
         .collect();
     let record = MindRecord {
@@ -1163,4 +1169,389 @@ async fn a_long_history_is_read_a_page_at_a_time() {
     }
     assert_eq!(stream.matches("\nid: ").count() + 1, 1195, "the events");
     assert!(stream.starts_with("id: 5\n"));
+}
+
+/// The name a fork's outcome gives its first child, in what a model is told.
+fn first_child(told: &str) -> String {
+    let at = told.find("\"children\":[\"").expect("no fork was told") + "\"children\":[\"".len();
+    told[at..].split('"').next().unwrap().to_owned()
+}
+
+/// Answers a parent that forks one child, waits for it, tells it more and
+/// waits again, and the child that does each thing it is told in its copy.
+fn talking(request: &ModelRequest) -> ModelReply {
+    let told = told(request);
+    reply(if told.contains("\"you\"") {
+        if told.contains("now write B") {
+            if told.contains("WROTE-B") {
+                vec![text("B-DONE")]
+            } else {
+                vec![bash("tu_cb", "echo B > b.txt && printf 'WR%s' OTE-B")]
+            }
+        } else if told.contains("WROTE-A") {
+            vec![text("A-DONE")]
+        } else {
+            vec![bash("tu_ca", "echo A > a.txt && printf 'WR%s' OTE-A")]
+        }
+    } else if told.contains("B-DONE") {
+        vec![text("All done.")]
+    } else if told.contains("A-DONE") {
+        let child = first_child(&told);
+        vec![
+            own(
+                "tu_t",
+                "tell",
+                json!({"mind": child, "text": "now write B"}),
+            ),
+            own("tu_w2", "wait", json!({})),
+        ]
+    } else if told.contains("\"children\"") {
+        vec![own("tu_w1", "wait", json!({}))]
+    } else {
+        vec![own("tu_f", "fork", json!({"prompts": ["write A"]}))]
+    })
+}
+
+#[tokio::test]
+async fn a_parent_waits_for_its_child_and_tells_it_more() {
+    let server = Server::start(Config::default()).await;
+    for _ in 0..8 {
+        server.model.then_with(talking);
+    }
+    let root = tempfile::tempdir().unwrap();
+    let (dir, clones) = (root.path().join("work"), root.path().join("clones"));
+    std::fs::create_dir(&dir).unwrap();
+    let _hands = server.cloning_hand("m", "a1", &dir, &clones);
+    server.settled("m").await;
+
+    server.prompt("m", "split the work").await;
+    eventually("the parent is done", || async {
+        said(&server.history("m")) == ["All done."]
+    })
+    .await;
+
+    let parent = server.history("m");
+    let child = Name::new(first_child(
+        &serde_json::to_string(&parent).unwrap().replace(' ', ""),
+    ))
+    .unwrap();
+    assert_eq!(
+        outcome(&parent, "tu_w1"),
+        &Outcome::Output(json!({child.as_str(): {"said": "A-DONE"}}))
+    );
+    assert_eq!(
+        outcome(&parent, "tu_t"),
+        &Outcome::Output(json!({"told": child}))
+    );
+    assert_eq!(
+        outcome(&parent, "tu_w2"),
+        &Outcome::Output(json!({child.as_str(): {"said": "B-DONE"}}))
+    );
+    let history = server.history(child.as_str());
+    assert!(history.iter().any(|item| matches!(
+        item,
+        Item::Prompt { text, from: Some(from), .. } if text == "now write B" && *from == name("m")
+    )));
+    let copy = only_in(&clones.join(child.as_str()));
+    assert!(copy.join("a.txt").exists() && copy.join("b.txt").exists());
+    assert!(!dir.join("a.txt").exists());
+}
+
+#[tokio::test]
+async fn clones_start_again_with_their_hands_and_are_let_go_with_their_copies() {
+    let server = Server::start(Config::default()).await;
+    server
+        .model
+        .then(vec![own("tu_c", "clone_hand", json!({}))])
+        .then(vec![text("Cloned.")]);
+    let root = tempfile::tempdir().unwrap();
+    let (dir, clones) = (root.path().join("work"), root.path().join("clones"));
+    std::fs::create_dir(&dir).unwrap();
+    let hands = server.cloning_hand("main", "local", &dir, &clones);
+    server.settled_with("main", &["local"]).await;
+    server.prompt("main", "clone yourself").await;
+    server.settled_with("main", &["local", "local-2"]).await;
+
+    // Stopped, the hands end and the clone's copy is kept.
+    hands.stop();
+    hands.ended().await.unwrap();
+    server.settled_with("main", &[]).await;
+    let copy = only_in(&clones.join("main"));
+
+    // Started again, the clone starts with its original.
+    let again = server.cloning_hand("main", "local", &dir, &clones);
+    server.settled_with("main", &["local", "local-2"]).await;
+    assert_eq!(only_in(&clones.join("main")), copy);
+
+    server
+        .host
+        .release(&name("main"), name("local-2"))
+        .await
+        .unwrap();
+    eventually("the clone's copy is removed", || async { !copy.exists() }).await;
+    server.settled_with("main", &["local"]).await;
+
+    // The original let go, the hands have all ended.
+    server
+        .host
+        .release(&name("main"), name("local"))
+        .await
+        .unwrap();
+    timeout(Duration::from_secs(10), again.ended())
+        .await
+        .expect("the hands did not end")
+        .unwrap();
+    assert!(dir.exists(), "the original's directory is never removed");
+}
+
+/// A store that fails the first append after it first makes a fork's
+/// child, as a host would that stopped between the two.
+struct StopsAfterFork {
+    inner: MemoryStore,
+    armed: std::sync::atomic::AtomicBool,
+    fired: std::sync::atomic::AtomicBool,
+}
+
+impl Store for StopsAfterFork {
+    fn create(&self, mind: &MindRecord, items: &[Item]) -> Result<(), StoreError> {
+        self.inner.create(mind, items)?;
+        if matches!(mind.origin, Origin::Fork { .. })
+            && !self.fired.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(())
+    }
+
+    fn append(&self, name: &Name, items: &[Item]) -> Result<(), StoreError> {
+        if self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Err(StoreError::Backend("the disk went away".into()));
+        }
+        self.inner.append(name, items)
+    }
+
+    fn read(&self, name: &Name, from: u64, limit: usize) -> Result<Vec<Item>, StoreError> {
+        self.inner.read(name, from, limit)
+    }
+
+    fn last(&self, name: &Name, kind: &str) -> Result<Option<Item>, StoreError> {
+        self.inner.last(name, kind)
+    }
+
+    fn prompt(&self, name: &Name, key: &str) -> Result<Option<String>, StoreError> {
+        self.inner.prompt(name, key)
+    }
+
+    fn minds(&self) -> Result<Vec<MindRecord>, StoreError> {
+        self.inner.minds()
+    }
+}
+
+#[tokio::test]
+async fn a_fork_its_host_stopped_in_is_made_once() {
+    let store = Arc::new(StopsAfterFork {
+        inner: MemoryStore::new(),
+        armed: std::sync::atomic::AtomicBool::new(false),
+        fired: std::sync::atomic::AtomicBool::new(false),
+    });
+    let server = Server::over(store, Config::default(), "127.0.0.1:0").await;
+    for _ in 0..3 {
+        server.model.then_with(|request| {
+            let told = told(request);
+            reply(if told.contains("\"you\"") {
+                vec![text("Child.")]
+            } else if told.contains("\"children\"") {
+                vec![text("Forked.")]
+            } else {
+                vec![own("tu_f", "fork", json!({"prompts": ["go"]}))]
+            })
+        });
+    }
+    let root = tempfile::tempdir().unwrap();
+    let (dir, clones) = (root.path().join("work"), root.path().join("clones"));
+    std::fs::create_dir(&dir).unwrap();
+    let _hands = server.cloning_hand("m", "a1", &dir, &clones);
+    server.settled("m").await;
+
+    // The fork is stored only when the hand, dialling again, gives its
+    // result once more.
+    server.prompt("m", "fork").await;
+    eventually("both minds are done", || async {
+        let minds = server.host.minds().await;
+        minds.len() == 2 && minds.iter().all(|status| status.state == State::Idle)
+    })
+    .await;
+    let parent = server.history("m");
+    assert_eq!(said(&parent), ["Forked."]);
+    let forks = parent
+        .iter()
+        .filter(|item| matches!(item, Item::Forked { .. }))
+        .count();
+    assert_eq!(forks, 1);
+    let minds = server.host.minds().await;
+    let child = &minds
+        .iter()
+        .find(|status| status.mind.name != name("m"))
+        .unwrap()
+        .mind
+        .name;
+    assert_eq!(said(&server.history(child.as_str())), ["Child."]);
+    assert_eq!(
+        std::fs::read_dir(clones.join(child.as_str()))
+            .unwrap()
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_hand_that_restarts_makes_only_its_own_call_unknown() {
+    let server = Server::start(Config::default()).await;
+    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (a1, _a1_task) = server.hand(fresh("m", "a1"), a.path());
+    let (_b2, _b2_task) = server.hand(fresh("m", "b2"), b.path());
+    server.settled_with("m", &["a1", "b2"]).await;
+
+    server
+        .model
+        .then(vec![
+            on("tu_1", "a1", "echo started > mark; sleep 30"),
+            on("tu_2", "b2", "echo fine"),
+        ])
+        .then(vec![text("a1 forgot; b2 said fine.")]);
+    server.prompt("m", "both").await;
+    eventually("a1's command has started", || async {
+        a.path().join("mark").exists()
+    })
+    .await;
+    // a1's process restarts: a new boot, remembering nothing.
+    a1.stop();
+    let (_again, _again_task) = server.hand(fresh("m", "a1"), a.path());
+    server.settled_with("m", &["a1", "b2"]).await;
+
+    let history = server.history("m");
+    assert!(
+        matches!(outcome(&history, "tu_1"), Outcome::Unknown(why) if why.contains("restarted")),
+        "{:?}",
+        outcome(&history, "tu_1")
+    );
+    assert_eq!(stdout(outcome(&history, "tu_2")), "fine\n");
+    let boots = history
+        .iter()
+        .filter(|item| matches!(item, Item::Attached { hand, .. } if *hand == name("a1")))
+        .count();
+    assert_eq!(boots, 2);
+    assert_eq!(said(&history), ["a1 forgot; b2 said fine."]);
+}
+
+#[tokio::test]
+async fn a_mind_with_two_hands_rests_and_wakes_with_both() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = restful(&dir.path().join("mensor.sqlite")).await;
+    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (a1, _a1_task) = server.hand(fresh("m", "a1"), a.path());
+    let (b2, _b2_task) = server.hand(fresh("m", "b2"), b.path());
+    server.settled_with("m", &["a1", "b2"]).await;
+
+    a1.stop();
+    rested(&server, &b2).await;
+    let status = server.host.mind(&name("m")).await.unwrap();
+    assert_eq!((status.state, status.hands.len()), (State::Idle, 0));
+
+    let (_a1, _a1_task) = server.hand(fresh("m", "a1"), a.path());
+    let (_b2, _b2_task) = server.hand(fresh("m", "b2"), b.path());
+    server.settled_with("m", &["a1", "b2"]).await;
+    server
+        .model
+        .then(vec![on("tu_1", "a1", "echo a"), on("tu_2", "b2", "echo b")])
+        .then(vec![text("Both answered.")]);
+    server.prompt("m", "both").await;
+    server.settled_with("m", &["a1", "b2"]).await;
+    let history = server.history("m");
+    assert_eq!(
+        (
+            stdout(outcome(&history, "tu_1")),
+            stdout(outcome(&history, "tu_2"))
+        ),
+        ("a\n", "b\n")
+    );
+}
+
+/// Answers a parent that forks and waits, and a child that answers once
+/// it has run a command, or once the command is lost: a child whose hand
+/// is gone waits with its turn not over.
+fn waiting_through(request: &ModelRequest) -> ModelReply {
+    let told = told(request);
+    reply(if told.contains("\"you\"") {
+        if told.contains("restarted") {
+            vec![text("Here.")]
+        } else {
+            vec![bash("tu_s", "sleep 30")]
+        }
+    } else if told.contains("Here.") {
+        vec![text("It answered.")]
+    } else if told.contains("\"children\"") {
+        vec![own("tu_w", "wait", json!({}))]
+    } else {
+        vec![own("tu_f", "fork", json!({"prompts": ["take your time"]}))]
+    })
+}
+
+#[tokio::test]
+async fn a_parent_that_waits_through_a_host_restart_hears_from_its_child() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("mensor.sqlite");
+    let open = || -> Arc<dyn Store> { Arc::new(SqliteStore::open(&path).unwrap()) };
+    let first = Server::over(open(), Config::default(), "127.0.0.1:0").await;
+    for _ in 0..3 {
+        first.model.then_with(waiting_through);
+    }
+    let (dir, clones) = (root.path().join("work"), root.path().join("clones"));
+    std::fs::create_dir(&dir).unwrap();
+    let hands = first.cloning_hand("m", "a1", &dir, &clones);
+    first.settled("m").await;
+    first.prompt("m", "fork and wait").await;
+    let child = std::cell::OnceCell::new();
+    eventually(
+        "the parent waits for a child that runs a command",
+        || async {
+            let minds = first.host.minds().await;
+            let parent = minds.iter().find(|status| status.mind.name == name("m"));
+            let working = minds
+                .iter()
+                .find(|status| status.mind.name != name("m") && status.state == State::Working);
+            match (parent, working) {
+                (Some(parent), Some(working)) if parent.watching == [working.mind.name.clone()] => {
+                    let _ = child.set(working.mind.name.clone());
+                    true
+                }
+                _ => false,
+            }
+        },
+    )
+    .await;
+    let child = child.into_inner().unwrap();
+    hands.stop();
+    hands.ended().await.unwrap();
+    first.stop().await;
+
+    // A new host wakes the parent, which waits with no hand. The hands
+    // come back: the child's command is lost, and it answers.
+    let second = Server::over(open(), Config::default(), "127.0.0.1:0").await;
+    eventually("the parent is awake", || async {
+        second.host.awake().await == 1
+    })
+    .await;
+    for _ in 0..2 {
+        second.model.then_with(waiting_through);
+    }
+    let _hands = second.cloning_hand("m", "a1", &dir, &clones);
+    eventually("the parent hears from its child", || async {
+        said(&second.history("m")) == ["It answered."]
+    })
+    .await;
+    assert_eq!(
+        outcome(&second.history("m"), "tu_w"),
+        &Outcome::Output(json!({child.as_str(): {"said": "Here."}}))
+    );
 }

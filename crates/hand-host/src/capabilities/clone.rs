@@ -5,6 +5,10 @@
 //! no call runs anywhere, so the directory is copied at rest. A process a
 //! finished command left running in the background is not copied: only the
 //! files are.
+//!
+//! Each copy is made as `<clones>/<mind>/<hand>.<code>.part`, and takes its
+//! name, `<hand>.<code>`, once it is whole: a directory named so is a
+//! clone's, and [`copies`] finds them.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -43,7 +47,7 @@ pub struct Cloning {
 
 impl Cloning {
     /// Clones of a hand that works in `directory`: each copy is made at
-    /// `<clones>/<mind>/<hand>` and started through `spawn`.
+    /// `<clones>/<mind>/<hand>.<code>` and started through `spawn`.
     pub fn new(
         directory: impl Into<PathBuf>,
         clones: impl Into<PathBuf>,
@@ -124,11 +128,15 @@ impl Cloning {
                 .clones
                 .join(mind.as_str())
                 .join(format!("{hand}.{}", suffix()));
-            made.dirs.push(dir.clone());
-            let (from, to, skip) = (self.directory.clone(), dir.clone(), self.clones.clone());
-            let stop = Arc::clone(&made.stop);
-            let ended =
-                tokio::task::spawn_blocking(move || copy_tree(&from, &to, &skip, &stop)).await;
+            let part = partial(&dir);
+            made.dirs.extend([dir.clone(), part.clone()]);
+            let (from, skip) = (self.directory.clone(), self.clones.clone());
+            let (to, stop) = (dir.clone(), Arc::clone(&made.stop));
+            let ended = tokio::task::spawn_blocking(move || {
+                copy_tree(&from, &part, &skip, &stop)?;
+                std::fs::rename(&part, &to)
+            })
+            .await;
             match ended {
                 Ok(Ok(())) => copies.push((mind, hand, dir)),
                 Ok(Err(error)) => {
@@ -156,6 +164,79 @@ impl Cloning {
     }
 }
 
+/// A clone's copy found under a clones directory.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Copied {
+    /// The mind its clone joins.
+    pub mind: Name,
+    /// Its clone's name in that mind.
+    pub hand: Name,
+    /// The copy.
+    pub dir: PathBuf,
+}
+
+/// Every whole copy under `clones` whose mind descends from `root`, and
+/// removes what a copy cut short left of its own. A clones directory that
+/// does not exist holds none.
+pub fn copies(clones: &Path, root: &str) -> std::io::Result<Vec<Copied>> {
+    let mut found = Vec::new();
+    let minds = match std::fs::read_dir(clones) {
+        Ok(minds) => minds,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(found),
+        Err(error) => return Err(error),
+    };
+    for entry in minds {
+        let entry = entry?;
+        let Some(mind) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| Name::new(name).ok())
+        else {
+            continue;
+        };
+        if mind.root() != root || !entry.file_type()?.is_dir() {
+            continue;
+        }
+        for copy in std::fs::read_dir(entry.path())? {
+            let copy = copy?;
+            let (dir, name) = (copy.path(), copy.file_name());
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if !copy.file_type()?.is_dir() {
+                continue;
+            }
+            if name.ends_with(PART) {
+                std::fs::remove_dir_all(&dir)?;
+                continue;
+            }
+            let hand = name
+                .rsplit_once('.')
+                .filter(|(_, code)| code.len() == 8 && code.bytes().all(|b| b.is_ascii_hexdigit()))
+                .and_then(|(hand, _)| Name::new(hand).ok());
+            if let Some(hand) = hand {
+                found.push(Copied {
+                    mind: mind.clone(),
+                    hand,
+                    dir,
+                });
+            }
+        }
+    }
+    found.sort_by(|a, b| a.dir.cmp(&b.dir));
+    Ok(found)
+}
+
+/// What a copy is named while it is made.
+const PART: &str = ".part";
+
+/// Where the copy that will be `dir` is made.
+fn partial(dir: &Path) -> PathBuf {
+    let mut part = dir.as_os_str().to_os_string();
+    part.push(PART);
+    PathBuf::from(part)
+}
+
 /// Eight random hex characters.
 fn suffix() -> String {
     let mut bytes = [0u8; 4];
@@ -172,7 +253,7 @@ fn suffix() -> String {
 /// What a clone has made so far. Dropped before it is kept, it undoes all
 /// of it, so a clone makes every copy or none, failed or cancelled: it
 /// stops a copy still being made, stops the hands it started, and removes
-/// the copies and their logs.
+/// the copies.
 #[derive(Default)]
 struct Made {
     dirs: Vec<PathBuf>,
@@ -201,9 +282,6 @@ impl Drop for Made {
         let remove = move || {
             for dir in dirs {
                 let _ = std::fs::remove_dir_all(&dir);
-                let mut log = dir.into_os_string();
-                log.push(".log");
-                let _ = std::fs::remove_file(PathBuf::from(log));
             }
         };
         // Off the runtime's threads, where there is one: a large copy takes
@@ -423,6 +501,32 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(bits & 0o777, 0o700);
+    }
+
+    #[tokio::test]
+    async fn whole_copies_of_one_roots_minds_are_found_and_cut_ones_removed() {
+        let (root, cloning, _) = hand(Spawner::default());
+        let reply = cloning
+            .call(
+                "clone",
+                into(&[("m", "a1-2"), ("m.k3x9q2ab", "a1"), ("n.zzzzzzzz", "a1")]),
+            )
+            .await;
+        assert!(matches!(reply, Reply::Output(_)), "{reply:?}");
+        let clones = root.path().join("clones");
+        let cut = clones.join("m/a1-3.0badc0de.part");
+        std::fs::create_dir_all(&cut).unwrap();
+        std::fs::create_dir_all(clones.join("m/not-a-copy")).unwrap();
+
+        let found = copies(&clones, "m").unwrap();
+        let named: Vec<(&str, &str)> = found
+            .iter()
+            .map(|copy| (copy.mind.as_str(), copy.hand.as_str()))
+            .collect();
+        assert_eq!(named, [("m", "a1-2"), ("m.k3x9q2ab", "a1")]);
+        assert!(found[0].dir.join("notes.txt").exists());
+        assert!(!cut.exists());
+        assert!(copies(&root.path().join("none"), "m").unwrap().is_empty());
     }
 
     #[tokio::test]

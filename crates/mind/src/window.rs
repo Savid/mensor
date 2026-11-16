@@ -18,11 +18,12 @@ const SUMMARISED: &str =
 /// the next step was asked for. A prompt that arrived while a step was being
 /// asked for follows that step. A pause is told where it happened, among the
 /// prompts, so that the model knows the turn before it was cut short. So is
-/// a hand joining the mind, with what it can do, and a hand let go.
+/// a hand joining the mind, with what it can do, and a hand let go. A
+/// message from the mind's parent or one of its children says whose it is.
 ///
 /// A history that holds a summary starts at its last one: the summary, the
-/// hands the mind has, then every prompt no step had seen when it was
-/// written.
+/// hands the mind has and the minds it is kin to, then every prompt no step
+/// had seen when it was written.
 ///
 /// `items` are the end of a history, and `before` is how many items of it
 /// come before them: none, or those a summary replaced. The results of one
@@ -56,10 +57,24 @@ fn conversation(
         .rev()
         .find_map(|(at, item)| match item {
             Item::Summary {
-                text, from, hands, ..
-            } => Some((at, text, *from, hands)),
+                text,
+                from,
+                hands,
+                parent,
+                children,
+                ..
+            } => Some((at, text, *from, hands, (parent.as_ref(), children))),
             _ => None,
         });
+    // A message from the mind's parent says so; any other is a child's.
+    let parent = items.iter().rev().find_map(|item| match item {
+        Item::Parted { parent, .. }
+        | Item::Summary {
+            parent: Some(parent),
+            ..
+        } => Some(parent),
+        _ => None,
+    });
     // What the next user message holds: results first, then prompts.
     let mut user: Vec<Content> = Vec::new();
     // The hands the model has been told of.
@@ -67,8 +82,8 @@ fn conversation(
     // Steps count from the summary. Prompts count from the index it names:
     // what the last step before it had seen.
     let (steps_from, prompts_from) = match summary {
-        Some((at, text, from, hands)) => {
-            user.extend(summed_up(text, hands));
+        Some((at, text, from, hands, kin)) => {
+            user.extend(summed_up(text, hands, kin));
             told.extend(hands.keys());
             let from = usize::try_from(from.saturating_sub(before)).unwrap_or(usize::MAX);
             (at, from.min(at))
@@ -82,22 +97,11 @@ fn conversation(
     let mut asked: Vec<(&str, Option<&Outcome>)> = Vec::new();
     for (at, (index, item)) in (before..).zip(items).enumerate().skip(prompts_from) {
         let counted = at >= steps_from;
+        if let Some(said) = among_prompts(item, counted, parent, &mut told) {
+            prompts.push_back((index, said));
+            continue;
+        }
         match item {
-            Item::Prompt { text, .. } => prompts.push_back((index, Cow::Borrowed(text))),
-            Item::Paused { reason } => {
-                let note = format!("(The turn before this was stopped: {reason}.)");
-                prompts.push_back((index, Cow::Owned(note)));
-            }
-            Item::Attached {
-                hand, capabilities, ..
-            } if told.insert(hand) => {
-                let note = format!("(Hand {hand} joined. It can: {}.)", can(capabilities));
-                prompts.push_back((index, Cow::Owned(note)));
-            }
-            Item::Released { hand, reason } if counted => {
-                let note = format!("(Hand {hand} was let go: {reason}.)");
-                prompts.push_back((index, Cow::Owned(note)));
-            }
             Item::Step { seen, content, .. } if counted => {
                 user.extend(results(&asked, max_results));
                 while let Some((_, text)) = prompts.pop_front_if(|(at, _)| *at < *seen) {
@@ -131,15 +135,7 @@ fn conversation(
                     *ended = Some(outcome);
                 }
             }
-            Item::Step { .. }
-            | Item::Outcome { .. }
-            | Item::Call { .. }
-            | Item::Attached { .. }
-            | Item::Released { .. }
-            | Item::Cloned { .. }
-            | Item::Forks { .. }
-            | Item::Failed { .. }
-            | Item::Summary { .. } => {}
+            _ => {}
         }
     }
     user.extend(results(&asked, max_results));
@@ -155,8 +151,53 @@ fn conversation(
     messages
 }
 
-/// A summary, and the hands the mind has, as the model is told them.
-fn summed_up(text: &str, hands: &BTreeMap<Name, HandRecord>) -> Vec<Content> {
+/// What an item tells the model among the prompts, if anything: a prompt,
+/// marked as its parent's or a child's when one of them said it; a pause;
+/// a hand joining for the first time, as `told` records; and, once it
+/// `counted`, a hand let go.
+fn among_prompts<'a>(
+    item: &'a Item,
+    counted: bool,
+    parent: Option<&Name>,
+    told: &mut BTreeSet<&'a Name>,
+) -> Option<Cow<'a, str>> {
+    let note = match item {
+        Item::Prompt {
+            text, from: None, ..
+        } => return Some(Cow::Borrowed(text)),
+        Item::Prompt {
+            text,
+            from: Some(from),
+            ..
+        } => {
+            let whose = if parent == Some(from) {
+                "parent"
+            } else {
+                "child"
+            };
+            format!("(From your {whose} {from}:)\n\n{text}")
+        }
+        Item::Paused { reason } => format!("(The turn before this was stopped: {reason}.)"),
+        Item::Attached {
+            hand, capabilities, ..
+        } if told.insert(hand) => {
+            format!("(Hand {hand} joined. It can: {}.)", can(capabilities))
+        }
+        Item::Released { hand, reason } if counted => {
+            format!("(Hand {hand} was let go: {reason}.)")
+        }
+        _ => return None,
+    };
+    Some(Cow::Owned(note))
+}
+
+/// A summary, the hands the mind has and the minds it is kin to, as the
+/// model is told them.
+fn summed_up(
+    text: &str,
+    hands: &BTreeMap<Name, HandRecord>,
+    (parent, children): (Option<&Name>, &Vec<Name>),
+) -> Vec<Content> {
     let mut told = vec![Content::Text(format!("{SUMMARISED}\n\n{text}"))];
     let kept: Vec<String> = hands
         .iter()
@@ -165,6 +206,16 @@ fn summed_up(text: &str, hands: &BTreeMap<Name, HandRecord>) -> Vec<Content> {
         .collect();
     if !kept.is_empty() {
         told.push(Content::Text(format!("(Your hands: {}.)", kept.join("; "))));
+    }
+    if let Some(parent) = parent {
+        told.push(Content::Text(format!("(You were forked from {parent}.)")));
+    }
+    if !children.is_empty() {
+        let children: Vec<&str> = children.iter().map(Name::as_str).collect();
+        told.push(Content::Text(format!(
+            "(Your children: {}.)",
+            children.join(", ")
+        )));
     }
     told
 }
@@ -271,6 +322,7 @@ mod tests {
         Item::Prompt {
             key: None,
             text: text.into(),
+            from: None,
         }
     }
 

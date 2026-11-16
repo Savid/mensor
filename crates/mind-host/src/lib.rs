@@ -14,7 +14,9 @@
 //!
 //! The host performs each of a mind's outputs in order: an item is in the
 //! store before anything it describes is sent, and a fork's children are
-//! made before the fork is stored.
+//! made before the fork is stored. It carries messages between a parent and
+//! its children, and tells a mind that waits when each child it waits for
+//! is at rest.
 //!
 //! A mind is awake while a hand is connected, someone follows it or its
 //! model is asked, and for [`Config::rest_after`] beyond that. A mind at

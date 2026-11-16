@@ -6,7 +6,7 @@ use mensor_protocol::{
 use serde_json::{Value, json};
 
 use crate::fork::{Fork, child_name, shares};
-use crate::tools::{CLONE, Does, HAND, MAX_CHILDREN, MindTool, Table, split};
+use crate::tools::{CLONE, Does, Family, HAND, MAX_CHILDREN, MindTool, Table, split};
 use crate::window::{to_summarise, window};
 use crate::{Block, Content, HandRecord, Item, Message, ModelReply, ModelRequest, Outcome, Stop};
 
@@ -36,6 +36,20 @@ pub enum Output {
     Ask(ModelRequest),
     /// Make a child mind.
     Fork(Fork),
+    /// Say `text` to the mind `to`, as a prompt from this one under `key`,
+    /// and answer with [`Mind::told`]. The key makes a message said again,
+    /// after a stop, the same prompt.
+    Tell {
+        /// The parent or child it is for.
+        to: Name,
+        /// The prompt's key.
+        key: String,
+        /// The message.
+        text: String,
+    },
+    /// Answer with [`Mind::rested`] for each of these minds once it is at
+    /// rest: at once for one that already is.
+    Watch(Vec<Name>),
 }
 
 /// What the model is asked for a summary. A fact the user gave for later has
@@ -64,10 +78,9 @@ Keep every identifier and value exact and stay under 2000 words. Reply with the 
 /// Why an interrupted mind is paused, as its history says it.
 const INTERRUPTED: &str = "interrupted";
 
-/// What a tool use is told when its step already used one of the mind's own
-/// tools.
-const ONE_OWN: &str = "a step runs one of fork, clone_hand and release_hand, and this was not \
-                       the first; ask for it again on its own";
+/// What a tool of the mind's own is told when its step forks.
+const ALONE: &str = "a step that forks runs none of the mind's other tools; ask for this again \
+                     after the fork";
 
 /// What a mind is doing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -91,6 +104,27 @@ pub struct Status {
     /// The hands a call or a tool use of its turn waits for, because they
     /// are not connected.
     pub waiting: Vec<Name>,
+    /// The children a `wait` of its turn waits for.
+    pub watching: Vec<Name>,
+    /// What it said when it came to rest, while it is at rest.
+    pub report: Option<Report>,
+}
+
+/// What a mind said when it last came to rest, as a parent that waits for
+/// it is told.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Report {
+    /// It ended its turn, and said this last.
+    Said(String),
+    /// It was stopped, for this reason, and waits for a prompt.
+    Paused(String),
+    /// Its model could not be asked, with this error, and it waits for a
+    /// prompt.
+    Failed(String),
+    /// No mind has this name: a fork whose outcome is unknown may not have
+    /// made it.
+    Missing,
 }
 
 /// What became of a prompt.
@@ -171,9 +205,37 @@ pub struct Mind {
     settings: Settings,
     /// Every hand the history records, released ones included.
     hands: BTreeMap<Name, Hand>,
-    forks_left: u64,
+    /// Its parent, its children and its forks.
+    kin: Kin,
     /// The request the model is answering now.
     asking: Option<Asking>,
+    /// The message on its way to another mind.
+    telling: Option<Telling>,
+    /// The `wait` in progress, and what the minds it waits for have said.
+    watching: Option<Watching>,
+}
+
+/// What a history records of the minds a mind is kin to.
+#[derive(Clone, Debug, Default)]
+struct Kin {
+    parent: Option<Name>,
+    /// In the order they were made.
+    children: Vec<Name>,
+    /// How many more minds it may fork.
+    forks_left: u64,
+}
+
+#[derive(Clone, Debug)]
+struct Telling {
+    tool_use: String,
+    to: Name,
+    key: String,
+}
+
+#[derive(Clone, Debug)]
+struct Watching {
+    tool_use: String,
+    reports: BTreeMap<Name, Report>,
 }
 
 #[derive(Clone, Debug)]
@@ -223,6 +285,20 @@ enum Next {
         tool_use: String,
         hand: Name,
     },
+    Tell {
+        tool_use: String,
+        to: Name,
+        key: String,
+        text: String,
+    },
+    Watch {
+        tool_use: String,
+        minds: Vec<Name>,
+    },
+    Waited {
+        tool_use: String,
+        reports: BTreeMap<Name, Report>,
+    },
     Await,
     Ask,
     Idle,
@@ -236,7 +312,8 @@ impl Mind {
 
     /// A mind with this history, as stored: its items from index `from`,
     /// which is 0 for all of it, or else the index a store gives with a
-    /// history's tail. It asks no model until a hand says hello.
+    /// history's tail. It does nothing until it is [started](Mind::start),
+    /// and asks no model until a hand says hello.
     pub fn load(name: Name, from: u64, items: Vec<Item>, settings: Settings) -> Self {
         let mut mind = Self::whole(name, from, items, settings);
         mind.shed();
@@ -248,12 +325,27 @@ impl Mind {
     /// [`recent`](crate::Store::recent) items. A host says this of a mind it
     /// has not loaded, which has no hand connected.
     pub fn status(name: Name, from: u64, items: Vec<Item>) -> Status {
-        let mind = Self::whole(name, from, items, Settings::default());
+        Self::whole(name, from, items, Settings::default()).status_now()
+    }
+
+    /// What the mind is doing.
+    pub fn status_now(&self) -> Status {
         Status {
-            state: mind.state(),
-            length: mind.length(),
-            waiting: mind.waiting(),
+            state: self.state(),
+            length: self.length(),
+            waiting: self.waiting(),
+            watching: self.watching(),
+            report: self.report(),
         }
+    }
+
+    /// Does what a mind just loaded can before any hand says hello: say a
+    /// message it was saying, watch the children it waits for, or ask its
+    /// model once it has let every hand go.
+    pub fn start(&mut self) -> Vec<Output> {
+        let mut outputs = Vec::new();
+        self.drive(&mut outputs);
+        outputs
     }
 
     /// The mind's name.
@@ -292,8 +384,67 @@ impl Mind {
             | Next::Issue { .. }
             | Next::Clone { .. }
             | Next::Release { .. }
+            | Next::Tell { .. }
+            | Next::Watch { .. }
+            | Next::Waited { .. }
             | Next::Await => State::Working,
         }
+    }
+
+    /// The children a `wait` of the turn waits for: those that have not
+    /// come to rest since it began.
+    pub fn watching(&self) -> Vec<Name> {
+        let Some((at, content)) = self.last_step() else {
+            return Vec::new();
+        };
+        let table = self.table();
+        for block in content {
+            let Block::ToolUse { id, name, input } = block else {
+                continue;
+            };
+            if self.outcome_of(id).is_some() {
+                continue;
+            }
+            let (named, rest) = split(input);
+            if let Some((Does::Mind(MindTool::Wait), _)) =
+                self.meant(&table, name, named.as_ref(), at)
+            {
+                let heard = self
+                    .watching
+                    .as_ref()
+                    .filter(|watching| watching.tool_use == *id)
+                    .map(|watching| &watching.reports);
+                let minds = self.waited_for(&rest).unwrap_or_default();
+                return minds
+                    .into_iter()
+                    .filter(|mind| heard.is_none_or(|heard| !heard.contains_key(mind)))
+                    .collect();
+            }
+        }
+        Vec::new()
+    }
+
+    /// What the mind said when it came to rest, while it is at rest.
+    pub fn report(&self) -> Option<Report> {
+        if self.state() != State::Idle {
+            return None;
+        }
+        let last = self.items.iter().rev().find_map(|item| match item {
+            Item::Step { content, .. } => {
+                let said: Vec<&str> = content
+                    .iter()
+                    .filter_map(|block| match block {
+                        Block::Text { text } => Some(text.as_str()),
+                        Block::ToolUse { .. } | Block::Other { .. } => None,
+                    })
+                    .collect();
+                Some(Report::Said(said.join("\n\n")))
+            }
+            Item::Paused { reason } => Some(Report::Paused(reason.clone())),
+            Item::Failed { error } => Some(Report::Failed(error.clone())),
+            _ => None,
+        });
+        Some(last.unwrap_or(Report::Said(String::new())))
     }
 
     /// The hands a call or a tool use of the turn waits for, because they
@@ -353,10 +504,14 @@ impl Mind {
     /// [starts](Mind::starts_at) past the beginning of its history, its
     /// host looks the key up in its store, and `earlier` is the text of the
     /// prompt it found there.
+    ///
+    /// `from` is the mind that says it, when its parent or one of its
+    /// children does.
     pub fn prompt(
         &mut self,
         key: Option<String>,
         text: String,
+        from: Option<Name>,
         earlier: Option<&str>,
     ) -> Result<Prompted, Conflict> {
         if let Some(key) = &key {
@@ -364,6 +519,7 @@ impl Mind {
                 Item::Prompt {
                     key: Some(held),
                     text,
+                    ..
                 } if held == key => Some(text.as_str()),
                 _ => None,
             });
@@ -379,7 +535,7 @@ impl Mind {
             }
         }
         let mut outputs = Vec::new();
-        self.append(Item::Prompt { key, text }, &mut outputs);
+        self.append(Item::Prompt { key, text, from }, &mut outputs);
         self.drive(&mut outputs);
         Ok(Prompted {
             existing: false,
@@ -573,7 +729,9 @@ impl Mind {
                         .map(|(name, hand)| (name.clone(), hand.record.clone()))
                         .collect(),
                     last_call: self.last_call(),
-                    forks_left: self.forks_left,
+                    forks_left: self.kin.forks_left,
+                    parent: self.kin.parent.clone(),
+                    children: self.kin.children.clone(),
                 }
             }
         } else {
@@ -620,7 +778,17 @@ impl Mind {
         if self.asking.take().is_none() && matches!(self.next(), Next::Idle) {
             return outputs;
         }
+        self.watching = None;
+        // A message on its way may have arrived: its outcome is what the
+        // mind it went to says.
+        let telling = self
+            .telling
+            .as_ref()
+            .map(|telling| telling.tool_use.clone());
         for tool_use in self.unissued() {
+            if telling.as_ref() == Some(&tool_use) {
+                continue;
+            }
             let outcome =
                 Outcome::NotRun("the turn was interrupted before this call started".into());
             self.append(
@@ -643,6 +811,39 @@ impl Mind {
                 hand,
                 message: FromMind::Cancel { id },
             });
+        }
+        outputs
+    }
+
+    /// The mind a message went to has it, or could not be given it. `key`
+    /// is the one the [`Output::Tell`] carried.
+    pub fn told(&mut self, key: &str, result: Result<(), String>) -> Vec<Output> {
+        let mut outputs = Vec::new();
+        let Some(telling) = self.telling.take_if(|telling| telling.key == key) else {
+            return outputs;
+        };
+        if self.outcome_of(&telling.tool_use).is_none() {
+            let outcome = match result {
+                Ok(()) => Outcome::Output(json!({ "told": telling.to })),
+                Err(error) => Outcome::Error(error),
+            };
+            let item = Item::Outcome {
+                tool_use: telling.tool_use,
+                call: None,
+                outcome,
+            };
+            self.append(item, &mut outputs);
+        }
+        self.drive(&mut outputs);
+        outputs
+    }
+
+    /// A mind this one watches is at rest, and said `report`.
+    pub fn rested(&mut self, mind: &Name, report: Report) -> Vec<Output> {
+        let mut outputs = Vec::new();
+        if let Some(watching) = &mut self.watching {
+            watching.reports.insert(mind.clone(), report);
+            self.drive(&mut outputs);
         }
         outputs
     }
@@ -671,10 +872,15 @@ impl Mind {
             name,
             before: from,
             items,
-            forks_left: settings.max_forks,
+            kin: Kin {
+                forks_left: settings.max_forks,
+                ..Kin::default()
+            },
             settings,
             hands: BTreeMap::new(),
             asking: None,
+            telling: None,
+            watching: None,
         };
         // What the last summary carries, then what came after it.
         let summary = mind
@@ -682,7 +888,11 @@ impl Mind {
             .iter()
             .rposition(|item| matches!(item, Item::Summary { .. }));
         if let Some(Item::Summary {
-            hands, forks_left, ..
+            hands,
+            forks_left,
+            parent,
+            children,
+            ..
         }) = summary.map(|at| &mind.items[at])
         {
             for (name, record) in hands {
@@ -694,11 +904,15 @@ impl Mind {
                 };
                 mind.hands.insert(name.clone(), hand);
             }
-            mind.forks_left = *forks_left;
+            mind.kin = Kin {
+                parent: parent.clone(),
+                children: children.clone(),
+                forks_left: *forks_left,
+            };
         }
         let after = summary.map_or(0, |at| at + 1);
         for (at, item) in (mind.before..).zip(&mind.items).skip(after) {
-            note(&mut mind.hands, &mut mind.forks_left, item, at);
+            note(&mut mind.hands, &mut mind.kin, item, at);
         }
         mind
     }
@@ -728,7 +942,7 @@ impl Mind {
 
     fn append(&mut self, item: Item, outputs: &mut Vec<Output>) {
         let at = self.length();
-        note(&mut self.hands, &mut self.forks_left, &item, at);
+        note(&mut self.hands, &mut self.kin, &item, at);
         self.items.push(item.clone());
         outputs.push(Output::Append(item));
     }
@@ -774,6 +988,35 @@ impl Mind {
                         tool_use,
                         call: None,
                         outcome: Outcome::Output(json!({ "released": hand })),
+                    };
+                    self.append(item, outputs);
+                }
+                Next::Tell {
+                    tool_use,
+                    to,
+                    key,
+                    text,
+                } => {
+                    self.telling = Some(Telling {
+                        tool_use,
+                        to: to.clone(),
+                        key: key.clone(),
+                    });
+                    outputs.push(Output::Tell { to, key, text });
+                }
+                Next::Watch { tool_use, minds } => {
+                    self.watching = Some(Watching {
+                        tool_use,
+                        reports: BTreeMap::new(),
+                    });
+                    outputs.push(Output::Watch(minds));
+                }
+                Next::Waited { tool_use, reports } => {
+                    self.watching = None;
+                    let item = Item::Outcome {
+                        tool_use,
+                        call: None,
+                        outcome: Outcome::Output(json!(reports)),
                     };
                     self.append(item, outputs);
                 }
@@ -902,7 +1145,7 @@ impl Mind {
             .iter()
             .rposition(|item| matches!(item, Item::Call { id: of, .. } if *of == id));
         let inherited = self.before + index(at.map_or(self.items.len(), |at| at + 1));
-        let (share, kept) = shares(self.forks_left, index(children.len()));
+        let (share, kept) = shares(self.kin.forks_left, index(children.len()));
         // The hands the child shares the history of, as they were at the
         // clone call: every one but the cloned stays with the parent.
         let others: Vec<Name> = self
@@ -928,10 +1171,14 @@ impl Mind {
                     self.name
                 ),
             }));
-            items.push(Item::Forks { left: share });
+            items.push(Item::Parted {
+                parent: self.name.clone(),
+                left: share,
+            });
             items.push(Item::Prompt {
                 key: None,
                 text: prompt,
+                from: Some(self.name.clone()),
             });
             outputs.push(Output::Fork(Fork {
                 name: child.clone(),
@@ -946,7 +1193,11 @@ impl Mind {
             outcome: Outcome::Output(json!({ "children": children })),
         };
         self.append(item, outputs);
-        self.append(Item::Forks { left: kept }, outputs);
+        let item = Item::Forked {
+            children: children.to_vec(),
+            left: kept,
+        };
+        self.append(item, outputs);
     }
 
     /// Stores a call's outcome as unknown. A clone that may have been made
@@ -962,30 +1213,33 @@ impl Mind {
             } if *of == id && capability == CLONE => Some(input["into"].clone()),
             _ => None,
         });
-        let children: Vec<&str> = into
+        let children: Vec<Name> = into
             .iter()
             .flat_map(|into| into.as_array().into_iter().flatten())
-            .filter_map(|target| target["mind"].as_str())
-            .filter(|mind| *mind != self.name.as_str())
+            .filter_map(|target| Name::new(target["mind"].as_str()?).ok())
+            .filter(|mind| *mind != self.name)
             .collect();
         let outcome = if children.is_empty() {
             Outcome::Unknown(why.into())
         } else {
             Outcome::Unknown(format!(
                 "{why}; it may have made the child minds {}, which then work on their own",
-                children.join(", ")
+                join(&children)
             ))
         };
-        let charged = index(children.len());
         let item = Item::Outcome {
             tool_use,
             call: Some(id),
             outcome,
         };
         self.append(item, outputs);
-        if charged > 0 {
-            let (_, kept) = shares(self.forks_left, charged);
-            self.append(Item::Forks { left: kept }, outputs);
+        if !children.is_empty() {
+            let (_, kept) = shares(self.kin.forks_left, index(children.len()));
+            let item = Item::Forked {
+                children,
+                left: kept,
+            };
+            self.append(item, outputs);
         }
     }
 
@@ -1069,7 +1323,18 @@ impl Mind {
         // Hands an earlier tool use of this step still waits on.
         let mut busy = BTreeSet::new();
         let mut waiting = false;
+        // The first of the mind's own tools that has not ended. The others
+        // wait their turn.
         let mut own = None;
+        // A fork runs alone among the mind's own tools.
+        let fork = content.iter().find_map(|block| match block {
+            Block::ToolUse { id, name, input } => {
+                let named = split(input).0;
+                let meant = self.meant(&table, name, named.as_ref(), at);
+                matches!(meant, Some((Does::Mind(MindTool::Fork), _))).then_some(id)
+            }
+            Block::Text { .. } | Block::Other { .. } => None,
+        });
         for block in content {
             let Block::ToolUse { id, name, input } = block else {
                 continue;
@@ -1095,11 +1360,17 @@ impl Mind {
             }
             let (named, rest) = split(input);
             let Some((does, holders)) = self.meant(&table, name, named.as_ref(), at) else {
-                return skip(format!("there is no tool named {name}"));
+                return skip(not_meant(&table, name, named.as_ref()));
             };
             match does {
-                Does::Mind(_) if own.is_some() => return skip(ONE_OWN.into()),
-                Does::Mind(tool) => own = Some((id, *tool, input)),
+                Does::Mind(_) if fork.is_some_and(|fork| fork != id) => {
+                    return skip(ALONE.into());
+                }
+                Does::Mind(tool) => {
+                    if own.is_none() {
+                        own = Some((id, *tool, input));
+                    }
+                }
                 Does::Hand {
                     capability,
                     operation,
@@ -1123,8 +1394,9 @@ impl Mind {
                 }
             }
         }
-        // The mind's own tool runs once every other tool of its step has
-        // ended, so nothing runs on any hand while one is cloned.
+        // The mind's own tools run once every hand tool of their step has
+        // ended, so nothing runs on any hand while one is cloned, and one at
+        // a time.
         match own {
             _ if waiting => Some(Next::Await),
             Some((id, tool, input)) => Some(self.own(id, tool, input, at, &table)),
@@ -1140,6 +1412,11 @@ impl Mind {
             why,
         };
         let (named, rest) = split(input);
+        match tool {
+            MindTool::Tell => return self.tell(id, &rest, step_at),
+            MindTool::Wait => return self.wait(id, &rest),
+            MindTool::Fork | MindTool::CloneHand | MindTool::ReleaseHand => {}
+        }
         if tool == MindTool::ReleaseHand {
             return match named {
                 Some(Ok(hand)) if self.is_known(&hand) => Next::Release {
@@ -1189,10 +1466,10 @@ impl Mind {
                     "prompts are 1 to {MAX_CHILDREN} strings, one per child"
                 ));
             };
-            if index(count) > self.forks_left {
+            if index(count) > self.kin.forks_left {
                 return skip(format!(
                     "this mind may fork {} more minds, and this asked for {count}",
-                    self.forks_left
+                    self.kin.forks_left
                 ));
             }
             Target::Children(count)
@@ -1221,6 +1498,133 @@ impl Mind {
             tool_use: id.to_owned(),
             hand,
             into,
+        }
+    }
+
+    /// What `tell`, used as `id` with `input` in the step at `step_at`,
+    /// does next.
+    fn tell(&self, id: &str, input: &Value, step_at: usize) -> Next {
+        let skip = |why: String| Next::Skip {
+            tool_use: id.to_owned(),
+            why,
+        };
+        let to = input["mind"].as_str().and_then(|to| Name::new(to).ok());
+        let Some(to) = to.filter(|to| self.is_kin(to)) else {
+            return skip(format!(
+                "say which mind to tell: your parent or one of your children. {}",
+                self.kin_line()
+            ));
+        };
+        let Some(text) = input["text"]
+            .as_str()
+            .filter(|text| !text.trim().is_empty())
+        else {
+            return skip("say what to tell them".into());
+        };
+        // The same message is the same prompt, however often it is said.
+        let key = format!("{}/{}/{id}", self.name, self.before + index(step_at));
+        if self
+            .telling
+            .as_ref()
+            .is_some_and(|telling| telling.key == key)
+        {
+            return Next::Await;
+        }
+        Next::Tell {
+            tool_use: id.to_owned(),
+            to,
+            key,
+            text: text.to_owned(),
+        }
+    }
+
+    /// What `wait`, used as `id` with `input`, does next.
+    fn wait(&self, id: &str, input: &Value) -> Next {
+        let minds = match self.waited_for(input) {
+            Ok(minds) => minds,
+            Err(why) => {
+                return Next::Skip {
+                    tool_use: id.to_owned(),
+                    why,
+                };
+            }
+        };
+        let Some(watching) = self
+            .watching
+            .as_ref()
+            .filter(|watching| watching.tool_use == id)
+        else {
+            return Next::Watch {
+                tool_use: id.to_owned(),
+                minds,
+            };
+        };
+        let reports: Option<BTreeMap<Name, Report>> = minds
+            .into_iter()
+            .map(|mind| {
+                let report = watching.reports.get(&mind)?.clone();
+                Some((mind, report))
+            })
+            .collect();
+        match reports {
+            Some(reports) => Next::Waited {
+                tool_use: id.to_owned(),
+                reports,
+            },
+            None => Next::Await,
+        }
+    }
+
+    /// The children a `wait` with `input` is for: those it names, or all.
+    fn waited_for(&self, input: &Value) -> Result<Vec<Name>, String> {
+        let minds = match &input["minds"] {
+            Value::Null => self.kin.children.clone(),
+            Value::Array(minds) => {
+                let mut named = Vec::new();
+                for mind in minds {
+                    let mind = mind.as_str().and_then(|mind| Name::new(mind).ok());
+                    match mind {
+                        Some(mind) if self.kin.children.contains(&mind) => {
+                            if !named.contains(&mind) {
+                                named.push(mind);
+                            }
+                        }
+                        _ => {
+                            return Err(format!(
+                                "a mind is waited for only by its parent. {}",
+                                self.kin_line()
+                            ));
+                        }
+                    }
+                }
+                named
+            }
+            _ => return Err("minds is a list of your children's names".into()),
+        };
+        if minds.is_empty() {
+            return Err(format!(
+                "say which children to wait for. {}",
+                self.kin_line()
+            ));
+        }
+        Ok(minds)
+    }
+
+    fn is_kin(&self, mind: &Name) -> bool {
+        self.kin.parent.as_ref() == Some(mind) || self.kin.children.contains(mind)
+    }
+
+    /// The minds this one can talk to, as a tool use that named a wrong one
+    /// is told them.
+    fn kin_line(&self) -> String {
+        let parent = self.kin.parent.as_ref().map_or_else(
+            || "You have no parent.".to_owned(),
+            |parent| format!("Your parent is {parent}."),
+        );
+        if self.kin.children.is_empty() {
+            format!("{parent} You have no children.")
+        } else {
+            format!("{parent} Your children are {}.", join(&self.kin.children))
         }
     }
 
@@ -1364,6 +1768,10 @@ impl Mind {
                 .iter()
                 .filter(|(_, hand)| hand.released.is_none())
                 .map(|(name, hand)| (name, hand.record.capabilities.as_slice())),
+            Family {
+                parent: self.kin.parent.is_some(),
+                children: !self.kin.children.is_empty(),
+            },
         )
     }
 
@@ -1544,8 +1952,8 @@ impl Mind {
 }
 
 /// What an item at index `at` changes in what a mind knows of its hands and
-/// its forks.
-fn note(hands: &mut BTreeMap<Name, Hand>, forks_left: &mut u64, item: &Item, at: u64) {
+/// its kin.
+fn note(hands: &mut BTreeMap<Name, Hand>, kin: &mut Kin, item: &Item, at: u64) {
     match item {
         Item::Attached {
             hand,
@@ -1589,8 +1997,43 @@ fn note(hands: &mut BTreeMap<Name, Hand>, forks_left: &mut u64, item: &Item, at:
                 known.released = Some(at);
             }
         }
-        Item::Forks { left } => *forks_left = *left,
+        Item::Forked { children, left } => {
+            for child in children {
+                if !kin.children.contains(child) {
+                    kin.children.push(child.clone());
+                }
+            }
+            kin.forks_left = *left;
+        }
+        Item::Parted { parent, left } => {
+            kin.parent = Some(parent.clone());
+            kin.forks_left = *left;
+        }
         _ => {}
+    }
+}
+
+/// Why a use named `name` means no tool: no tool has the name, or it is
+/// one each of several hands knows by another tool, and the use named
+/// none of them.
+fn not_meant(table: &Table, name: &str, named: Option<&Result<Name, String>>) -> String {
+    let mut holders: Vec<Name> = table
+        .find_all(name)
+        .into_iter()
+        .flat_map(|(_, holders)| holders.iter().cloned())
+        .collect();
+    holders.sort();
+    holders.dedup();
+    match named {
+        _ if holders.is_empty() => format!("there is no tool named {name}"),
+        Some(Ok(hand)) => format!(
+            "{hand} cannot do {name}. These hands can: {}.",
+            join(&holders)
+        ),
+        _ => format!(
+            "say which hand runs this. These hands can do {name}: {}.",
+            join(&holders)
+        ),
     }
 }
 

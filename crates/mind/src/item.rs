@@ -23,6 +23,10 @@ pub enum Item {
         key: Option<String>,
         /// What was said.
         text: String,
+        /// The mind that said it: this mind's parent or one of its
+        /// children. A prompt from anyone else has none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<Name>,
     },
     /// One reply from the model.
     Step {
@@ -91,9 +95,21 @@ pub enum Item {
         /// Why, as the model is told it.
         reason: String,
     },
-    /// How many more minds this mind may fork.
-    Forks {
-        /// The number.
+    /// This mind forked: the children its fork made, or may have made
+    /// when the clone's outcome is unknown, and how many more minds it may
+    /// fork.
+    Forked {
+        /// The children, in the order of the fork's prompts.
+        children: Vec<Name>,
+        /// How many more minds this mind may fork.
+        left: u64,
+    },
+    /// This mind was forked from `parent`: the first item of its own, after
+    /// the outcome of the fork that made it.
+    Parted {
+        /// The mind it was forked from.
+        parent: Name,
+        /// How many minds it may fork.
         left: u64,
     },
     /// The mind stopped without asking its model, and waits for a prompt.
@@ -129,6 +145,12 @@ pub enum Item {
         last_call: CallId,
         /// How many more minds the mind may fork.
         forks_left: u64,
+        /// The mind this one was forked from.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<Name>,
+        /// Every mind this one's forks made.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        children: Vec<Name>,
     },
 }
 
@@ -157,7 +179,8 @@ impl Item {
             Self::Attached { .. } => "attached",
             Self::Cloned { .. } => "cloned",
             Self::Released { .. } => "released",
-            Self::Forks { .. } => "forks",
+            Self::Forked { .. } => "forked",
+            Self::Parted { .. } => "parted",
             Self::Paused { .. } => "paused",
             Self::Failed { .. } => "failed",
             Self::Summary { .. } => "summary",
@@ -262,8 +285,17 @@ mod tests {
                 Item::Prompt {
                     key: None,
                     text: "hi".into(),
+                    from: None,
                 },
                 json!({"type": "prompt", "text": "hi"}),
+            ),
+            (
+                Item::Prompt {
+                    key: Some("m/3/tu_1".into()),
+                    text: "and the tests?".into(),
+                    from: Some(Name::new("m").unwrap()),
+                },
+                json!({"type": "prompt", "key": "m/3/tu_1", "text": "and the tests?", "from": "m"}),
             ),
             (
                 Item::Call {
@@ -299,6 +331,13 @@ mod tests {
                 json!({"type": "step", "seen": 1, "content": [{"type": "text", "text": "ok"}],
                        "stop": "end_turn", "usage": {"input": 10, "output": 2}}),
             ),
+        ];
+        round_trip(cases);
+    }
+
+    #[test]
+    fn what_a_mind_knows_of_itself_is_written_as_a_reader_expects() {
+        let cases = [
             (
                 Item::Summary {
                     text: "So far.".into(),
@@ -316,10 +355,13 @@ mod tests {
                         },
                     )]),
                     last_call: 3,
-                    forks_left: 64,
+                    forks_left: 20,
+                    parent: Some(Name::new("m").unwrap()),
+                    children: vec![Name::new("m.k3x9q2ab").unwrap()],
                 },
                 json!({"type": "summary", "text": "So far.", "usage": {"input": 10, "output": 2},
-                       "from": 4, "hands": {"a1": {"boot": "9f3c"}}, "lastCall": 3, "forksLeft": 64}),
+                       "from": 4, "hands": {"a1": {"boot": "9f3c"}}, "lastCall": 3, "forksLeft": 20,
+                       "parent": "m", "children": ["m.k3x9q2ab"]}),
             ),
             (
                 Item::Released {
@@ -329,10 +371,24 @@ mod tests {
                 json!({"type": "released", "hand": "b2", "reason": "it stayed with m"}),
             ),
             (
-                Item::Forks { left: 20 },
-                json!({"type": "forks", "left": 20}),
+                Item::Forked {
+                    children: vec![Name::new("m.k3x9q2ab").unwrap()],
+                    left: 31,
+                },
+                json!({"type": "forked", "children": ["m.k3x9q2ab"], "left": 31}),
+            ),
+            (
+                Item::Parted {
+                    parent: Name::new("m").unwrap(),
+                    left: 31,
+                },
+                json!({"type": "parted", "parent": "m", "left": 31}),
             ),
         ];
+        round_trip(cases);
+    }
+
+    fn round_trip<const N: usize>(cases: [(Item, Value); N]) {
         for (item, written) in cases {
             assert_eq!(serde_json::to_value(&item).unwrap(), written);
             assert_eq!(written["type"], item.kind());

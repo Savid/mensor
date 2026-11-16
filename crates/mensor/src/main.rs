@@ -3,9 +3,9 @@
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
-use mensor::hand::{Does, Hand};
+use mensor::hand::{Does, Hand, Hands};
 use mensor::host::{Hosting, open};
-use mensor::local::InProcess;
+use mensor::local::Local;
 use mensor::stopped;
 use mensor_protocol::Name;
 
@@ -30,7 +30,8 @@ enum Command {
     ///
     /// The hand's commands run on this machine as this user, beside a
     /// process that holds the model's credentials. Use it on a machine you
-    /// trust the model with. Its clones run in this process too.
+    /// trust the model with. Its clones run in this process too, and start
+    /// again with it.
     Run(Run),
 }
 
@@ -55,8 +56,8 @@ async fn main() -> ExitCode {
     })
 }
 
-/// Serves until the process is asked to stop. The hand may end before
-/// then, when its mind lets it go, and the host serves on.
+/// Serves until the process is asked to stop. A hand may end before then,
+/// when its mind lets it go, and the host serves on.
 async fn run(run: Run) -> Result<(), String> {
     if !run.mind.is_root() {
         return Err(format!(
@@ -66,16 +67,16 @@ async fn run(run: Run) -> Result<(), String> {
         ));
     }
     let (host, listener) = open(run.host).await?;
-    let hands = InProcess::new(host.clone(), run.does);
+    let hands = Hands::new(Local::new(host.clone()), run.does);
     let local = Name::new("local").map_err(|error| error.to_string())?;
-    let hand = hands.start(run.mind, local)?;
+    hands.start(run.mind, local)?;
     tokio::select! {
         served = host.serve(listener, std::future::pending()) => {
             served.map_err(|error| format!("the host stopped: {error}"))
         }
         () = stopped() => {
-            hand.stop();
-            Ok(())
+            hands.stop();
+            hands.ended().await
         }
     }
 }

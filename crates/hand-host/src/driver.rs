@@ -29,8 +29,13 @@ pub struct Config {
 impl Config {
     /// A hand that reaches its mind through `dial`, with these capabilities.
     pub fn new(dial: impl Dial + 'static, capabilities: Capabilities) -> Self {
+        Self::over(Arc::new(dial), capabilities)
+    }
+
+    /// The same, through a dial other hands share.
+    pub fn over(dial: Arc<dyn Dial>, capabilities: Capabilities) -> Self {
         Self {
-            dial: Arc::new(dial),
+            dial,
             capabilities,
             backoff: Backoff::default(),
             ping: Duration::from_secs(20),
@@ -72,6 +77,15 @@ impl Backoff {
         };
         full.saturating_sub(full / 2 * cut / 255)
     }
+}
+
+/// How a hand ended, when it did not fail.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ended {
+    /// It was told to stop.
+    Stopped,
+    /// Its mind let it go.
+    Released,
 }
 
 /// Why a hand gave up.
@@ -131,7 +145,7 @@ impl Handle {
 }
 
 /// Starts a hand on its own task.
-pub fn start(core: Core, config: Config) -> (Handle, JoinHandle<Result<(), Error>>) {
+pub fn start(core: Core, config: Config) -> (Handle, JoinHandle<Result<Ended, Error>>) {
     let (control, controls) = mpsc::unbounded_channel();
     let driver = Driver::new(core, config, controls);
     (Handle { control }, tokio::spawn(driver.run()))
@@ -149,7 +163,7 @@ struct Driver {
 }
 
 /// How a connection, or a wait for one, ended.
-enum Ended {
+enum Closed {
     /// Dial again after the backoff.
     Dropped,
     /// Dial again at once.
@@ -177,7 +191,7 @@ impl Driver {
         }
     }
 
-    async fn run(mut self) -> Result<(), Error> {
+    async fn run(mut self) -> Result<Ended, Error> {
         let (mind, hand) = (self.core.mind().clone(), self.core.hand().clone());
         let mut attempt = 0;
         // Since when the host has said the mind is not made yet.
@@ -190,29 +204,29 @@ impl Driver {
                     let ended = self.serve(link).await;
                     // A connection the host ends with a refusal was never
                     // taken: the backoff goes on.
-                    if !matches!(ended, Ended::Refused(_)) {
+                    if !matches!(ended, Closed::Refused(_)) {
                         attempt = 0;
                     }
                     ended
                 }
                 Err(DialError::Fail(error)) => return Err(error),
-                Err(DialError::Refused(refusal)) => Ended::Refused(refusal),
+                Err(DialError::Refused(refusal)) => Closed::Refused(refusal),
                 Err(DialError::Retry(reason)) => {
                     tracing::debug!(%mind, %hand, %reason, "the dial failed");
-                    Ended::Dropped
+                    Closed::Dropped
                 }
             };
             // Only refusals one after another count toward giving up: a
             // host that was away is no reason to.
-            if !matches!(ended, Ended::Refused(_)) {
+            if !matches!(ended, Closed::Refused(_)) {
                 refused_since = None;
             }
             let ended = match ended {
-                Ended::Refused(Refusal::Released) => {
+                Closed::Refused(Refusal::Released) => {
                     tracing::info!(%mind, %hand, "the mind let this hand go");
-                    return Ok(());
+                    return Ok(Ended::Released);
                 }
-                Ended::Refused(refusal) if !refusal.is_final() => {
+                Closed::Refused(refusal) if !refusal.is_final() => {
                     let since = *refused_since.get_or_insert_with(Instant::now);
                     if since.elapsed() >= self.config.give_up {
                         return Err(Error::Refused(refusal));
@@ -222,7 +236,7 @@ impl Driver {
                     attempt += 1;
                     self.wait(wait).await
                 }
-                Ended::Dropped => {
+                Closed::Dropped => {
                     let wait = self.config.backoff.wait(attempt);
                     attempt += 1;
                     self.wait(wait).await
@@ -230,17 +244,17 @@ impl Driver {
                 other => other,
             };
             match ended {
-                Ended::Stopped => return Ok(()),
-                Ended::Refused(refusal) if refusal.is_final() => {
+                Closed::Stopped => return Ok(Ended::Stopped),
+                Closed::Refused(refusal) if refusal.is_final() => {
                     return Err(Error::Refused(refusal));
                 }
-                Ended::Dropped | Ended::Redial | Ended::Refused(_) => {}
+                Closed::Dropped | Closed::Redial | Closed::Refused(_) => {}
             }
         }
     }
 
     /// Carries one connection until it ends.
-    async fn serve(&mut self, mut link: Box<dyn Link>) -> Ended {
+    async fn serve(&mut self, mut link: Box<dyn Link>) -> Closed {
         let mut ping =
             tokio::time::interval_at(Instant::now() + self.config.ping, self.config.ping);
         loop {
@@ -253,25 +267,25 @@ impl Driver {
                             if let Some(result) = self.finish(id, reply)
                                 && link.send(FromHand::Result(result)).await.is_err()
                             {
-                                return Ended::Dropped;
+                                return Closed::Dropped;
                             }
                         }
                         for effect in self.core.receive(message) {
                             if let Some(send) = self.perform(effect)
                                 && link.send(send).await.is_err()
                             {
-                                return Ended::Dropped;
+                                return Closed::Dropped;
                             }
                         }
                     }
-                    Incoming::Refused(refusal) => return Ended::Refused(refusal),
-                    Incoming::Closed => return Ended::Dropped,
+                    Incoming::Refused(refusal) => return Closed::Refused(refusal),
+                    Incoming::Closed => return Closed::Dropped,
                 },
                 Some((id, reply)) = self.finished.recv() => {
                     if let Some(result) = self.finish(id, reply)
                         && link.send(FromHand::Result(result)).await.is_err()
                     {
-                        return Ended::Dropped;
+                        return Closed::Dropped;
                     }
                 }
                 control = self.controls.recv(), if !self.unheld => {
@@ -282,7 +296,7 @@ impl Driver {
                 }
                 _ = ping.tick() => {
                     if link.ping().await.is_err() {
-                        return Ended::Dropped;
+                        return Closed::Dropped;
                     }
                 }
             }
@@ -290,11 +304,11 @@ impl Driver {
     }
 
     /// Waits out a backoff. Calls that finish meanwhile are held.
-    async fn wait(&mut self, wait: Duration) -> Ended {
+    async fn wait(&mut self, wait: Duration) -> Closed {
         let until = Instant::now() + wait;
         loop {
             tokio::select! {
-                () = sleep_until(until) => return Ended::Dropped,
+                () = sleep_until(until) => return Closed::Dropped,
                 Some((id, reply)) = self.finished.recv() => {
                     self.finish(id, reply);
                 }
@@ -351,9 +365,9 @@ impl Driver {
     }
 
     /// Handles one control message. `Some` ends the connection or the wait.
-    fn control(&mut self, control: Option<&Control>) -> Option<Ended> {
+    fn control(&mut self, control: Option<&Control>) -> Option<Closed> {
         match control {
-            Some(Control::Redial) => Some(Ended::Redial),
+            Some(Control::Redial) => Some(Closed::Redial),
             None => {
                 self.unheld = true;
                 None
@@ -362,7 +376,7 @@ impl Driver {
                 for (_, task) in self.tasks.drain() {
                     task.abort();
                 }
-                Some(Ended::Stopped)
+                Some(Closed::Stopped)
             }
         }
     }

@@ -16,5 +16,5 @@ pub mod capabilities;
 mod driver;
 mod transport;
 
-pub use driver::{Backoff, Config, Error, Handle, boot, start};
+pub use driver::{Backoff, Config, Ended, Error, Handle, boot, start};
 pub use transport::{BoxFuture, Dial, DialError, Gone, Incoming, Link, WebSocket};

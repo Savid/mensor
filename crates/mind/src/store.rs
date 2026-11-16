@@ -128,6 +128,7 @@ pub fn prompt_under<'a>(items: &'a [Item], key: &str) -> Option<&'a str> {
         Item::Prompt {
             key: Some(held),
             text,
+            ..
         } if held == key => Some(text.as_str()),
         _ => None,
     })
@@ -267,6 +268,7 @@ mod tests {
         Item::Prompt {
             key: None,
             text: text.into(),
+            from: None,
         }
     }
 
@@ -325,6 +327,7 @@ mod tests {
         let keyed = Item::Prompt {
             key: Some("k".into()),
             text: "3".into(),
+            from: None,
         };
         let summary = Item::Summary {
             text: "So far.".into(),
@@ -333,6 +336,8 @@ mod tests {
             hands: BTreeMap::new(),
             last_call: 0,
             forks_left: 64,
+            parent: None,
+            children: Vec::new(),
         };
         store.append(&name("a1"), &[keyed, summary]).unwrap();
         fork(&store, "b7", "a1", 5);

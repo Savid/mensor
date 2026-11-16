@@ -534,7 +534,7 @@ async fn the_api_is_the_one_a_server_has() {
     assert_eq!(
         status,
         json!({"name": "a1", "origin": "root", "state": "idle", "hands": ["local"], "waiting": [],
-               "length": 3})
+               "watching": [], "length": 3})
     );
 
     // The same prompt under its key is not a second prompt.

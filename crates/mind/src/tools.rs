@@ -6,8 +6,9 @@
 //! new kind of capability arrives, and a model's cache of its prompt
 //! survives hands coming and going.
 //!
-//! The mind has three tools of its own, shown while a hand can clone itself:
-//! `fork`, `clone_hand` and `release_hand`.
+//! The mind has tools of its own: `fork`, `clone_hand` and `release_hand`,
+//! shown while a hand can clone itself, `tell`, shown while it has a parent
+//! or children, and `wait`, shown while it has children.
 
 use mensor_protocol::{CapabilityDecl, Name, OperationDecl};
 use serde_json::{Map, Value, json};
@@ -30,16 +31,26 @@ pub(crate) enum MindTool {
     Fork,
     CloneHand,
     ReleaseHand,
+    Tell,
+    Wait,
 }
 
 impl MindTool {
-    const ALL: [Self; 3] = [Self::Fork, Self::CloneHand, Self::ReleaseHand];
+    const ALL: [Self; 5] = [
+        Self::Fork,
+        Self::CloneHand,
+        Self::ReleaseHand,
+        Self::Tell,
+        Self::Wait,
+    ];
 
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::Fork => "fork",
             Self::CloneHand => "clone_hand",
             Self::ReleaseHand => "release_hand",
+            Self::Tell => "tell",
+            Self::Wait => "wait",
         }
     }
 
@@ -48,8 +59,8 @@ impl MindTool {
             Self::Fork => (
                 "Fork this conversation into child minds, one per prompt. Each child is given \
                  this conversation as it is now, a clone of one of your hands (a copy of it, its \
-                 files included), and its own prompt, and then works on its own. Children report \
-                 nothing back to you: this call only starts them.",
+                 files included), and its own prompt, and then works on its own: this call only \
+                 starts them. Use wait to read what they answer, and tell to say more to one.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -85,6 +96,29 @@ impl MindTool {
                     "required": ["hand"],
                 }),
             ),
+            Self::Tell => (
+                "Send a message to your parent or to one of your children. It reaches that mind \
+                 as a prompt, marked as yours. This does not wait for an answer.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "mind": {"type": "string", "description": "Your parent's name or a child's."},
+                        "text": {"type": "string", "description": "The message."},
+                    },
+                    "required": ["mind", "text"],
+                }),
+            ),
+            Self::Wait => (
+                "Wait until children have ended their turns, and read what each said last. A \
+                 child that is still working is waited for, however long it takes.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "minds": {"type": "array", "items": {"type": "string"}, "description":
+                            "The children to wait for. Leave it out to wait for all of them."},
+                    },
+                }),
+            ),
         };
         Tool {
             name: self.name().into(),
@@ -106,6 +140,16 @@ pub(crate) enum Does {
     Mind(MindTool),
 }
 
+/// Who a mind can talk to: its own tools `tell` and `wait` are shown for
+/// them.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Family {
+    /// Whether it was forked from another mind.
+    pub(crate) parent: bool,
+    /// Whether it has forked.
+    pub(crate) children: bool,
+}
+
 /// The tools of a mind's hands, and its own.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Table {
@@ -115,10 +159,11 @@ pub(crate) struct Table {
 
 impl Table {
     /// The tools of `hands`, the mind's hands that are not released, in the
-    /// order of their names. An operation two hands declare is one tool,
-    /// defined as the first of them declares it.
+    /// order of their names, then the mind's own. An operation two hands
+    /// declare is one tool, defined as the first of them declares it.
     pub(crate) fn new<'a>(
         hands: impl IntoIterator<Item = (&'a Name, &'a [CapabilityDecl])>,
+        family: Family,
     ) -> Self {
         let mut operations: Vec<(&str, &OperationDecl, Vec<Name>)> = Vec::new();
         let mut cloners = Vec::new();
@@ -169,9 +214,17 @@ impl Table {
             })
             .collect();
         if !cloners.is_empty() {
-            for tool in MindTool::ALL {
+            for tool in [MindTool::Fork, MindTool::CloneHand, MindTool::ReleaseHand] {
                 entries.push((tool.tool(), Does::Mind(tool), cloners.clone()));
             }
+        }
+        if family.parent || family.children {
+            let tool = MindTool::Tell;
+            entries.push((tool.tool(), Does::Mind(tool), Vec::new()));
+        }
+        if family.children {
+            let tool = MindTool::Wait;
+            entries.push((tool.tool(), Does::Mind(tool), Vec::new()));
         }
         Self { entries }
     }
@@ -182,7 +235,8 @@ impl Table {
     }
 
     /// What the tool named `name` does, and the hands that can do it: for
-    /// the mind's own tools, the hands that can be cloned.
+    /// the mind's own tools, the hands that can be cloned, and none for
+    /// `tell` and `wait`.
     ///
     /// A hand tool is also found by the name it had before hands came or
     /// went: its operation alone, when one operation has it, or
@@ -319,7 +373,7 @@ mod tests {
             capability("commands", &["bash"]),
             capability("files", &["read"]),
         ];
-        let table = Table::new([(&name("a1"), a1.as_slice())]);
+        let table = Table::new([(&name("a1"), a1.as_slice())], Family::default());
         assert_eq!(names(&table), ["bash", "read"]);
         let read = &table.tools()[1];
         assert!(read.input["properties"]["x"].is_object());
@@ -341,7 +395,7 @@ mod tests {
             capability("files", &["read", "write"]),
             capability("notes", &["read"]),
         ];
-        let table = Table::new([(&name("a1"), a1.as_slice())]);
+        let table = Table::new([(&name("a1"), a1.as_slice())], Family::default());
         assert_eq!(names(&table), ["files_read", "write", "notes_read"]);
     }
 
@@ -352,7 +406,10 @@ mod tests {
             capability("commands", &["bash"]),
             capability("fetch", &["fetch"]),
         ];
-        let table = Table::new([(&name("a1"), a1.as_slice()), (&name("b2"), b2.as_slice())]);
+        let table = Table::new(
+            [(&name("a1"), a1.as_slice()), (&name("b2"), b2.as_slice())],
+            Family::default(),
+        );
         assert_eq!(names(&table), ["bash", "fetch"]);
         assert_eq!(table.find("bash").unwrap().1, [name("a1"), name("b2")]);
         assert_eq!(table.find("fetch").unwrap().1, [name("b2")]);
@@ -361,7 +418,7 @@ mod tests {
     #[test]
     fn the_minds_own_tools_come_with_a_hand_that_can_clone() {
         let plain = vec![capability("commands", &["bash"])];
-        let table = Table::new([(&name("a1"), plain.as_slice())]);
+        let table = Table::new([(&name("a1"), plain.as_slice())], Family::default());
         assert!(table.find("fork").is_none());
 
         let cloning = vec![
@@ -369,11 +426,14 @@ mod tests {
             capability(CLONE, &["clone"]),
         ];
         let fork = vec![capability("tools", &["fork"])];
-        let table = Table::new([
-            (&name("a1"), cloning.as_slice()),
-            (&name("b2"), plain.as_slice()),
-            (&name("c3"), fork.as_slice()),
-        ]);
+        let table = Table::new(
+            [
+                (&name("a1"), cloning.as_slice()),
+                (&name("b2"), plain.as_slice()),
+                (&name("c3"), fork.as_slice()),
+            ],
+            Family::default(),
+        );
         assert_eq!(
             names(&table),
             ["bash", "tools_fork", "fork", "clone_hand", "release_hand"]
@@ -381,6 +441,27 @@ mod tests {
         let (does, cloners) = table.find("fork").unwrap();
         assert_eq!(does, &Does::Mind(MindTool::Fork));
         assert_eq!(cloners, [name("a1")]);
+    }
+
+    #[test]
+    fn a_mind_talks_to_the_minds_it_has() {
+        let plain = vec![capability("commands", &["bash"])];
+        let hands = [(&name("a1"), plain.as_slice())];
+        let child = Family {
+            parent: true,
+            children: false,
+        };
+        assert_eq!(names(&Table::new(hands, child)), ["bash", "tell"]);
+        let parent = Family {
+            parent: false,
+            children: true,
+        };
+        let table = Table::new(hands, parent);
+        assert_eq!(names(&table), ["bash", "tell", "wait"]);
+        assert_eq!(
+            table.find("wait").unwrap(),
+            (&Does::Mind(MindTool::Wait), &[][..])
+        );
     }
 
     #[test]

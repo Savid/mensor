@@ -5,14 +5,14 @@ use std::time::Duration;
 use mensor_api::Writing;
 use mensor_mind::{
     Conflict, Fork, Item, Mind, MindRecord, ModelReply, ModelRequest, NoHand, Origin, Output,
-    State, Store, StoreError,
+    Report, State, Store, StoreError,
 };
 use mensor_protocol::{FromHand, FromMind, Hello, Name, Refusal};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::AbortHandle;
 use tokio::time::timeout;
 
-use crate::host::{Inner, Slot};
+use crate::host::{Host, Inner, Slot};
 use crate::model::{Model, ModelError};
 
 /// How much those following a mind may fall behind before they miss some
@@ -25,6 +25,8 @@ pub(crate) enum Command {
     Prompt {
         key: Option<String>,
         text: String,
+        /// The mind that says it, when its parent or a child does.
+        from: Option<Name>,
         reply: oneshot::Sender<Result<bool, Conflict>>,
     },
     Attach {
@@ -43,6 +45,16 @@ pub(crate) enum Command {
     Model {
         seen: u64,
         result: Result<ModelReply, ModelError>,
+    },
+    /// A message the mind said reached the mind it was for, or could not.
+    Told {
+        key: String,
+        result: Result<(), String>,
+    },
+    /// A mind this one watches is at rest.
+    Rested {
+        mind: Name,
+        report: Report,
     },
     Interrupt,
     Release {
@@ -64,8 +76,12 @@ pub(crate) struct Status {
     pub(crate) hands: Vec<Name>,
     /// The hands its turn waits for.
     pub(crate) waiting: Vec<Name>,
+    /// The children its turn waits for.
+    pub(crate) watching: Vec<Name>,
     /// How many items of its history are stored.
     pub(crate) length: u64,
+    /// What it said when it came to rest, while it is at rest.
+    pub(crate) report: Option<Report>,
 }
 
 /// What those following a mind are told, in the order it happened.
@@ -168,6 +184,8 @@ impl Task {
         let (from, items) = blocking(move || store.tail(&name)).await?;
         let settings = self.host.upgrade().map(|host| host.config.mind.clone());
         self.mind = Mind::load(self.name.clone(), from, items, settings.unwrap_or_default());
+        let outputs = self.mind.start();
+        self.perform(outputs).await?;
         loop {
             let resting =
                 self.links.is_empty() && self.asking.is_none() && self.told.receiver_count() == 0;
@@ -210,7 +228,12 @@ impl Task {
 
     async fn handle(&mut self, command: Command) -> Result<(), StoreError> {
         match command {
-            Command::Prompt { key, text, reply } => {
+            Command::Prompt {
+                key,
+                text,
+                from,
+                reply,
+            } => {
                 // The mind knows the keys of the items it holds. One from
                 // before them is in the store.
                 let earlier = match &key {
@@ -221,7 +244,7 @@ impl Task {
                     }
                     _ => None,
                 };
-                match self.mind.prompt(key, text, earlier.as_deref()) {
+                match self.mind.prompt(key, text, from, earlier.as_deref()) {
                     Ok(prompted) => {
                         self.perform(prompted.outputs).await?;
                         let _ = reply.send(Ok(prompted.existing));
@@ -254,6 +277,14 @@ impl Task {
                 };
                 self.perform(outputs).await?;
             }
+            Command::Told { key, result } => {
+                let outputs = self.mind.told(&key, result);
+                self.perform(outputs).await?;
+            }
+            Command::Rested { mind, report } => {
+                let outputs = self.mind.rested(&mind, report);
+                self.perform(outputs).await?;
+            }
             Command::Interrupt => {
                 let outputs = self.mind.interrupt();
                 if !outputs.is_empty() {
@@ -277,13 +308,15 @@ impl Task {
                 }
             },
             Command::Status { reply } => {
-                let status = Status {
-                    state: self.mind.state(),
+                let status = self.mind.status_now();
+                let _ = reply.send(Status {
+                    state: status.state,
                     hands: self.mind.connected(),
-                    waiting: self.mind.waiting(),
-                    length: self.mind.length(),
-                };
-                let _ = reply.send(status);
+                    waiting: status.waiting,
+                    watching: status.watching,
+                    length: status.length,
+                    report: status.report,
+                });
             }
             Command::Follow { reply } => {
                 let _ = reply.send(self.told.subscribe());
@@ -342,8 +375,20 @@ impl Task {
     }
 
     /// Performs a mind's outputs in order. Items are stored, and children
-    /// made, before the output that follows them is performed.
+    /// made, before the output that follows them is performed. A mind that
+    /// is then at rest tells those that wait for it.
     async fn perform(&mut self, outputs: Vec<Output>) -> Result<(), StoreError> {
+        self.carry_out(outputs).await?;
+        if let Some(host) = self.host.upgrade().map(Host::from)
+            && host.is_watched(&self.name)
+            && let Some(report) = self.mind.report()
+        {
+            host.rested(&self.name, &report);
+        }
+        Ok(())
+    }
+
+    async fn carry_out(&mut self, outputs: Vec<Output>) -> Result<(), StoreError> {
         let mut items = Vec::new();
         for output in outputs {
             match output {
@@ -367,6 +412,16 @@ impl Task {
                 Output::Ask(request) => {
                     self.store(&mut items).await?;
                     self.ask(request);
+                }
+                Output::Tell { to, key, text } => {
+                    self.store(&mut items).await?;
+                    self.tell(to, key, text);
+                }
+                Output::Watch(minds) => {
+                    self.store(&mut items).await?;
+                    if let Some(host) = self.host.upgrade() {
+                        Host::from(host).watch(&self.name, minds);
+                    }
                 }
             }
         }
@@ -410,6 +465,22 @@ impl Task {
         blocking(move || store.append(&name, &items)).await?;
         let _ = self.told.send(Told::Grew);
         Ok(())
+    }
+
+    /// Says a message to another mind on a task of its own: the two may be
+    /// telling each other at once.
+    fn tell(&self, to: Name, key: String, text: String) {
+        let Some(host) = self.host.upgrade() else {
+            return;
+        };
+        let (host, from, myself) = (Host::from(host), self.name.clone(), self.myself.clone());
+        tokio::spawn(async move {
+            let result = host.say(&to, Some(key.clone()), text, Some(from)).await;
+            let result = result.map(|_| ()).map_err(|error| error.to_string());
+            if let Some(commands) = myself.upgrade() {
+                let _ = commands.send(Command::Told { key, result });
+            }
+        });
     }
 
     /// Asks the model on a task of its own. Those following the mind are

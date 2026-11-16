@@ -1,14 +1,17 @@
-//! Running a hand: the flags, and the hand they describe.
+//! Running hands: the flags, and the hands they describe.
 
-use std::ffi::OsString;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use clap::Args;
 use mensor_hand::{Capabilities, Core, Limits};
-use mensor_hand_host::capabilities::{Cloning, Commands, Disk, Files, Spawn, Started};
-use mensor_hand_host::{BoxFuture, Dial, WebSocket, boot};
-use mensor_protocol::Name;
+use mensor_hand_host::capabilities::{Cloning, Commands, Disk, Files, Spawn, Started, copies};
+use mensor_hand_host::{BoxFuture, Config, Dial, Ended, Error, Handle, WebSocket, boot};
+use mensor_protocol::{Name, Refusal};
+use tokio::sync::watch;
 
 use crate::{CREDENTIALS, stopped, token};
 
@@ -35,7 +38,8 @@ pub struct Does {
     #[arg(long, default_value = ".")]
     dir: PathBuf,
     /// Where the hand's clones are made: a directory per mind, and in it a
-    /// directory per hand. `<dir>.clones` unless set.
+    /// copy per clone. `<dir>.clones` unless set. Clones run in this
+    /// process, and starting it again starts one on each copy.
     #[arg(long)]
     clones: Option<PathBuf>,
     /// What the hand can do: `commands`, `files` and `clone`.
@@ -104,51 +108,180 @@ impl Does {
     }
 }
 
-/// Runs a hand that dials a mind's host, until it ends or the process is
-/// asked to stop.
+/// Runs a hand that dials a mind's host, and its clones, until every one
+/// has ended or the process is asked to stop.
 pub async fn run(hand: Hand) -> Result<(), String> {
-    let spawn: Arc<dyn Spawn> = Arc::new(Process {
-        args: std::env::args_os().collect(),
-        clones: hand.does.clones()?,
-    });
-    let capabilities = hand.does.capabilities(&spawn)?;
-    let core = Core::new(hand.mind, hand.name, boot(), Limits::default());
     let dial = WebSocket::new(hand.url).token(token());
-    alive(core, dial, capabilities).await
-}
-
-/// Runs a hand until it ends or the process is asked to stop.
-pub async fn alive(
-    core: Core,
-    dial: impl Dial + 'static,
-    capabilities: Capabilities,
-) -> Result<(), String> {
-    let config = mensor_hand_host::Config::new(dial, capabilities);
-    let (handle, task) = mensor_hand_host::start(core, config);
-    tokio::pin!(task);
-    loop {
-        tokio::select! {
-            ended = &mut task => {
-                return match ended {
-                    Ok(ended) => ended.map_err(|error| error.to_string()),
-                    Err(error) => Err(format!("the hand stopped: {error}")),
-                };
-            }
-            () = stopped() => handle.stop(),
+    let hands = Hands::new(dial, hand.does);
+    hands.start(hand.mind, hand.name)?;
+    tokio::select! {
+        ended = hands.ended() => ended,
+        () = stopped() => {
+            hands.stop();
+            hands.ended().await
         }
     }
 }
 
-/// Starts each clone as a process of its own: this program again, with
-/// this hand's own arguments but for its mind, its name and its
-/// directory. The host's token reaches it in this process's environment,
-/// which the commands a hand runs are not given.
-struct Process {
-    args: Vec<OsString>,
-    clones: PathBuf,
+/// The hands one process runs: one on a directory, and every clone made
+/// from it, each on a task of its own.
+///
+/// A clone works in a copy of its original's directory, kept under the
+/// clones directory as `<clones>/<mind>/<hand>.<code>`. The copies are what
+/// the clones are: [`Hands::start`] starts a hand on each copy whose mind
+/// shares the root of the one it starts, and a copy is removed once its
+/// mind lets its clone go, or its clone gives up on a mind its fork never
+/// made. A copy whose clone is stopped is kept, to be started again.
+#[derive(Clone)]
+pub struct Hands {
+    inner: Arc<Inner>,
 }
 
-impl Spawn for Process {
+struct Inner {
+    dial: Arc<dyn Dial>,
+    does: Does,
+    /// How long a clone dials a mind not made yet before it gives up.
+    give_up: Option<Duration>,
+    /// Each hand that runs, by a number of its own.
+    running: Mutex<BTreeMap<u64, Handle>>,
+    next: AtomicU64,
+    /// How many hands run.
+    count: watch::Sender<usize>,
+    /// How the first hand started ended, once it has.
+    first: Mutex<Option<Result<(), String>>>,
+}
+
+impl Hands {
+    /// Hands that reach their minds through `dial`, and do what `does`
+    /// says: the one started works in its directory, and each clone in a
+    /// copy of it.
+    pub fn new(dial: impl Dial + 'static, does: Does) -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                dial: Arc::new(dial),
+                does,
+                give_up: None,
+                running: Mutex::default(),
+                next: AtomicU64::new(0),
+                count: watch::Sender::new(0),
+                first: Mutex::default(),
+            }),
+        }
+    }
+
+    /// The same, with clones that give up on a mind not made yet after
+    /// `give_up`, not two minutes.
+    pub fn giving_up(dial: impl Dial + 'static, does: Does, give_up: Duration) -> Self {
+        let mut hands = Self::new(dial, does);
+        if let Some(inner) = Arc::get_mut(&mut hands.inner) {
+            inner.give_up = Some(give_up);
+        }
+        hands
+    }
+
+    /// Starts the hand `hand` of the mind `mind` in the directory, then one
+    /// on each copy a clone of a mind of the same root left.
+    pub fn start(&self, mind: Name, hand: Name) -> Result<(), String> {
+        let does = &self.inner.does;
+        let clones = does.clones()?;
+        let found = copies(&clones, mind.root())
+            .map_err(|error| format!("{} cannot be read: {error}", clones.display()))?;
+        self.run(mind, hand, does, None)?;
+        for copy in found {
+            tracing::info!(mind = %copy.mind, hand = %copy.hand, dir = %copy.dir.display(), "a clone starts again");
+            let of_clone = does.of_clone(copy.dir.clone())?;
+            self.run(copy.mind, copy.hand, &of_clone, Some(copy.dir))?;
+        }
+        Ok(())
+    }
+
+    /// Stops every hand. A clone's copy is kept.
+    pub fn stop(&self) {
+        let running = self
+            .inner
+            .running
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for handle in running.values() {
+            handle.stop();
+        }
+    }
+
+    /// Waits until every hand has ended, and says how the first one
+    /// started did.
+    pub async fn ended(&self) -> Result<(), String> {
+        let mut count = self.inner.count.subscribe();
+        let _ = count.wait_for(|count| *count == 0).await;
+        let first = self
+            .inner
+            .first
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        first.clone().unwrap_or(Ok(()))
+    }
+
+    /// Starts one hand doing what `does` says. `copy` is the copy a clone
+    /// works in, removed once the clone is done with it.
+    fn run(
+        &self,
+        mind: Name,
+        hand: Name,
+        does: &Does,
+        copy: Option<PathBuf>,
+    ) -> Result<Handle, String> {
+        let spawn: Arc<dyn Spawn> = Arc::new(self.clone());
+        let capabilities = does.capabilities(&spawn)?;
+        let core = Core::new(mind.clone(), hand.clone(), boot(), Limits::default());
+        let mut config = Config::over(Arc::clone(&self.inner.dial), capabilities);
+        if let Some(give_up) = self.inner.give_up {
+            config.give_up = give_up;
+        }
+        let (handle, task) = mensor_hand_host::start(core, config);
+        let id = self.inner.next.fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .running
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id, handle.clone());
+        self.inner.count.send_modify(|count| *count += 1);
+        let inner = Arc::clone(&self.inner);
+        tokio::spawn(async move {
+            let ended = task.await.unwrap_or_else(|error| {
+                Err(Error::Config(format!("the hand's task failed: {error}")))
+            });
+            match &ended {
+                Ok(how) => tracing::info!(%mind, %hand, ?how, "a hand ended"),
+                Err(error) => tracing::warn!(%mind, %hand, %error, "a hand ended"),
+            }
+            // A clone its mind let go, or whose mind was never made, is done
+            // with its copy.
+            let done = matches!(
+                ended,
+                Ok(Ended::Released) | Err(Error::Refused(Refusal::UnknownMind))
+            );
+            if let Some(copy) = copy.filter(|_| done) {
+                let removed =
+                    tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&copy)).await;
+                if let Ok(Err(error)) = removed {
+                    tracing::warn!(%mind, %hand, %error, "a clone's copy could not be removed");
+                }
+            }
+            inner
+                .running
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&id);
+            if id == 0 {
+                *inner.first.lock().unwrap_or_else(PoisonError::into_inner) =
+                    Some(ended.map(|_| ()).map_err(|error| error.to_string()));
+            }
+            inner.count.send_modify(|count| *count -= 1);
+        });
+        Ok(handle)
+    }
+}
+
+impl Spawn for Hands {
     fn spawn(
         &self,
         mind: Name,
@@ -156,110 +289,19 @@ impl Spawn for Process {
         dir: PathBuf,
     ) -> BoxFuture<'_, Result<Box<dyn Started>, String>> {
         Box::pin(async move {
-            let program = std::env::current_exe()
-                .map_err(|error| format!("this program cannot be found: {error}"))?;
-            let set = [
-                ("--mind", OsString::from(mind.as_str())),
-                ("--hand", OsString::from(hand.as_str())),
-                ("--dir", dir.clone().into_os_string()),
-                ("--clones", self.clones.clone().into_os_string()),
-            ];
-            let args = with_flags(self.args.iter().skip(1).cloned(), &set);
-            let log = log_beside(&dir)?;
-            let child = tokio::process::Command::new(program)
-                .args(args)
-                .stdin(std::process::Stdio::null())
-                .stdout(log.try_clone().map_err(|error| error.to_string())?)
-                .stderr(log)
-                .process_group(0)
-                .spawn()
-                .map_err(|error| format!("the clone could not be started: {error}"))?;
-            tracing::info!(%mind, %hand, dir = %dir.display(), "a clone was started");
-            Ok(Box::new(Child(child)) as Box<dyn Started>)
+            let does = self.inner.does.of_clone(dir.clone())?;
+            let handle = self.run(mind.clone(), hand.clone(), &does, Some(dir))?;
+            tracing::info!(%mind, %hand, "a clone was started");
+            Ok(Box::new(Spawned(handle)) as Box<dyn Started>)
         })
     }
 }
 
-struct Child(tokio::process::Child);
+/// A clone a [`Hands`] started.
+struct Spawned(Handle);
 
-impl Started for Child {
-    fn stop(mut self: Box<Self>) {
-        let _ = self.0.start_kill();
-    }
-}
-
-/// The log of a clone working in `dir`: `<dir>.log`, beside it.
-fn log_beside(dir: &Path) -> Result<std::fs::File, String> {
-    let mut path = dir.as_os_str().to_os_string();
-    path.push(".log");
-    std::fs::File::create(&path)
-        .map_err(|error| format!("{} cannot be written: {error}", dir.display()))
-}
-
-/// `args` with each flag in `set` given its value instead, whether it was
-/// written `--flag value` or `--flag=value`.
-fn with_flags(args: impl IntoIterator<Item = OsString>, set: &[(&str, OsString)]) -> Vec<OsString> {
-    let mut kept = Vec::new();
-    let mut args = args.into_iter();
-    while let Some(arg) = args.next() {
-        let text = arg.to_string_lossy();
-        let named = set.iter().find(|(flag, _)| {
-            text == *flag
-                || text
-                    .strip_prefix(flag)
-                    .is_some_and(|rest| rest.starts_with('='))
-        });
-        match named {
-            Some((flag, _)) if text == *flag => {
-                args.next();
-            }
-            Some(_) => {}
-            None => kept.push(arg),
-        }
-    }
-    for (flag, value) in set {
-        kept.push(OsString::from(flag));
-        kept.push(value.clone());
-    }
-    kept
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_clone_is_given_its_own_flags_and_keeps_the_rest() {
-        let args = [
-            "hand",
-            "--url",
-            "ws://h/v1/attach",
-            "--mind",
-            "m",
-            "--hand=a1",
-            "--dir",
-            ".",
-        ]
-        .map(OsString::from);
-        let set = [
-            ("--mind", "m.k3".into()),
-            ("--hand", "a1".into()),
-            ("--dir", "/c/m.k3/a1".into()),
-        ];
-        assert_eq!(
-            with_flags(args, &set),
-            [
-                "hand",
-                "--url",
-                "ws://h/v1/attach",
-                "--mind",
-                "m.k3",
-                "--hand",
-                "a1",
-                "--dir",
-                "/c/m.k3/a1"
-            ]
-            .map(OsString::from)
-        );
+impl Started for Spawned {
+    fn stop(self: Box<Self>) {
+        self.0.stop();
     }
 }

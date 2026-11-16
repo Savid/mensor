@@ -1,12 +1,14 @@
-use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use mensor_api::{MindStatus, PAGE, Prompted};
-use mensor_mind::{Conflict, Item, Mind, MindRecord, NoHand, Origin, Settings, Store, StoreError};
+use mensor_mind::{
+    Conflict, Item, Mind, MindRecord, NoHand, Origin, Report, Settings, State, Store, StoreError,
+};
 use mensor_protocol::{FromHand, Hello, InvalidName, Name, Refusal};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
@@ -53,6 +55,12 @@ pub struct Host {
     inner: Arc<Inner>,
 }
 
+impl From<Arc<Inner>> for Host {
+    fn from(inner: Arc<Inner>) -> Self {
+        Self { inner }
+    }
+}
+
 pub(crate) struct Inner {
     pub(crate) store: Arc<dyn Store>,
     pub(crate) model: Arc<dyn Model>,
@@ -61,6 +69,9 @@ pub(crate) struct Inner {
     /// from here only while this is locked.
     pub(crate) minds: Mutex<BTreeMap<Name, Slot>>,
     links: AtomicU64,
+    /// The minds a `wait` waits for, each with the minds that wait for it.
+    /// Kept in memory alone: a mind that waits watches again when it wakes.
+    watchers: std::sync::Mutex<BTreeMap<Name, BTreeSet<Name>>>,
 }
 
 /// One mind, as its host knows it.
@@ -154,15 +165,18 @@ impl std::fmt::Debug for Connection {
 }
 
 impl Host {
-    /// Opens a host over a store. Every mind the store holds rests until a
-    /// hand dials in or something is asked of it.
-    pub fn open(
+    /// Opens a host over a store. A mind with something to do that waits
+    /// for no hand is woken: one saying a message, waiting for its
+    /// children, or with its model to ask and every hand let go. Every other
+    /// mind rests until a hand dials in or something is asked of it.
+    pub async fn open(
         store: Arc<dyn Store>,
         model: Arc<dyn Model>,
         config: Config,
     ) -> Result<Self, StoreError> {
-        let minds: BTreeMap<Name, Slot> = store
-            .minds()?
+        let listed = Arc::clone(&store);
+        let minds: BTreeMap<Name, Slot> = blocking(move || listed.minds())
+            .await?
             .into_iter()
             .map(|record| {
                 let slot = Slot {
@@ -179,10 +193,34 @@ impl Host {
             config,
             minds: Mutex::new(minds),
             links: AtomicU64::new(1),
+            watchers: std::sync::Mutex::default(),
         };
-        Ok(Self {
+        let host = Self {
             inner: Arc::new(inner),
-        })
+        };
+        host.resume().await?;
+        Ok(host)
+    }
+
+    /// Wakes every mind that has something to do and waits for no hand.
+    async fn resume(&self) -> Result<(), StoreError> {
+        let names: Vec<Name> = self.inner.minds.lock().await.keys().cloned().collect();
+        for name in names {
+            let (store, of) = (Arc::clone(&self.inner.store), name.clone());
+            let status = blocking(move || {
+                let (from, items) = store.recent(&of)?;
+                Ok(Mind::status(of, from, items))
+            })
+            .await?;
+            if status.state != State::Idle && status.waiting.is_empty() {
+                tracing::info!(mind = %name, "a mind with work to do is woken");
+                let mut minds = self.inner.minds.lock().await;
+                if let Some(slot) = minds.get_mut(&name) {
+                    self.wake(slot);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The host's configuration.
@@ -249,6 +287,7 @@ impl Host {
                 state: status.state,
                 hands: status.hands,
                 waiting: status.waiting,
+                watching: status.watching,
                 length: status.length,
             });
         }
@@ -263,6 +302,7 @@ impl Host {
                 state: status.state,
                 hands: Vec::new(),
                 waiting: status.waiting,
+                watching: status.watching,
                 length: status.length,
             })
         });
@@ -276,12 +316,28 @@ impl Host {
         key: Option<String>,
         text: String,
     ) -> Result<Prompted, HostError> {
+        self.say(name, key, text, None).await
+    }
+
+    /// Says something to a mind, as `from` when its parent or a child says
+    /// it.
+    pub(crate) async fn say(
+        &self,
+        name: &Name,
+        key: Option<String>,
+        text: String,
+        from: Option<Name>,
+    ) -> Result<Prompted, HostError> {
         let commands = self.reach(name).await?;
         let (reply, answer) = oneshot::channel();
         let stopped = || HostError::Stopped(name.clone());
-        commands
-            .send(Command::Prompt { key, text, reply })
-            .map_err(|_| stopped())?;
+        let prompt = Command::Prompt {
+            key,
+            text,
+            from,
+            reply,
+        };
+        commands.send(prompt).map_err(|_| stopped())?;
         drop(commands);
         match answer.await.map_err(|_| stopped())? {
             Ok(true) => Ok(Prompted::Existing),
@@ -339,6 +395,92 @@ impl Host {
             .map_err(|_| stopped())?;
         drop(commands);
         answer.await.map_err(|_| stopped())
+    }
+
+    /// The minds waited for, each with the minds that wait.
+    fn watchers(&self) -> std::sync::MutexGuard<'_, BTreeMap<Name, BTreeSet<Name>>> {
+        let watchers = self.inner.watchers.lock();
+        watchers.unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Whether a mind waits for `mind` to rest.
+    pub(crate) fn is_watched(&self, mind: &Name) -> bool {
+        let watchers = self.watchers();
+        watchers.contains_key(mind)
+    }
+
+    /// `parent` waits for each of `minds` to rest: each tells it what it
+    /// said once it is, at once if it already is.
+    pub(crate) fn watch(&self, parent: &Name, minds: Vec<Name>) {
+        for mind in minds {
+            {
+                let mut watchers = self.watchers();
+                watchers
+                    .entry(mind.clone())
+                    .or_default()
+                    .insert(parent.clone());
+            }
+            let host = self.clone();
+            tokio::spawn(async move {
+                // One that rests from now on tells its watchers itself.
+                let report = match host.mind_report(&mind).await {
+                    Ok(report) => report,
+                    Err(HostError::Missing(_)) => Some(Report::Missing),
+                    Err(error) => {
+                        tracing::warn!(%mind, %error, "a mind waited for could not be told of");
+                        None
+                    }
+                };
+                if let Some(report) = report {
+                    host.rested(&mind, &report);
+                }
+            });
+        }
+    }
+
+    /// `mind` is at rest, having said `report`: every mind that waits for
+    /// it is told.
+    pub(crate) fn rested(&self, mind: &Name, report: &Report) {
+        let parents = {
+            let mut watchers = self.watchers();
+            watchers.remove(mind).unwrap_or_default()
+        };
+        for parent in parents {
+            let (host, mind, report) = (self.clone(), mind.clone(), report.clone());
+            tokio::spawn(async move {
+                match host.reach(&parent).await {
+                    Ok(commands) => {
+                        let _ = commands.send(Command::Rested { mind, report });
+                    }
+                    Err(error) => {
+                        tracing::warn!(%parent, %error, "a mind that waits could not be told");
+                    }
+                }
+            });
+        }
+    }
+
+    /// What a mind said when it came to rest, if it is at rest.
+    async fn mind_report(&self, name: &Name) -> Result<Option<Report>, HostError> {
+        let known = {
+            let minds = self.inner.minds.lock().await;
+            let slot = minds.get(name);
+            Known::of(slot.ok_or_else(|| HostError::Missing(name.clone()))?)
+        };
+        let stopped = || HostError::Stopped(name.clone());
+        if let Some(commands) = known.awake {
+            let (reply, answer) = oneshot::channel();
+            commands
+                .send(Command::Status { reply })
+                .map_err(|_| stopped())?;
+            return Ok(answer.await.map_err(|_| stopped())?.report);
+        }
+        let (store, of) = (Arc::clone(&self.inner.store), name.clone());
+        let status = blocking(move || {
+            let (from, items) = store.recent(&of)?;
+            Ok(Mind::status(of, from, items))
+        });
+        Ok(status.await.map_err(HostError::Store)?.report)
     }
 
     /// The way to reach a mind's task, waking the mind if it rests.

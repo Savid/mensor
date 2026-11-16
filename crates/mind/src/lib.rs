@@ -5,7 +5,7 @@
 //! feeds it what happens (a prompt, a hand's `hello`, a result, a model's
 //! reply) and it answers with [`Output`]s for the host to perform in order:
 //! store an [`Item`], send a message to a hand, ask the model, make a child
-//! mind.
+//! mind, tell another mind something, or watch for its children to rest.
 //!
 //! The history is the whole state. A mind rebuilt from its stored items with
 //! [`Mind::load`] carries on where the old one stopped. A mind made by a
@@ -27,7 +27,8 @@
 //!   keep their order.
 //! - **The mind decides forks.** Its model forks by a tool of the mind's own,
 //!   which asks a hand to clone itself, and the history records where the
-//!   child parts from its parent.
+//!   child parts from its parent. Parent and children talk through tools of
+//!   their own: one tells the other, and a parent waits for its children.
 //!
 //! This crate is pure: no I/O, no clock and no randomness.
 
@@ -41,7 +42,7 @@ mod window;
 
 pub use fork::Fork;
 pub use item::{Block, HandRecord, Item, Outcome, Stop, Usage};
-pub use mind::{Conflict, Mind, NoHand, Output, Prompted, Settings, State, Status};
+pub use mind::{Conflict, Mind, NoHand, Output, Prompted, Report, Settings, State, Status};
 pub use model::{Content, Message, ModelError, ModelReply, ModelRequest, Role, Tool};
 pub use store::{MemoryStore, MindRecord, Origin, Store, StoreError, prompt_under, tail_from};
 pub use tools::{CLONE, MAX_CHILDREN};

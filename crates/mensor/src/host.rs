@@ -90,7 +90,9 @@ pub async fn open(hosting: Hosting) -> Result<(Host, TcpListener), String> {
         },
         ..Config::default()
     };
-    let host = Host::open(store, Arc::new(model), config).map_err(|error| error.to_string())?;
+    let host = Host::open(store, Arc::new(model), config)
+        .await
+        .map_err(|error| error.to_string())?;
     let listener = TcpListener::bind(hosting.listen)
         .await
         .map_err(|error| format!("{} could not be listened on: {error}", hosting.listen))?;

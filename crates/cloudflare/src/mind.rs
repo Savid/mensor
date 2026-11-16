@@ -320,6 +320,7 @@ impl Mind {
             state: object.state(),
             hands: vec![Name::new(LOCAL).map_err(|error| Problem::new(500, error.to_string()))?],
             waiting: Vec::new(),
+            watching: Vec::new(),
             length: object.length(),
         };
         Ok(json(200, &status)?)

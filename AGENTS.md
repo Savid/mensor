@@ -88,14 +88,24 @@ While iterating, test the crate you touched: `cargo test -p mensor-mind`.
   `FileSystem`: a disk in `hand-host`, rows in the worker. `clone`
   (`hand-host/src/capabilities/clone.rs`) is never shown to the model: the
   mind's own tools call it. It makes every copy or none, and starts each
-  through a `Spawn` its host gives it: a process (`mensor/src/hand.rs`) or
-  a task in the same process (`mensor/src/local.rs`).
+  through a `Spawn`: `Hands` (`mensor/src/hand.rs`) runs a hand and every
+  clone of it as tasks of one process, over a WebSocket or in memory, and
+  starts a clone again from its copy. The copies under `--clones` are the
+  only record of the clones; a copy is removed only when its mind lets its
+  clone go or its child was never made.
 - What the model is shown, and what each tool does, is `mind/src/tools.rs`.
   A tool use for a hand that is not connected waits unissued: a call is
-  stored only when it can be sent. The mind's own tools run last in their
-  step, one a step. A fork's children are named and budgeted in the pure
-  mind (`mind/src/fork.rs`), so nothing about a fork depends on chance or
-  on the host.
+  stored only when it can be sent. The mind's own tools run after the hand
+  tools of their step, one at a time, and a fork runs alone among them. A
+  fork's children are named and budgeted in the pure mind
+  (`mind/src/fork.rs`), so nothing about a fork depends on chance or on the
+  host.
+- Minds talk only to their parent and their children. `Output::Tell` is a
+  prompt under a key made from the tool use, so one said again after a stop
+  is the same prompt; the host delivers it on a task of its own, never
+  awaiting another mind from inside a mind's task. `Output::Watch` is kept
+  in the host's memory alone: a mind that waits watches again when it wakes,
+  and `Host::open` wakes every mind with work that needs no hand.
 - A protocol change updates `docs/protocol.md`, `crates/protocol` and both
   hosts.
 
@@ -120,13 +130,14 @@ While iterating, test the crate you touched: `cargo test -p mensor-mind`.
   outcome, the last step) is in the round in progress, so no lookup scans
   the whole history. Keep it so.
 - A mind holds only the end of its history. A summary carries what a mind
-  needs from before it (`from`, `hands`, `lastCall`, `forksLeft`), the mind sheds the
+  needs from before it (`from`, `hands`, `lastCall`, `forksLeft`, `parent`,
+  `children`), the mind sheds the
   rest when it stores one, and a host loads a store's `tail`. Whatever
   reaches further back asks the store, a page at a time: a prompt's key,
   `/history` and `/events`. A child shares its parent's items in the store
   without a copy, so making one reads none of them. Nothing holds a whole history in
   memory, whatever it is asked. A summary carries every hand the history
-  recorded, released ones included, and the forks left.
+  recorded, released ones included, the forks left, and the mind's kin.
 - A host holds a mind in memory only while it is awake (`mind-host/src/
   task.rs`). The way to reach a mind's task is cloned only under the lock
   on the host's map of minds, and dropped once used: a task that rests

@@ -2,7 +2,7 @@
 
 use mensor_mind::{
     Block, CLONE, Conflict, Content, Fork, HandRecord, Item, Message, Mind, ModelReply,
-    ModelRequest, Outcome, Output, Role, Settings, State, Stop, Usage, tail_from,
+    ModelRequest, Outcome, Output, Report, Role, Settings, State, Stop, Usage, tail_from,
 };
 use mensor_protocol::{
     Call, CallId, CallResult, CapabilityDecl, FromMind, Hello, Name, OperationDecl, Refusal, Reply,
@@ -17,6 +17,10 @@ struct Host {
     closed: Vec<(Name, Refusal)>,
     forks: Vec<Fork>,
     asked: Vec<ModelRequest>,
+    /// Each message the mind said to another, as (to, key, text).
+    told: Vec<(Name, String, String)>,
+    /// Each list of minds the mind watched.
+    watched: Vec<Vec<Name>>,
 }
 
 impl Host {
@@ -36,6 +40,8 @@ impl Host {
             closed: Vec::new(),
             forks: Vec::new(),
             asked: Vec::new(),
+            told: Vec::new(),
+            watched: Vec::new(),
         }
     }
 
@@ -57,6 +63,8 @@ impl Host {
                 Output::Close { hand, refusal } => self.closed.push((hand, refusal)),
                 Output::Fork(fork) => self.forks.push(fork),
                 Output::Ask(request) => self.asked.push(request),
+                Output::Tell { to, key, text } => self.told.push((to, key, text)),
+                Output::Watch(minds) => self.watched.push(minds),
             }
         }
         // The mind holds the end of what is stored.
@@ -74,7 +82,7 @@ impl Host {
     }
 
     fn prompt(&mut self, text: &str) {
-        let prompted = self.mind.prompt(None, text.into(), None).unwrap();
+        let prompted = self.mind.prompt(None, text.into(), None, None).unwrap();
         self.perform(prompted.outputs);
     }
 
@@ -394,7 +402,8 @@ fn a_prompt_that_arrives_while_the_model_is_asked_gets_a_step_of_its_own() {
 fn a_prompt_under_a_key_is_stored_once() {
     let mut host = Host::new();
     host.attach(&hello("boot-1"));
-    let keyed = |mind: &mut Mind, text: &str| mind.prompt(Some("k1".into()), text.into(), None);
+    let keyed =
+        |mind: &mut Mind, text: &str| mind.prompt(Some("k1".into()), text.into(), None, None);
     let first = keyed(&mut host.mind, "hello").unwrap();
     assert!(!first.existing);
     host.perform(first.outputs);
@@ -847,6 +856,8 @@ fn a_conversation_that_grew_too_long_is_summed_up_mid_turn() {
             .into(),
             last_call: 1,
             forks_left: 64,
+            parent: None,
+            children: Vec::new(),
         })
     );
     // The mind has let go of what the summary replaced.
@@ -1106,11 +1117,12 @@ fn a_key_from_before_the_items_a_mind_holds_is_one_its_host_looks_up() {
     let found = Some("hello");
     let again = host
         .mind
-        .prompt(Some("k1".into()), "hello".into(), found)
+        .prompt(Some("k1".into()), "hello".into(), None, found)
         .unwrap();
     assert!(again.existing && again.outputs.is_empty());
     assert_eq!(
-        host.mind.prompt(Some("k1".into()), "other".into(), found),
+        host.mind
+            .prompt(Some("k1".into()), "other".into(), None, found),
         Err(Conflict { key: "k1".into() })
     );
 }
@@ -1521,19 +1533,31 @@ fn a_hand_is_let_go_by_the_model() {
 }
 
 #[test]
-fn a_step_runs_one_of_the_minds_own_tools() {
+fn the_minds_own_tools_run_one_at_a_time_and_a_fork_runs_alone() {
     let mut host = Host::new();
     host.attach(&cloning("a1", "boot-a"));
     host.attach(&hand("b2", "boot-b"));
-    host.prompt("do it all");
+    host.prompt("clone, then let go");
     host.reply(vec![
-        own("tu_1", "release_hand", json!({"hand": "b2"})),
-        own("tu_2", "fork", json!({"prompts": ["x"]})),
+        own("tu_1", "clone_hand", json!({})),
+        own("tu_2", "release_hand", json!({"hand": "b2"})),
     ]);
+    // The second waits for the first.
+    let (id, _) = clone_call(&mut host, "a1");
+    assert!(host.closed.is_empty());
+    host.result_from("a1", id, Reply::Output(json!({})));
     assert!(matches!(outcome(&host.stored, "tu_1"), Outcome::Output(_)));
+    assert!(matches!(outcome(&host.stored, "tu_2"), Outcome::Output(_)));
+    assert_eq!(host.closed, [(name("b2"), Refusal::Released)]);
+
+    host.reply(vec![
+        own("tu_3", "release_hand", json!({"hand": "a1-2"})),
+        own("tu_4", "fork", json!({"hand": "a1", "prompts": ["x"]})),
+    ]);
     assert!(
-        matches!(outcome(&host.stored, "tu_2"), Outcome::NotRun(why) if why.contains("one of fork"))
+        matches!(outcome(&host.stored, "tu_3"), Outcome::NotRun(why) if why.contains("forks runs none"))
     );
+    clone_call(&mut host, "a1");
 }
 
 /// A host whose mind has forked from `a1` into two children, and holds
@@ -1576,7 +1600,7 @@ fn a_fork_makes_its_children_before_it_is_stored() {
     assert!(matches!(&outputs[2], Output::Append(Item::Outcome { .. })));
     assert!(matches!(
         &outputs[3],
-        Output::Append(Item::Forks { left: 22 })
+        Output::Append(Item::Forked { left: 22, .. })
     ));
     assert!(matches!(
         &outputs[4],
@@ -1607,12 +1631,23 @@ fn a_fork_makes_its_children_before_it_is_stored() {
                 hand: name("b2"),
                 reason: "it stayed with m when this mind was forked from it".into(),
             },
-            Item::Forks { left: 20 },
+            Item::Parted {
+                parent: name("m"),
+                left: 20
+            },
             Item::Prompt {
                 key: None,
-                text: "the first way".into()
+                text: "the first way".into(),
+                from: Some(name("m")),
             },
         ]
+    );
+    assert_eq!(
+        host.stored.last(),
+        Some(&Item::Forked {
+            children: children.clone(),
+            left: 22
+        })
     );
     assert!(
         matches!(&host.forks[1].items[3], Item::Prompt { text, .. } if text == "the second way")
@@ -1656,7 +1691,7 @@ fn a_child_works_once_its_clone_says_hello() {
             Content::Text(
                 "(Hand b2 was let go: it stayed with m when this mind was forked from it.)".into()
             ),
-            Content::Text("the first way".into()),
+            Content::Text("(From your parent m:)\n\nthe first way".into()),
         ]
     );
     child.reply(vec![bash("tu_2", "ls")]);
@@ -1698,7 +1733,7 @@ fn a_clone_that_fails_makes_no_child() {
         !host
             .stored
             .iter()
-            .any(|item| matches!(item, Item::Forks { .. }))
+            .any(|item| matches!(item, Item::Forked { .. }))
     );
 }
 
@@ -1717,8 +1752,17 @@ fn a_mind_forks_no_more_than_its_budget_allows() {
     host.reply(vec![own("tu_2", "fork", json!({"prompts": ["x"]}))]);
     let (id, _) = clone_call(&mut host, "a1");
     host.result_from("a1", id, Reply::Output(json!({})));
-    assert_eq!(host.forks[0].items[1], Item::Forks { left: 0 });
-    assert_eq!(host.stored.last(), Some(&Item::Forks { left: 0 }));
+    assert_eq!(
+        host.forks[0].items[1],
+        Item::Parted {
+            parent: name("m"),
+            left: 0
+        }
+    );
+    assert!(matches!(
+        host.stored.last(),
+        Some(Item::Forked { left: 0, .. })
+    ));
 }
 
 fn reading(hand: &str, boot: &str, capability: &str) -> Hello {
@@ -1891,7 +1935,12 @@ fn a_fork_whose_clone_may_have_run_names_its_children_and_spends_their_share() {
         panic!("not unknown");
     };
     assert!(why.contains("child minds m."), "{why}");
-    assert!(again.stored.contains(&Item::Forks { left: 22 }));
+    assert!(
+        again
+            .stored
+            .iter()
+            .any(|item| matches!(item, Item::Forked { children, left: 22 } if children.len() == 2))
+    );
 }
 
 #[test]
@@ -1916,5 +1965,285 @@ fn a_mind_loaded_after_a_fork_knows_its_budget() {
     later.reply(vec![own("tu_2", "fork", json!({"prompts": ["x", "y"]}))]);
     assert!(
         matches!(outcome(&later.stored, "tu_2"), Outcome::NotRun(why) if why.contains("may fork 1 more"))
+    );
+}
+
+/// A host whose mind has forked from `a1` into two children, and the
+/// children's names.
+fn forked() -> (Host, Vec<Name>) {
+    let (mut host, id) = forking();
+    host.result_from("a1", id, Reply::Output(json!({})));
+    let children = host.forks.iter().map(|fork| fork.name.clone()).collect();
+    (host, children)
+}
+
+/// The tools the model was last shown, by name.
+fn shown(host: &Host) -> Vec<String> {
+    let asked = host.asked.last().unwrap();
+    asked.tools.iter().map(|tool| tool.name.clone()).collect()
+}
+
+/// The child the first of a fork's forks made, holding its history as a
+/// store would, with its clone said hello.
+fn first_child(host: &Host) -> Host {
+    let fork = host.forks[0].clone();
+    let mut stored = host.stored[..usize::try_from(fork.inherited).unwrap()].to_vec();
+    stored.extend(fork.items.clone());
+    let mut child = Host::around(
+        Mind::load(fork.name.clone(), 0, stored.clone(), Settings::default()),
+        stored,
+    );
+    child.attach(&Hello {
+        mind: fork.name,
+        ..cloning("a1", "boot-clone")
+    });
+    child
+}
+
+#[test]
+fn a_parent_tells_a_child_and_waits_for_what_its_children_say() {
+    let (mut host, children) = forked();
+    assert_eq!(
+        shown(&host),
+        ["bash", "fork", "clone_hand", "release_hand", "tell", "wait"]
+    );
+    host.reply(vec![
+        own(
+            "tu_2",
+            "tell",
+            json!({"mind": children[0], "text": "and the tests?"}),
+        ),
+        own("tu_3", "wait", json!({})),
+    ]);
+    // The wait waits its turn behind the message.
+    let (to, key, text) = host.told.pop().unwrap();
+    assert_eq!((&to, text.as_str()), (&children[0], "and the tests?"));
+    assert!(host.watched.is_empty());
+    assert_eq!(host.mind.state(), State::Working);
+
+    let outputs = host.mind.told(&key, Ok(()));
+    host.perform(outputs);
+    assert_eq!(
+        outcome(&host.stored, "tu_2"),
+        &Outcome::Output(json!({"told": children[0]}))
+    );
+    assert_eq!(host.watched, std::slice::from_ref(&children));
+    assert_eq!(host.mind.watching(), children);
+
+    let outputs = host
+        .mind
+        .rested(&children[1], Report::Failed("no model".into()));
+    host.perform(outputs);
+    assert_eq!(host.mind.watching(), [children[0].clone()]);
+    let outputs = host
+        .mind
+        .rested(&children[0], Report::Said("They pass.".into()));
+    host.perform(outputs);
+    assert_eq!(
+        outcome(&host.stored, "tu_3"),
+        &Outcome::Output(json!({
+            children[0].as_str(): {"said": "They pass."},
+            children[1].as_str(): {"failed": "no model"},
+        }))
+    );
+    assert_eq!(host.asked(), 3, "the parent hears what they said");
+}
+
+#[test]
+fn a_message_from_kin_says_whose_it_is() {
+    let (mut host, children) = forked();
+    let mut child = first_child(&host);
+    assert_eq!(
+        shown(&child),
+        ["bash", "fork", "clone_hand", "release_hand", "tell"]
+    );
+    child.reply(vec![own(
+        "tu_9",
+        "tell",
+        json!({"mind": "m", "text": "Which way first?"}),
+    )]);
+    let (to, key, text) = child.told.pop().unwrap();
+    assert_eq!(to, name("m"));
+
+    // The parent's host gives the parent the child's message.
+    host.reply(vec![text_block("Waiting.")]);
+    let prompted = host
+        .mind
+        .prompt(Some(key), text, Some(children[0].clone()), None)
+        .unwrap();
+    host.perform(prompted.outputs);
+    assert_eq!(
+        host.last_message().content.last(),
+        Some(&Content::Text(format!(
+            "(From your child {}:)\n\nWhich way first?",
+            children[0]
+        )))
+    );
+}
+
+fn text_block(said: &str) -> Block {
+    text(said)
+}
+
+#[test]
+fn a_mind_tells_only_its_parent_and_children_and_waits_only_for_children() {
+    let (host, _) = forked();
+    let mut child = first_child(&host);
+    child.reply(vec![own(
+        "tu_9",
+        "tell",
+        json!({"mind": "m.zzzzzzzz", "text": "hi"}),
+    )]);
+    assert!(
+        matches!(outcome(&child.stored, "tu_9"), Outcome::NotRun(why) if why.contains("Your parent is m."))
+    );
+    child.reply(vec![own("tu_10", "wait", json!({}))]);
+    assert!(
+        matches!(outcome(&child.stored, "tu_10"), Outcome::NotRun(why) if why.contains("no tool named wait"))
+    );
+    assert!(child.told.is_empty() && child.watched.is_empty());
+}
+
+#[test]
+fn a_mind_loaded_mid_wait_watches_again_and_says_a_message_again_as_the_same_prompt() {
+    let (mut host, children) = forked();
+    host.reply(vec![own(
+        "tu_2",
+        "tell",
+        json!({"mind": children[1], "text": "go"}),
+    )]);
+    let (_, key, _) = host.told.pop().unwrap();
+
+    // The host stopped before it heard the message arrive.
+    let mut again = Host::around(
+        Mind::load(name("m"), 0, host.stored.clone(), Settings::default()),
+        host.stored.clone(),
+    );
+    let outputs = again.mind.start();
+    again.perform(outputs);
+    assert_eq!(
+        again.told.pop().map(|(_, again, _)| again),
+        Some(key.clone())
+    );
+    let outputs = again.mind.told(&key, Ok(()));
+    again.perform(outputs);
+
+    again.attach(&cloning("a1", "boot-a"));
+    again.reply(vec![own("tu_3", "wait", json!({"minds": [children[1]]}))]);
+    assert_eq!(again.watched, [vec![children[1].clone()]]);
+    let mut later = Host::around(
+        Mind::load(name("m"), 0, again.stored.clone(), Settings::default()),
+        again.stored.clone(),
+    );
+    let status = Mind::status(name("m"), 0, again.stored.clone());
+    assert_eq!(
+        (status.state, status.watching, status.waiting),
+        (State::Working, vec![children[1].clone()], Vec::new())
+    );
+    let outputs = later.mind.start();
+    later.perform(outputs);
+    assert_eq!(later.watched, [vec![children[1].clone()]]);
+}
+
+#[test]
+fn an_interrupt_ends_a_wait_and_lets_a_message_on_its_way_arrive() {
+    let (mut host, children) = forked();
+    host.reply(vec![own("tu_2", "wait", json!({}))]);
+    host.interrupt();
+    assert!(matches!(outcome(&host.stored, "tu_2"), Outcome::NotRun(_)));
+    let outputs = host.mind.rested(&children[0], Report::Said("late".into()));
+    assert!(outputs.is_empty());
+
+    host.prompt("tell the first");
+    host.reply(vec![own(
+        "tu_3",
+        "tell",
+        json!({"mind": children[0], "text": "stop"}),
+    )]);
+    let (_, key, _) = host.told.pop().unwrap();
+    host.interrupt();
+    assert!(
+        !host
+            .stored
+            .iter()
+            .any(|item| matches!(item, Item::Outcome { tool_use, .. } if tool_use == "tu_3"))
+    );
+    let outputs = host.mind.told(&key, Ok(()));
+    host.perform(outputs);
+    assert!(matches!(outcome(&host.stored, "tu_3"), Outcome::Output(_)));
+    assert_eq!(host.mind.state(), State::Idle);
+}
+
+#[test]
+fn a_mind_at_rest_reports_what_it_said_last() {
+    let mut host = Host::new();
+    host.attach(&hello("boot-1"));
+    assert_eq!(host.mind.report(), Some(Report::Said(String::new())));
+    host.prompt("hello");
+    assert_eq!(host.mind.report(), None);
+    host.reply(vec![text("Hi."), text("How can I help?")]);
+    assert_eq!(
+        Mind::status(name("m"), 0, host.stored.clone()).report,
+        Some(Report::Said("Hi.\n\nHow can I help?".into()))
+    );
+    host.prompt("list the files");
+    host.reply(vec![bash("tu_1", "ls")]);
+    host.interrupt();
+    host.result(1, json!("cancelled"));
+    assert_eq!(
+        host.mind.report(),
+        Some(Report::Paused("interrupted".into()))
+    );
+}
+
+#[test]
+fn a_summary_carries_a_minds_kin() {
+    let (host, _) = forked();
+    let mut child = first_child(&host);
+    let settings = compact_at_100();
+    child.reply_costing(vec![bash("tu_9", "ls")], costing(95, 10));
+    let id = match child.sent_to().last() {
+        Some((_, FromMind::Call(call))) => call.id,
+        other => panic!("no call: {other:?}"),
+    };
+    child.mind = Mind::load(
+        child.mind.name().clone(),
+        0,
+        child.stored.clone(),
+        settings.clone(),
+    );
+    let outputs = child.mind.attach(&Hello {
+        mind: child.mind.name().clone(),
+        last_id: id,
+        held: vec![held(id, json!("a.txt"))],
+        ..cloning("a1", "boot-clone")
+    });
+    child.perform(outputs.unwrap());
+    assert!(child.asked.last().unwrap().text_only);
+    child.reply(vec![text("We looked.")]);
+    let Some(Item::Summary {
+        parent, children, ..
+    }) = child.stored.last()
+    else {
+        panic!("no summary");
+    };
+    assert_eq!((parent, children), (&Some(name("m")), &Vec::new()));
+    let told = &child.asked.last().unwrap().messages[0].content;
+    assert!(told.contains(&Content::Text("(You were forked from m.)".into())));
+    assert!(shown(&child).contains(&"tell".to_owned()));
+}
+
+#[test]
+fn a_name_two_hands_now_know_by_other_tools_asks_which_hand() {
+    let mut host = Host::new();
+    host.attach(&reading("a1", "boot-a", "files"));
+    host.attach(&reading("b2", "boot-b", "notes"));
+    host.prompt("read it");
+    assert_eq!(shown(&host), ["files_read", "notes_read"]);
+    host.reply(vec![own("tu_1", "read", json!({}))]);
+    assert!(
+        matches!(outcome(&host.stored, "tu_1"), Outcome::NotRun(why) if why == "say which hand runs this. These hands can do read: a1, b2."),
+        "{:?}",
+        outcome(&host.stored, "tu_1")
     );
 }
