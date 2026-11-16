@@ -1,16 +1,17 @@
-# A pair as one Durable Object
+# A mind as one Durable Object
 
-`crates/cloudflare` runs mensor on Cloudflare Workers. Each pair is one
-Durable Object, which holds the mind, the hand and the hand's files in the
-object's own SQLite database. Nothing dials in and nothing is hosted: a
-prompt wakes the object, and it sleeps when the mind is idle.
+`crates/cloudflare` runs mensor on Cloudflare Workers. Each mind is one
+Durable Object, which holds the mind's history, its one hand, `local`, and
+the hand's files in the object's own SQLite database. Nothing dials in and
+nothing is hosted: a prompt wakes the object, and it sleeps when the mind is
+idle.
 
 ```mermaid
 flowchart LR
   client["client"] -- "POST /v1/minds/a1/prompt" --> worker["Worker"]
   worker -- "by name" --> object
   subgraph object["Durable Object a1"]
-    mind["mind"] -- "call, in memory" --> body["body"]
+    mind["mind"] -- "call, in memory" --> hand["hand local"]
     hand --> db[("SQLite: history, hand, files")]
     mind --> db
   end
@@ -68,20 +69,24 @@ npx wrangler deploy
 
 ## The API
 
-It is the API of `mensor serve`, for one pair at a time.
+It is the API of `mensor serve`, for one mind at a time.
 
 | Request | Answer |
 | --- | --- |
-| `POST /v1/minds/{name}/prompt` | Stores `{"text", "key"?}`. 202 `accepted`, 200 `existing` for a key already stored, 409 for a key stored with other text. The first prompt to a name starts its pair. |
-| `POST /v1/minds/{name}/interrupt` | Stops the turn, and answers with the pair as the next row gives it. |
-| `GET /v1/minds/{name}` | `{"name", "origin", "state", "attached", "length"}`. 404 until the pair is prompted. |
+| `POST /v1/minds/{name}/prompt` | Stores `{"text", "key"?}`. 202 `accepted`, 200 `existing` for a key already stored, 409 for a key stored with other text. The first prompt to a name starts its mind, whose name has no `.` and at most 55 bytes. |
+| `POST /v1/minds/{name}/interrupt` | Stops the turn, and answers with the mind as the next row gives it. |
+| `GET /v1/minds/{name}` | `{"name", "origin", "state", "hands", "waiting", "length"}`. 404 until the mind is prompted. |
 | `GET /v1/minds/{name}/history?after=` | The items from a cursor, 512 at the most, and the next cursor. |
 | `GET /v1/minds/{name}/events?after=` | The same as server-sent events, each new item as it is stored. Between them come `writing` events: the reply the model is writing, piece by piece. |
 
-Three things differ from the server. There is no `/v1/attach`: the hand is
-already there, and `attached` is always true. There is no `GET /v1/minds`:
-each object knows only itself. And a pair is born by its first prompt, not
-by a hand attaching.
+Four things differ from the server. There is no `/v1/attach`: the hand is
+already there, so `hands` is always `["local"]` and `waiting` empty. There
+is no `/release`: the one hand is never let go. There is no `GET
+/v1/minds`: each object knows only itself. And a mind is born by its first
+prompt, not by a hand attaching.
+
+The hand has no `clone` capability, so its mind is offered no tools of its
+own, and forks nothing.
 
 ## What the hand can do
 
@@ -106,7 +111,7 @@ mind is idle. A prompt that arrives while it works is stored at once and
 joins the turn at the next model call.
 
 **An interrupt frees the object at once.** The alarm stops waiting for the
-model or the page it had asked for, and the pair is idle when the request
+model or the page it had asked for, and the mind is idle when the request
 that interrupted it is answered. An answer that arrives later is dropped.
 
 **One wake has a budget.** After 32 pieces of work, or eight minutes, a wake
@@ -145,7 +150,7 @@ checks what the restarted object does with nobody prompting it.
   its last summary, or all of it until there is one. The rest is read from
   its database when it is asked for.
 - Not built: clones and forks, a remote hand attaching to an object's mind,
-  listing pairs, and deleting one.
+  listing minds, and deleting one.
 - It has run on workerd under `wrangler dev` and on Cloudflare's network,
   with a model behind Chat Completions. A deploy there did not stop an
   object in the middle of a model request: the reply ended under the old

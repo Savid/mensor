@@ -6,28 +6,28 @@ use serde::{Deserialize, Serialize};
 
 use crate::Item;
 
-/// Where a pair's history begins.
+/// Where a mind's history begins.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "origin", rename_all = "snake_case")]
 pub enum Origin {
-    /// With nothing: a new hand said hello.
+    /// With nothing: a hand said hello to a mind no one had started.
     Root,
-    /// With the first `inherited` items of another pair's history, because
-    /// its hand is a clone of that pair's.
+    /// With the first `inherited` items of another mind's history, because
+    /// that mind forked.
     Fork {
-        /// The pair whose history is shared.
+        /// The mind whose history is shared.
         parent: Name,
         /// How many of the parent's items are shared.
         inherited: u64,
     },
 }
 
-/// A mind and its hand, known by the hand's name.
+/// A mind as a store knows it: its name, and where its history begins.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Pair {
-    /// The hand's name.
+pub struct MindRecord {
+    /// The mind's name.
     pub name: Name,
-    /// Where the pair's history begins.
+    /// Where its history begins.
     #[serde(flatten)]
     pub origin: Origin,
 }
@@ -35,11 +35,11 @@ pub struct Pair {
 /// Why a store refused.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    /// A pair of this name already exists.
-    #[error("a pair named {0} already exists")]
+    /// A mind of this name already exists, with another origin.
+    #[error("a mind named {0} already exists")]
     Exists(Name),
-    /// No pair has this name.
-    #[error("no pair is named {0}")]
+    /// No mind has this name.
+    #[error("no mind is named {0}")]
     Missing(Name),
     /// A fork asks for more items than its parent has.
     #[error("{parent} has fewer than the {inherited} items a fork of it would share")]
@@ -57,27 +57,29 @@ pub enum StoreError {
 /// Where histories are kept.
 ///
 /// A history only grows, and a fork shares its parent's items without copying
-/// them, so a store never changes or removes an item another pair may read.
+/// them, so a store never changes or removes an item another mind may read.
 /// An append is durable when it returns: a mind's host relies on that before
 /// it sends anything the appended items describe.
 ///
 /// A store holds every item, and a mind only the end of its history, so a
 /// store also answers what a mind no longer can.
 pub trait Store: Send + Sync {
-    /// Starts a pair's history.
-    fn create(&self, pair: &Pair) -> Result<(), StoreError>;
+    /// Starts a mind's history with `items`, in one write. A mind that
+    /// already exists with the same origin was made by an earlier call that
+    /// was not seen to finish: it counts as made, and nothing is written.
+    fn create(&self, mind: &MindRecord, items: &[Item]) -> Result<(), StoreError>;
 
-    /// Adds items to the end of a pair's history.
+    /// Adds items to the end of a mind's history.
     fn append(&self, name: &Name, items: &[Item]) -> Result<(), StoreError>;
 
-    /// A pair's history from index `from`, shared items included, `limit`
+    /// A mind's history from index `from`, shared items included, `limit`
     /// items of it at the most.
     fn read(&self, name: &Name, from: u64, limit: usize) -> Result<Vec<Item>, StoreError>;
 
-    /// The last item of one [kind](Item::kind) in a pair's history.
+    /// The last item of one [kind](Item::kind) in a mind's history.
     fn last(&self, name: &Name, kind: &str) -> Result<Option<Item>, StoreError>;
 
-    /// The end of a pair's history, which is what its mind is loaded with:
+    /// The end of a mind's history, which is what its mind is loaded with:
     /// the index its last summary names and the items from there, or all
     /// of it from 0 when it holds no summary.
     fn tail(&self, name: &Name) -> Result<(u64, Vec<Item>), StoreError> {
@@ -88,11 +90,11 @@ pub trait Store: Send + Sync {
         Ok((from, self.read(name, from, usize::MAX)?))
     }
 
-    /// The latest of a pair's history, which is what [`Mind::status`] is
+    /// The latest of a mind's history, which is what [`Mind::status`] is
     /// told from: the index its last step had seen and the items from
     /// there, or all of it from 0 when it holds no step. That is the round
     /// in progress and the prompts no step has answered, however much the
-    /// pair's mind would hold.
+    /// mind's mind would hold.
     ///
     /// [`Mind::status`]: crate::Mind::status
     fn recent(&self, name: &Name) -> Result<(u64, Vec<Item>), StoreError> {
@@ -103,11 +105,11 @@ pub trait Store: Send + Sync {
         Ok((from, self.read(name, from, usize::MAX)?))
     }
 
-    /// The text of the prompt a pair's history holds under `key`.
+    /// The text of the prompt a mind's history holds under `key`.
     fn prompt(&self, name: &Name, key: &str) -> Result<Option<String>, StoreError>;
 
-    /// Every pair, parents before their forks.
-    fn pairs(&self) -> Result<Vec<Pair>, StoreError>;
+    /// Every mind, parents before their forks.
+    fn minds(&self) -> Result<Vec<MindRecord>, StoreError>;
 }
 
 /// The index a mind starts from in the history `items`: the one its last
@@ -135,11 +137,11 @@ pub fn prompt_under<'a>(items: &'a [Item], key: &str) -> Option<&'a str> {
 /// need nothing to survive them.
 #[derive(Debug, Default)]
 pub struct MemoryStore {
-    pairs: Mutex<Pairs>,
+    minds: Mutex<Minds>,
 }
 
 #[derive(Debug, Default)]
-struct Pairs {
+struct Minds {
     by_name: BTreeMap<Name, Entry>,
     order: Vec<Name>,
 }
@@ -156,15 +158,15 @@ impl MemoryStore {
         Self::default()
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Pairs> {
-        self.pairs
+    fn lock(&self) -> std::sync::MutexGuard<'_, Minds> {
+        self.minds
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
-impl Pairs {
-    /// The first `limit` items of a pair's history.
+impl Minds {
+    /// The first `limit` items of a mind's history.
     fn history(&self, name: &Name, limit: u64) -> Result<Vec<Item>, StoreError> {
         let entry = self
             .by_name
@@ -183,13 +185,17 @@ impl Pairs {
 }
 
 impl Store for MemoryStore {
-    fn create(&self, pair: &Pair) -> Result<(), StoreError> {
-        let mut pairs = self.lock();
-        if pairs.by_name.contains_key(&pair.name) {
-            return Err(StoreError::Exists(pair.name.clone()));
+    fn create(&self, mind: &MindRecord, items: &[Item]) -> Result<(), StoreError> {
+        let mut minds = self.lock();
+        if let Some(entry) = minds.by_name.get(&mind.name) {
+            return if entry.origin == mind.origin {
+                Ok(())
+            } else {
+                Err(StoreError::Exists(mind.name.clone()))
+            };
         }
-        if let Origin::Fork { parent, inherited } = &pair.origin {
-            let have = pairs.history(parent, u64::MAX)?.len();
+        if let Origin::Fork { parent, inherited } = &mind.origin {
+            let have = minds.history(parent, u64::MAX)?.len();
             if u64::try_from(have).unwrap_or(u64::MAX) < *inherited {
                 return Err(StoreError::Short {
                     parent: parent.clone(),
@@ -197,20 +203,20 @@ impl Store for MemoryStore {
                 });
             }
         }
-        pairs.by_name.insert(
-            pair.name.clone(),
+        minds.by_name.insert(
+            mind.name.clone(),
             Entry {
-                origin: pair.origin.clone(),
-                own: Vec::new(),
+                origin: mind.origin.clone(),
+                own: items.to_vec(),
             },
         );
-        pairs.order.push(pair.name.clone());
+        minds.order.push(mind.name.clone());
         Ok(())
     }
 
     fn append(&self, name: &Name, items: &[Item]) -> Result<(), StoreError> {
-        let mut pairs = self.lock();
-        let entry = pairs
+        let mut minds = self.lock();
+        let entry = minds
             .by_name
             .get_mut(name)
             .ok_or_else(|| StoreError::Missing(name.clone()))?;
@@ -236,14 +242,14 @@ impl Store for MemoryStore {
         Ok(prompt_under(&items, key).map(str::to_owned))
     }
 
-    fn pairs(&self) -> Result<Vec<Pair>, StoreError> {
-        let pairs = self.lock();
-        Ok(pairs
+    fn minds(&self) -> Result<Vec<MindRecord>, StoreError> {
+        let minds = self.lock();
+        Ok(minds
             .order
             .iter()
-            .map(|name| Pair {
+            .map(|name| MindRecord {
                 name: name.clone(),
-                origin: pairs.by_name[name].origin.clone(),
+                origin: minds.by_name[name].origin.clone(),
             })
             .collect())
     }
@@ -274,28 +280,24 @@ mod tests {
             .collect()
     }
 
-    fn root(store: &MemoryStore, pair: &str, items: &[&str]) {
-        store
-            .create(&Pair {
-                name: name(pair),
-                origin: Origin::Root,
-            })
-            .unwrap();
-        let items: Vec<_> = items.iter().map(|text| prompt(text)).collect();
-        store.append(&name(pair), &items).unwrap();
+    fn record(mind: &str, origin: Origin) -> MindRecord {
+        MindRecord {
+            name: name(mind),
+            origin,
+        }
     }
 
-    fn fork(store: &MemoryStore, pair: &str, parent: &str, inherited: u64) {
+    fn root(store: &MemoryStore, mind: &str, items: &[&str]) {
+        let items: Vec<_> = items.iter().map(|text| prompt(text)).collect();
+        store.create(&record(mind, Origin::Root), &items).unwrap();
+    }
+
+    fn fork(store: &MemoryStore, mind: &str, parent: &str, inherited: u64) {
         let origin = Origin::Fork {
             parent: name(parent),
             inherited,
         };
-        store
-            .create(&Pair {
-                name: name(pair),
-                origin,
-            })
-            .unwrap();
+        store.create(&record(mind, origin), &[]).unwrap();
     }
 
     #[test]
@@ -328,8 +330,9 @@ mod tests {
             text: "So far.".into(),
             usage: crate::Usage::default(),
             from: 2,
-            boot: None,
+            hands: BTreeMap::new(),
             last_call: 0,
+            forks_left: 64,
         };
         store.append(&name("a1"), &[keyed, summary]).unwrap();
         fork(&store, "b7", "a1", 5);
@@ -392,15 +395,15 @@ mod tests {
     }
 
     #[test]
-    fn pairs_are_listed_in_the_order_they_were_made() {
+    fn minds_are_listed_in_the_order_they_were_made() {
         let store = MemoryStore::new();
         root(&store, "z9", &[]);
         fork(&store, "a1", "z9", 0);
         let names: Vec<_> = store
-            .pairs()
+            .minds()
             .unwrap()
             .into_iter()
-            .map(|pair| pair.name)
+            .map(|mind| mind.name)
             .collect();
         assert_eq!(names, [name("z9"), name("a1")]);
     }
@@ -409,10 +412,11 @@ mod tests {
     fn a_store_refuses_what_it_cannot_do() {
         let store = MemoryStore::new();
         root(&store, "a1", &["0"]);
-        let again = store.create(&Pair {
-            name: name("a1"),
-            origin: Origin::Root,
-        });
+        let elsewhere = Origin::Fork {
+            parent: name("a1"),
+            inherited: 0,
+        };
+        let again = store.create(&record("a1", elsewhere), &[]);
         assert!(matches!(again, Err(StoreError::Exists(_))));
         assert!(matches!(
             store.append(&name("x"), &[]),
@@ -427,36 +431,49 @@ mod tests {
             parent: name("x"),
             inherited: 0,
         };
-        let orphan = store.create(&Pair {
-            name: name("b7"),
-            origin: orphan,
-        });
+        let orphan = store.create(&record("b7", orphan), &[]);
         assert!(matches!(orphan, Err(StoreError::Missing(_))));
         let long = Origin::Fork {
             parent: name("a1"),
             inherited: 2,
         };
-        let long = store.create(&Pair {
-            name: name("b7"),
-            origin: long,
-        });
+        let long = store.create(&record("b7", long), &[]);
         assert!(matches!(long, Err(StoreError::Short { .. })));
     }
 
     #[test]
-    fn a_pair_is_written_flat() {
-        let pair = Pair {
-            name: name("b7"),
-            origin: Origin::Fork {
+    fn a_mind_made_again_with_its_origin_is_the_one_made_before() {
+        let store = MemoryStore::new();
+        root(&store, "m", &["0", "1"]);
+        let child = || {
+            let origin = Origin::Fork {
+                parent: name("m"),
+                inherited: 2,
+            };
+            store.create(&record("m.k3x9q2ab", origin), &[prompt("c")])
+        };
+        child().unwrap();
+        child().unwrap();
+        assert_eq!(
+            texts(&store.read(&name("m.k3x9q2ab"), 0, usize::MAX).unwrap()),
+            ["0", "1", "c"]
+        );
+    }
+
+    #[test]
+    fn a_mind_is_written_flat() {
+        let mind = record(
+            "b7",
+            Origin::Fork {
                 parent: name("a1"),
                 inherited: 4,
             },
-        };
-        let written = serde_json::to_value(&pair).unwrap();
+        );
+        let written = serde_json::to_value(&mind).unwrap();
         assert_eq!(
             written,
             serde_json::json!({"name": "b7", "origin": "fork", "parent": "a1", "inherited": 4})
         );
-        assert_eq!(serde_json::from_value::<Pair>(written).unwrap(), pair);
+        assert_eq!(serde_json::from_value::<MindRecord>(written).unwrap(), mind);
     }
 }

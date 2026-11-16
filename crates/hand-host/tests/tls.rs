@@ -23,7 +23,12 @@ async fn a_tls_dial_that_fails_is_tried_again() {
         }
     });
 
-    let core = Core::new(Name::new("a1").unwrap(), boot(), Limits::default());
+    let core = Core::new(
+        Name::new("m").unwrap(),
+        Name::new("a1").unwrap(),
+        boot(),
+        Limits::default(),
+    );
     let dial = WebSocket::new(format!("wss://{address}/v1/attach"));
     let mut config = Config::new(dial, Capabilities::new());
     config.backoff = Backoff {

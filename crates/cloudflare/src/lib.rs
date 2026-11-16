@@ -1,18 +1,18 @@
-//! mensor on Cloudflare Workers: each pair is one Durable Object.
+//! mensor on Cloudflare Workers: each mind is one Durable Object.
 //!
-//! A `Pair` object holds a mind, its hand and the hand's files in the
+//! A `Mind` object holds a mind, its one hand and the hand's files in the
 //! object's own `SQLite` database. Nothing dials in: the mind and the hand
 //! pass the protocol's messages in memory, through
 //! [`mensor_object::Object`]. The hand's capabilities are `files`, kept as
 //! rows in that database, and `fetch`.
 //!
 //! The Worker in front of the objects serves the API `mensor serve` does,
-//! for one pair at a time:
+//! for one mind at a time:
 //!
 //! - `POST /v1/minds/{name}/prompt` stores a prompt. The first prompt to a
-//!   name starts its pair.
+//!   name starts its mind.
 //! - `POST /v1/minds/{name}/interrupt` stops its turn.
-//! - `GET /v1/minds/{name}` says what the pair is doing.
+//! - `GET /v1/minds/{name}` says what the mind is doing.
 //! - `GET /v1/minds/{name}/history` and `/events` read its history, the
 //!   second as server-sent events.
 //!
@@ -31,10 +31,10 @@ use worker::{Context, Env, Request, Response, Result, event};
 
 use mensor_api::Problem;
 
-/// The binding of the pair objects, as `wrangler.toml` names it.
-const PAIRS: &str = "PAIRS";
+/// The binding of the mind objects, as `wrangler.toml` names it.
+const MINDS: &str = "MINDS";
 
-/// Sends each request to the object of the pair it names.
+/// Sends each request to the object of the mind it names.
 #[event(fetch)]
 async fn fetch(request: Request, env: Env, _context: Context) -> Result<Response> {
     let url = request.url()?;
@@ -56,7 +56,7 @@ async fn fetch(request: Request, env: Env, _context: Context) -> Result<Response
     match api::route(request.method().as_ref(), url.path()) {
         Ok(route) => {
             let object = env
-                .durable_object(PAIRS)?
+                .durable_object(MINDS)?
                 .get_by_name(route.name().as_str())?;
             object.fetch_with_request(request).await
         }

@@ -23,9 +23,13 @@ pub struct Hosting {
     /// outlives this process.
     #[arg(long)]
     store: Option<PathBuf>,
-    /// The most clones one lineage may have. Zero turns forking off.
+    /// How many hands a mind may have that it has not let go.
     #[arg(long, default_value_t = 4)]
-    max_clones: usize,
+    max_hands: usize,
+    /// How many minds a mind that starts from nothing may fork, its
+    /// children's forks included. Zero turns forking off.
+    #[arg(long, default_value_t = 64)]
+    max_forks: u64,
     /// The model every mind asks. `ANTHROPIC_API_KEY` reaches it through
     /// the Messages API, `OPENAI_API_KEY` through Chat Completions.
     #[arg(long, default_value = "claude-opus-5-5")]
@@ -77,10 +81,11 @@ pub async fn open(hosting: Hosting) -> Result<(Host, TcpListener), String> {
 
     let config = Config {
         token,
-        max_clones: hosting.max_clones,
         mind: Settings {
             system,
             compact_at: (hosting.compact_at > 0).then_some(hosting.compact_at),
+            max_hands: hosting.max_hands,
+            max_forks: hosting.max_forks,
             ..Settings::default()
         },
         ..Config::default()
@@ -107,7 +112,7 @@ const TRIM_EVERY: Duration = Duration::from_secs(30);
 ///
 /// glibc keeps what a program frees, to hand it out again, and returns it
 /// only from the top of its heap. A host frees a great deal at once, when
-/// pairs rest and when a mind sheds what a summary replaced, and something
+/// minds rest and when a mind sheds what a summary replaced, and something
 /// newer is always above it. So a host would hold its peak for ever unless
 /// it asked. Asking takes well under a millisecond.
 #[cfg(all(target_os = "linux", target_env = "gnu"))]

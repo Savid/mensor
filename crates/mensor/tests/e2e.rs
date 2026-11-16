@@ -1,20 +1,21 @@
-//! A mind's host and real hands, joined over a real WebSocket on loopback.
-//! The model is scripted. Commands run in temporary directories.
+//! A mind's host and real hands, joined over a real WebSocket on loopback or
+//! in memory. The model is scripted. Commands run in temporary directories.
 
 use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use mensor::local::Local;
+use mensor::hand::Does;
+use mensor::local::{InProcess, Local};
 use mensor_hand::{Capabilities, Core, Limits};
 use mensor_hand_host::capabilities::{Commands, Disk, Files};
 use mensor_hand_host::{Backoff, Dial, Error, Handle, WebSocket, boot, start};
 use mensor_mind::{
-    Block, Content, Item, MemoryStore, ModelReply, Origin, Outcome, Role, Settings, State, Stop,
-    Store, Usage,
+    Block, Content, Item, MemoryStore, MindRecord, ModelReply, ModelRequest, Origin, Outcome, Role,
+    Settings, State, Stop, Store, Usage,
 };
-use mensor_mind_host::{Config, Host, HostError, Prompted, Scripted};
+use mensor_mind_host::{Config, Host, HostError, MindStatus, Prompted, Scripted};
 use mensor_protocol::{Name, Refusal};
 use mensor_store_sqlite::SqliteStore;
 use serde_json::{Value, json};
@@ -82,28 +83,49 @@ impl Server {
         hand_through(Local::new(self.host.clone()), core, dir)
     }
 
-    async fn prompt(&self, pair: &str, text: &str) {
+    /// Starts a hand in the host's own process that can clone itself: its
+    /// clones start in this process too, and are made in `clones`.
+    fn cloning_hand(&self, mind: &str, hand: &str, dir: &Path, clones: &Path) -> Handle {
+        let does = Does::new(
+            dir,
+            Some(clones.to_owned()),
+            &["commands", "files", "clone"],
+        );
+        let hands = InProcess::new(self.host.clone(), does.clone());
+        hands.start(name(mind), name(hand), &does).unwrap()
+    }
+
+    async fn prompt(&self, mind: &str, text: &str) {
         let prompted = self
             .host
-            .prompt(&name(pair), None, text.into())
+            .prompt(&name(mind), None, text.into())
             .await
             .unwrap();
         assert_eq!(prompted, Prompted::Accepted);
     }
 
-    /// Waits until the pair's hand is attached and its mind is idle.
-    async fn settled(&self, pair: &str) {
-        eventually(&format!("{pair} is attached and idle"), || async {
-            self.host
-                .pair(&name(pair))
+    async fn status(&self, mind: &str) -> Option<MindStatus> {
+        self.host.mind(&name(mind)).await.ok()
+    }
+
+    /// Waits until the mind has these hands connected and is idle.
+    async fn settled_with(&self, mind: &str, hands: &[&str]) {
+        let hands: Vec<Name> = hands.iter().map(|hand| name(hand)).collect();
+        eventually(&format!("{mind} has {hands:?} and is idle"), || async {
+            self.status(mind)
                 .await
-                .is_ok_and(|status| status.attached && status.state == State::Idle)
+                .is_some_and(|status| status.hands == hands && status.state == State::Idle)
         })
         .await;
     }
 
-    fn history(&self, pair: &str) -> Vec<Item> {
-        self.host.history(&name(pair), 0).unwrap()
+    /// Waits until the mind's one hand, `a1`, is connected and it is idle.
+    async fn settled(&self, mind: &str) {
+        self.settled_with(mind, &["a1"]).await;
+    }
+
+    fn history(&self, mind: &str) -> Vec<Item> {
+        self.host.history(&name(mind), 0).unwrap()
     }
 
     /// Stops listening, and waits until the address is free again.
@@ -147,6 +169,14 @@ where
     }
 }
 
+/// How a hand ended, within ten seconds.
+async fn ended(task: JoinHandle<Result<(), Error>>) -> Result<(), Error> {
+    timeout(Duration::from_secs(10), task)
+        .await
+        .expect("the hand did not end")
+        .expect("the hand's task failed")
+}
+
 /// An HTTP client. One built with TLS in it needs its cryptography chosen,
 /// as a host chooses it when it makes its model's client.
 fn client() -> reqwest::Client {
@@ -158,8 +188,9 @@ fn name(s: &str) -> Name {
     Name::new(s).unwrap()
 }
 
-fn fresh(hand: &str) -> Core {
-    Core::new(name(hand), boot(), Limits::default())
+/// A hand `hand` of the mind `mind`, starting from nothing.
+fn fresh(mind: &str, hand: &str) -> Core {
+    Core::new(name(mind), name(hand), boot(), Limits::default())
 }
 
 fn text(text: &str) -> Block {
@@ -172,6 +203,47 @@ fn bash(id: &str, command: &str) -> Block {
         name: "bash".into(),
         input: json!({"command": command}),
     }
+}
+
+fn on(id: &str, hand: &str, command: &str) -> Block {
+    Block::ToolUse {
+        id: id.into(),
+        name: "bash".into(),
+        input: json!({"command": command, "hand": hand}),
+    }
+}
+
+fn own(id: &str, tool: &str, input: Value) -> Block {
+    Block::ToolUse {
+        id: id.into(),
+        name: tool.into(),
+        input,
+    }
+}
+
+/// A reply of these blocks, as a model gives it.
+fn reply(content: Vec<Block>) -> ModelReply {
+    let tools = content
+        .iter()
+        .any(|block| matches!(block, Block::ToolUse { .. }));
+    ModelReply {
+        content,
+        stop: if tools { Stop::ToolUse } else { Stop::EndTurn },
+        usage: Usage::default(),
+    }
+}
+
+/// Everything a request tells the model, as one text.
+fn told(request: &ModelRequest) -> String {
+    let content = request.messages.iter().flat_map(|message| &message.content);
+    content
+        .map(|content| match content {
+            Content::Text(text) | Content::ToolResult { text, .. } => text.clone(),
+            Content::ToolUse { input, .. } => input.to_string(),
+            Content::Other(value) => value.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn outcome<'a>(items: &'a [Item], tool_use: &str) -> &'a Outcome {
@@ -225,19 +297,19 @@ async fn a_prompt_runs_a_command_on_the_hand_and_is_answered() {
         )])
         .then(vec![text("It says hello.")]);
     let dir = tempfile::tempdir().unwrap();
-    let (_hand, _task) = server.hand(fresh("a1"), dir.path());
-    server.settled("a1").await;
+    let (_hand, _task) = server.hand(fresh("m", "a1"), dir.path());
+    server.settled("m").await;
 
     server
-        .prompt("a1", "write a greeting and read it back")
+        .prompt("m", "write a greeting and read it back")
         .await;
-    server.settled("a1").await;
+    server.settled("m").await;
 
     assert_eq!(
         std::fs::read_to_string(dir.path().join("greeting.txt")).unwrap(),
         "hello\n"
     );
-    let history = server.history("a1");
+    let history = server.history("m");
     assert_eq!(stdout(outcome(&history, "tu_1")), "hello\n");
     assert_eq!(said(&history), ["It says hello."]);
 
@@ -256,191 +328,285 @@ async fn a_prompt_runs_a_command_on_the_hand_and_is_answered() {
         matches!(&told.content[0], Content::ToolResult { text, error: false, .. } if text.contains("hello"))
     );
 
-    let pairs = server.host.pairs().await;
-    assert_eq!(pairs.len(), 1);
-    assert_eq!(pairs[0].pair.origin, Origin::Root);
+    let minds = server.host.minds().await;
+    assert_eq!(minds.len(), 1);
+    assert_eq!(minds[0].mind.origin, Origin::Root);
 }
 
 #[tokio::test]
-async fn a_clone_attaches_and_the_mind_forks_to_match() {
+async fn two_hands_of_one_mind_run_their_calls_at_once() {
     let server = Server::start(Config::default()).await;
+    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (_a1, _a1_task) = server.hand(fresh("m", "a1"), a.path());
+    let (_b2, _b2_task) = server.hand(fresh("m", "b2"), b.path());
+    server.settled_with("m", &["a1", "b2"]).await;
+
+    let timed = "date +%s%N > start; sleep 0.4; date +%s%N > end";
     server
         .model
-        .then(vec![bash("tu_1", "echo original > note.txt")])
-        .then(vec![text("Written.")]);
-    let dir = tempfile::tempdir().unwrap();
-    let (hand, _task) = server.hand(fresh("a1"), dir.path());
-    server.settled("a1").await;
-    server.prompt("a1", "write a note").await;
-    server.settled("a1").await;
-    let parent = server.history("a1");
+        .then(vec![on("tu_1", "a1", timed), on("tu_2", "b2", timed)])
+        .then(vec![text("Both ran.")]);
+    server.prompt("m", "run in both places").await;
+    server.settled_with("m", &["a1", "b2"]).await;
 
-    // Clone the hand: copy what it remembers and its files, and feed the
-    // copy a new name.
-    let mut core = hand.snapshot().await.unwrap();
-    core.rename(name("b7"));
-    let copy = tempfile::tempdir().unwrap();
-    std::fs::copy(dir.path().join("note.txt"), copy.path().join("note.txt")).unwrap();
-    let (_clone, _clone_task) = server.hand(core, copy.path());
-    server.settled("b7").await;
-
-    // The new mind shares the parent's whole history, and waits.
-    let pairs = server.host.pairs().await;
-    let child = pairs
-        .iter()
-        .find(|status| status.pair.name == name("b7"))
-        .unwrap();
-    let inherited = u64::try_from(parent.len()).unwrap();
-    assert_eq!(
-        child.pair.origin,
-        Origin::Fork {
-            parent: name("a1"),
-            inherited
-        }
-    );
-    let history = server.history("b7");
-    assert_eq!(history[..parent.len()], parent[..]);
-    assert_eq!(
-        history[parent.len()..],
-        [Item::Paused {
-            reason: "forked from a1".into()
-        }]
-    );
-    assert_eq!(
-        server.model.requests().len(),
-        2,
-        "a new mind calls no model"
-    );
-
-    // Prompted, it carries on in its own hand, with the parent's past.
-    server
-        .model
-        .then(vec![bash("tu_2", "echo clone >> note.txt && cat note.txt")])
-        .then(vec![text("Two lines.")]);
-    server.prompt("b7", "add a line and show the note").await;
-    server.settled("b7").await;
-
-    let history = server.history("b7");
-    assert_eq!(stdout(outcome(&history, "tu_2")), "original\nclone\n");
-    assert_eq!(said(&history), ["Written.", "Two lines."]);
-    assert_eq!(
-        std::fs::read_to_string(dir.path().join("note.txt")).unwrap(),
-        "original\n"
-    );
-    assert_eq!(
-        server.history("a1"),
-        parent,
-        "the parent's history is its own"
-    );
-
-    let first = &server.model.requests()[2].messages[0];
-    assert_eq!(first.content, vec![Content::Text("write a note".into())]);
-}
-
-#[tokio::test]
-async fn a_hand_copied_while_it_ran_a_command_tells_its_new_mind_the_command_was_lost() {
-    let server = Server::start(Config::default()).await;
-    server
-        .model
-        .then(vec![bash("tu_1", "sleep 0.4; echo finished")])
-        .then(vec![text("Done.")]);
-    let dir = tempfile::tempdir().unwrap();
-    let (hand, _task) = server.hand(fresh("a1"), dir.path());
-    server.settled("a1").await;
-    server.prompt("a1", "wait a moment").await;
-    eventually("the command is running", || async {
-        hand.snapshot()
-            .await
-            .is_some_and(|core| core.running().count() == 1)
-    })
-    .await;
-
-    // The copy remembers the call, but this process is not running it.
-    let mut core = hand.snapshot().await.unwrap();
-    core.rename(name("b7"));
-    let (_clone, _clone_task) = server.hand(core, dir.path());
-    server.settled("b7").await;
-    server.settled("a1").await;
-
-    assert_eq!(stdout(outcome(&server.history("a1"), "tu_1")), "finished\n");
-    let lost = outcome(&server.history("b7"), "tu_1").clone();
-    assert!(
-        matches!(&lost, Outcome::Error(error) if error.contains("restarted while this call ran")),
-        "{lost:?}"
-    );
-    assert_eq!(said(&server.history("b7")), Vec::<&str>::new());
-}
-
-#[tokio::test]
-async fn a_lineage_takes_no_more_clones_than_its_limit() {
-    let server = Server::start(Config {
-        max_clones: 1,
-        ..Config::default()
-    })
-    .await;
-    let dir = tempfile::tempdir().unwrap();
-    let (hand, _task) = server.hand(fresh("a1"), dir.path());
-    server.settled("a1").await;
-
-    let clone = |clone: &'static str| async move {
-        let mut core = hand.snapshot().await.unwrap();
-        core.rename(name(clone));
-        core
+    let time = |dir: &Path, file: &str| -> u128 {
+        let text = std::fs::read_to_string(dir.join(file)).unwrap();
+        text.trim().parse().unwrap()
     };
-    let (_first, _first_task) = server.hand(clone("b7").await, dir.path());
-    server.settled("b7").await;
-
-    // A clone of the clone is in the same lineage.
-    let mut second = fresh("b7");
-    second.rename(name("c9"));
-    let (_second, refused) = server.hand(second, dir.path());
-    let error = timeout(Duration::from_secs(10), refused)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap_err();
-    assert!(matches!(error, Error::Refused(Refusal::Limit)), "{error}");
-    assert_eq!(server.host.pairs().await.len(), 2);
+    // Each started before the other ended.
+    assert!(time(a.path(), "start") < time(b.path(), "end"));
+    assert!(time(b.path(), "start") < time(a.path(), "end"));
+    assert_eq!(said(&server.history("m")), ["Both ran."]);
 }
 
 #[tokio::test]
-async fn forking_is_off_when_the_limit_is_zero() {
+async fn a_mind_has_as_many_hands_as_it_may() {
     let server = Server::start(Config {
-        max_clones: 0,
+        mind: Settings {
+            max_hands: 2,
+            ..Settings::default()
+        },
         ..Config::default()
     })
     .await;
     let dir = tempfile::tempdir().unwrap();
-    let (_hand, _task) = server.hand(fresh("a1"), dir.path());
-    server.settled("a1").await;
+    let (_a1, _a1_task) = server.hand(fresh("m", "a1"), dir.path());
+    let (_b2, _b2_task) = server.hand(fresh("m", "b2"), dir.path());
+    server.settled_with("m", &["a1", "b2"]).await;
 
-    let mut clone = fresh("a1");
-    clone.rename(name("b7"));
-    let (_clone, refused) = server.hand(clone, dir.path());
-    let error = timeout(Duration::from_secs(10), refused)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap_err();
+    let (_c3, refused) = server.hand(fresh("m", "c3"), dir.path());
+    let error = ended(refused).await.unwrap_err();
     assert!(matches!(error, Error::Refused(Refusal::Limit)), "{error}");
 }
 
 #[tokio::test]
-async fn a_clone_dials_until_the_hand_it_was_cloned_from_is_known() {
+async fn a_hand_that_dies_mid_call_is_let_go_from_outside_and_the_turn_goes_on() {
+    let server = Server::start(Config::default()).await;
+    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (a1, _a1_task) = server.hand(fresh("m", "a1"), a.path());
+    let (_b2, _b2_task) = server.hand(fresh("m", "b2"), b.path());
+    server.settled_with("m", &["a1", "b2"]).await;
+
+    server.model.then(vec![
+        on("tu_1", "a1", "echo started > mark; sleep 60"),
+        on("tu_2", "b2", "echo fine"),
+    ]);
+    server.prompt("m", "both").await;
+    eventually("a1's command has started", || async {
+        a.path().join("mark").exists()
+    })
+    .await;
+    // a1 dies, and never comes back.
+    a1.stop();
+    eventually("the mind waits for a1", || async {
+        server
+            .status("m")
+            .await
+            .is_some_and(|status| status.waiting == [name("a1")] && status.hands == [name("b2")])
+    })
+    .await;
+
+    server.model.then(vec![text("a1 is gone; b2 said fine.")]);
+    let released = client()
+        .post(server.api("/minds/m/release"))
+        .json(&json!({"hand": "a1"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(released.status(), 200);
+    server.settled_with("m", &["b2"]).await;
+
+    let history = server.history("m");
+    assert!(matches!(outcome(&history, "tu_1"), Outcome::Unknown(why) if why.contains("released")));
+    assert_eq!(stdout(outcome(&history, "tu_2")), "fine\n");
+    assert_eq!(said(&history), ["a1 is gone; b2 said fine."]);
+
+    // a1 is refused if it comes back, and its process ends quietly.
+    let (_back, refused) = server.hand(fresh("m", "a1"), a.path());
+    assert!(ended(refused).await.is_ok());
+    let unknown = client()
+        .post(server.api("/minds/m/release"))
+        .json(&json!({"hand": "a1"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), 404);
+}
+
+/// Answers a mind whose model forks once from its hand `a1`, and the child
+/// that fork makes: the parent writes a note, forks, and says so; the child
+/// adds to the note in its copy and says so.
+fn forking(request: &ModelRequest) -> ModelReply {
+    let told = told(request);
+    reply(if told.contains("\"you\"") {
+        if told.contains("CHILD-DONE") {
+            vec![text("Child done.")]
+        } else {
+            vec![bash(
+                "tu_c",
+                "echo child >> note.txt && cat note.txt && echo CHILD-DONE",
+            )]
+        }
+    } else if told.contains("children") {
+        vec![text("Forked.")]
+    } else if told.contains("exit") {
+        vec![own(
+            "tu_f",
+            "fork",
+            json!({"prompts": ["add a line to the note"]}),
+        )]
+    } else {
+        vec![bash("tu_w", "echo parent > note.txt")]
+    })
+}
+
+#[tokio::test]
+async fn a_fork_makes_a_child_that_works_in_a_copy_of_the_hand() {
+    let server = Server::start(Config::default()).await;
+    for _ in 0..6 {
+        server.model.then_with(forking);
+    }
+    let root = tempfile::tempdir().unwrap();
+    let (dir, clones) = (root.path().join("work"), root.path().join("clones"));
+    std::fs::create_dir(&dir).unwrap();
+    let _a1 = server.cloning_hand("m", "a1", &dir, &clones);
+    server.settled("m").await;
+
+    server.prompt("m", "write a note, then fork").await;
+    eventually("the child exists and is done", || async {
+        let minds = server.host.minds().await;
+        minds.len() == 2
+            && minds
+                .iter()
+                .all(|status| status.state == State::Idle && status.hands == [name("a1")])
+    })
+    .await;
+
+    let minds = server.host.minds().await;
+    let child = minds
+        .iter()
+        .find(|status| status.mind.name != name("m"))
+        .unwrap();
+    let child_name = child.mind.name.clone();
+    assert!(child_name.as_str().starts_with("m."), "{child_name}");
+    let parent = server.history("m");
+    let Origin::Fork {
+        parent: of,
+        inherited,
+    } = &child.mind.origin
+    else {
+        panic!("not a fork: {:?}", child.mind.origin);
+    };
+    assert_eq!(of, &name("m"));
+    let inherited = usize::try_from(*inherited).unwrap();
+    assert!(
+        matches!(&parent[inherited - 1], Item::Call { capability, .. } if capability == "clone")
+    );
+
+    // The parent is told its children, and carries on.
+    assert_eq!(
+        outcome(&parent, "tu_f"),
+        &Outcome::Output(json!({"children": [child_name]}))
+    );
+    assert_eq!(said(&parent), ["Forked."]);
+
+    // The child shares the parent's history up to the clone, then works in
+    // its own copy of the hand's directory.
+    let history = server.history(child_name.as_str());
+    assert_eq!(history[..inherited], parent[..inherited]);
+    assert_eq!(said(&history), ["Child done."]);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("note.txt")).unwrap(),
+        "parent\n"
+    );
+    let copy = clones.join(child_name.as_str()).join("a1");
+    assert_eq!(
+        std::fs::read_to_string(copy.join("note.txt")).unwrap(),
+        "parent\nchild\n"
+    );
+}
+
+/// Answers a mind whose model clones `local` into itself, runs a command in
+/// both, then lets the clone go.
+fn cloning_into_itself(request: &ModelRequest) -> ModelReply {
+    let told = told(request);
+    reply(if told.contains("\"released\"") {
+        vec![text("Done with the clone.")]
+    } else if told.contains("BOTH") {
+        vec![own("tu_r", "release_hand", json!({"hand": "local-2"}))]
+    } else if told.contains("local-2") {
+        vec![
+            on("tu_a", "local", "echo BOTH > where.txt; pwd"),
+            on("tu_b", "local-2", "echo BOTH > where.txt; pwd"),
+        ]
+    } else {
+        vec![own("tu_c", "clone_hand", json!({}))]
+    })
+}
+
+#[tokio::test]
+async fn a_clone_joins_its_mind_works_beside_its_original_and_is_let_go() {
+    let server = Server::start(Config::default()).await;
+    for _ in 0..5 {
+        server.model.then_with(cloning_into_itself);
+    }
+    let root = tempfile::tempdir().unwrap();
+    let (dir, clones) = (root.path().join("work"), root.path().join("clones"));
+    std::fs::create_dir(&dir).unwrap();
+    let _local = server.cloning_hand("main", "local", &dir, &clones);
+    server.settled_with("main", &["local"]).await;
+
+    server.prompt("main", "work in two places").await;
+    eventually("the turn is over", || async {
+        server
+            .status("main")
+            .await
+            .is_some_and(|status| status.state == State::Idle && status.hands == [name("local")])
+            && said(&server.history("main")) == ["Done with the clone."]
+    })
+    .await;
+
+    let history = server.history("main");
+    assert_eq!(
+        outcome(&history, "tu_c"),
+        &Outcome::Output(json!({"hand": "local-2"}))
+    );
+    let copy = clones.join("main").join("local-2");
+    assert!(stdout(outcome(&history, "tu_b")).contains("local-2"));
+    assert_eq!(
+        std::fs::read_to_string(dir.join("where.txt")).unwrap(),
+        "BOTH\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(copy.join("where.txt")).unwrap(),
+        "BOTH\n"
+    );
+    assert!(
+        history
+            .iter()
+            .any(|item| matches!(item, Item::Released { hand, .. } if *hand == name("local-2")))
+    );
+}
+
+#[tokio::test]
+async fn only_a_parent_makes_a_mind_with_a_child_name() {
     let server = Server::start(Config::default()).await;
     let dir = tempfile::tempdir().unwrap();
-    let mut clone = fresh("a1");
-    clone.rename(name("b7"));
-    let (_clone, clone_task) = server.hand(clone, dir.path());
+    // A hand that dials a child its parent has not made yet dials again,
+    // and starts no mind of that name.
+    let (_early, waiting) = server.hand(fresh("m.k3x9q2ab", "a1"), dir.path());
     sleep(Duration::from_millis(150)).await;
     assert!(
-        !clone_task.is_finished(),
-        "an unknown parent is worth another dial"
+        !waiting.is_finished(),
+        "a child not made yet is worth another dial"
     );
-    assert!(server.host.pairs().await.is_empty());
+    assert!(server.host.minds().await.is_empty());
 
-    let (_hand, _task) = server.hand(fresh("a1"), dir.path());
-    server.settled("b7").await;
+    // A name too long to have children is refused for good.
+    let long = "x".repeat(Name::ROOT_MAX_LEN + 1);
+    let (_long, refused) = server.hand(fresh(&long, "a1"), dir.path());
+    let error = ended(refused).await.unwrap_err();
+    assert!(matches!(error, Error::Refused(Refusal::Name)), "{error}");
 }
 
 #[tokio::test]
@@ -448,25 +614,26 @@ async fn a_dropped_connection_loses_no_result() {
     let server = Server::start(Config::default()).await;
     server
         .model
-        .then(vec![bash("tu_1", "sleep 0.3; echo survived")])
+        .then(vec![bash(
+            "tu_1",
+            "echo started > mark; sleep 0.3; echo survived",
+        )])
         .then(vec![text("Done.")]);
     let dir = tempfile::tempdir().unwrap();
-    let (hand, _task) = server.hand(fresh("a1"), dir.path());
-    server.settled("a1").await;
-    server.prompt("a1", "wait, then speak").await;
+    let (hand, _task) = server.hand(fresh("m", "a1"), dir.path());
+    server.settled("m").await;
+    server.prompt("m", "wait, then speak").await;
     eventually("the command is running", || async {
-        hand.snapshot()
-            .await
-            .is_some_and(|core| core.running().count() == 1)
+        dir.path().join("mark").exists()
     })
     .await;
 
     // The command outlives the connection, and its result arrives on the
     // next one.
     hand.redial();
-    server.settled("a1").await;
+    server.settled("m").await;
 
-    let history = server.history("a1");
+    let history = server.history("m");
     assert_eq!(stdout(outcome(&history, "tu_1")), "survived\n");
     assert_eq!(
         history
@@ -479,7 +646,7 @@ async fn a_dropped_connection_loses_no_result() {
 }
 
 #[tokio::test]
-async fn a_host_that_restarts_carries_every_pair_on() {
+async fn a_host_that_restarts_carries_every_mind_on() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("mensor.sqlite");
     let open = || -> Arc<dyn Store> { Arc::new(SqliteStore::open(&path).unwrap()) };
@@ -489,28 +656,28 @@ async fn a_host_that_restarts_carries_every_pair_on() {
         .model
         .then(vec![bash("tu_1", "echo one")])
         .then(vec![text("One.")]);
-    let (hand, _task) = first.hand(fresh("a1"), dir.path());
-    first.settled("a1").await;
-    first.prompt("a1", "count").await;
-    first.settled("a1").await;
+    let (hand, _task) = first.hand(fresh("m", "a1"), dir.path());
+    first.settled("m").await;
+    first.prompt("m", "count").await;
+    first.settled("m").await;
     let address = first.address.to_string();
-    let before = first.history("a1");
+    let before = first.history("m");
     first.stop().await;
 
     // A new host over the same file, on the same address. The hand drops
     // its old connection and finds the new host.
     let second = Server::over(open(), Config::default(), &address).await;
-    assert_eq!(second.history("a1"), before);
+    assert_eq!(second.history("m"), before);
     hand.redial();
-    second.settled("a1").await;
+    second.settled("m").await;
 
     second
         .model
         .then(vec![bash("tu_2", "echo two")])
         .then(vec![text("Two.")]);
-    second.prompt("a1", "count again").await;
-    second.settled("a1").await;
-    let history = second.history("a1");
+    second.prompt("m", "count again").await;
+    second.settled("m").await;
+    let history = second.history("m");
     assert_eq!(history[..before.len()], before[..]);
     assert_eq!(stdout(outcome(&history, "tu_2")), "two\n");
     assert_eq!(said(&history), ["One.", "Two."]);
@@ -531,14 +698,14 @@ async fn a_host_that_restarts_carries_every_pair_on() {
 }
 
 #[tokio::test]
-async fn the_api_prompts_a_pair_and_follows_its_history() {
+async fn the_api_prompts_a_mind_and_follows_its_history() {
     let server = Server::start(Config::default()).await;
     server.model.then(vec![text("Hello.")]);
     let dir = tempfile::tempdir().unwrap();
-    let (_hand, _task) = server.hand(fresh("a1"), dir.path());
-    server.settled("a1").await;
+    let (_hand, _task) = server.hand(fresh("m", "a1"), dir.path());
+    server.settled("m").await;
     let http = client();
-    let prompt = |hand: Value| http.post(server.api("/minds/a1/prompt")).json(&hand).send();
+    let prompt = |body: Value| http.post(server.api("/minds/m/prompt")).json(&body).send();
 
     // A prompt under a key is accepted once, found again, and refused when
     // the key comes back with other words.
@@ -562,9 +729,9 @@ async fn the_api_prompts_a_pair_and_follows_its_history() {
         conflict.headers()["content-type"],
         "application/problem+json"
     );
-    server.settled("a1").await;
+    server.settled("m").await;
 
-    let pairs: Value = http
+    let minds: Value = http
         .get(server.api("/minds"))
         .send()
         .await
@@ -573,12 +740,13 @@ async fn the_api_prompts_a_pair_and_follows_its_history() {
         .await
         .unwrap();
     assert_eq!(
-        pairs,
-        json!([{"name": "a1", "origin": "root", "state": "idle", "attached": true, "length": 3}])
+        minds,
+        json!([{"name": "m", "origin": "root", "state": "idle", "hands": ["a1"],
+                "waiting": [], "length": 3}])
     );
 
     let history: Value = http
-        .get(server.api("/minds/a1/history?after=1"))
+        .get(server.api("/minds/m/history?after=1"))
         .send()
         .await
         .unwrap()
@@ -595,7 +763,7 @@ async fn the_api_prompts_a_pair_and_follows_its_history() {
     // The event stream replays from a cursor: the id of each event is the
     // index of its item.
     let mut events = http
-        .get(server.api("/minds/a1/events?after=1"))
+        .get(server.api("/minds/m/events?after=1"))
         .send()
         .await
         .unwrap();
@@ -617,7 +785,7 @@ async fn the_api_prompts_a_pair_and_follows_its_history() {
     // A reply is told as the model writes it, before the step that holds
     // it is stored.
     server.model.then(vec![text("And again.")]);
-    server.prompt("a1", "once more").await;
+    server.prompt("m", "once more").await;
     while !stream.contains("id: 4\n") {
         let chunk = timeout(Duration::from_secs(5), events.chunk())
             .await
@@ -636,7 +804,7 @@ async fn the_api_prompts_a_pair_and_follows_its_history() {
     let missing = http.get(server.api("/minds/nobody")).send().await.unwrap();
     assert_eq!(missing.status(), 404);
     assert!(matches!(
-        server.host.pair(&name("nobody")).await,
+        server.host.mind(&name("nobody")).await,
         Err(HostError::Missing(_))
     ));
 }
@@ -661,89 +829,47 @@ async fn a_host_with_a_token_serves_only_those_who_hold_it() {
         .unwrap();
     assert_eq!(with.status(), 200);
 
-    let (_stranger, refused) = server.hand_with(fresh("x1"), dir.path(), Some("wrong"));
-    let error = timeout(Duration::from_secs(10), refused)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap_err();
+    let (_stranger, refused) = server.hand_with(fresh("x", "a1"), dir.path(), Some("wrong"));
+    let error = ended(refused).await.unwrap_err();
     assert!(matches!(error, Error::Unauthorized), "{error}");
-    assert!(server.host.pairs().await.is_empty());
+    assert!(server.host.minds().await.is_empty());
 
-    let (_hand, _task) = server.hand_with(fresh("a1"), dir.path(), Some("secret"));
-    server.settled("a1").await;
+    let (_hand, _task) = server.hand_with(fresh("m", "a1"), dir.path(), Some("secret"));
+    server.settled("m").await;
 }
 
 #[tokio::test]
-async fn a_mind_and_a_hand_in_one_process_need_no_socket() {
+async fn a_hand_in_the_same_process_and_one_across_a_socket_serve_one_mind() {
     let server = Server::start(Config::default()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_local, _local_task) = server.local_hand(fresh("main", "local"), dir.path());
+    let (_remote, _remote_task) = server.hand(fresh("main", "remote"), dir.path());
+    server.settled_with("main", &["local", "remote"]).await;
+
     server
         .model
-        .then(vec![bash("tu_1", "echo 1")])
-        .then(vec![text("It printed 1.")]);
-    let dir = tempfile::tempdir().unwrap();
-    let (hand, _task) = server.local_hand(fresh("local"), dir.path());
-    server.settled("local").await;
-
-    server.prompt("local", "run echo 1").await;
-    server.settled("local").await;
-    let history = server.history("local");
+        .then(vec![
+            on("tu_1", "local", "echo 1"),
+            on("tu_2", "remote", "echo 2"),
+        ])
+        .then(vec![text("1 and 2.")]);
+    server.prompt("main", "run both").await;
+    server.settled_with("main", &["local", "remote"]).await;
+    let history = server.history("main");
     assert_eq!(stdout(outcome(&history, "tu_1")), "1\n");
-    assert_eq!(said(&history), ["It printed 1."]);
-
-    // A clone in the same process forks the mind, as one over a socket does.
-    let mut core = hand.snapshot().await.unwrap();
-    core.rename(name("twin"));
-    let (_twin, _twin_task) = server.local_hand(core, dir.path());
-    server.settled("twin").await;
-    let inherited = u64::try_from(history.len()).unwrap();
-    let pairs = server.host.pairs().await;
-    let twin = pairs
-        .iter()
-        .find(|status| status.pair.name == name("twin"))
-        .unwrap();
-    assert_eq!(
-        twin.pair.origin,
-        Origin::Fork {
-            parent: name("local"),
-            inherited
-        }
-    );
-
-    // A hand across a socket attaches to the same host beside them.
-    let (_remote, _remote_task) = server.hand(fresh("remote"), dir.path());
-    server.settled("remote").await;
-    assert_eq!(server.host.pairs().await.len(), 3);
+    assert_eq!(stdout(outcome(&history, "tu_2")), "2\n");
+    assert_eq!(said(&history), ["1 and 2."]);
 }
 
 #[tokio::test]
-async fn a_hand_in_the_same_process_is_refused_as_any_other() {
-    let server = Server::start(Config {
-        max_clones: 0,
-        ..Config::default()
-    })
-    .await;
+async fn a_newer_connection_for_a_hand_takes_the_older_ones_place() {
+    let server = Server::start(Config::default()).await;
     let dir = tempfile::tempdir().unwrap();
-    let (_first, replaced) = server.local_hand(fresh("local"), dir.path());
-    server.settled("local").await;
+    let (_first, replaced) = server.local_hand(fresh("main", "local"), dir.path());
+    server.settled_with("main", &["local"]).await;
 
-    let mut clone = fresh("local");
-    clone.rename(name("twin"));
-    let (_clone, refused) = server.local_hand(clone, dir.path());
-    let error = timeout(Duration::from_secs(10), refused)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap_err();
-    assert!(matches!(error, Error::Refused(Refusal::Limit)), "{error}");
-
-    // A second hand under a name in use takes the first one's place.
-    let (_usurper, _usurper_task) = server.local_hand(fresh("local"), dir.path());
-    let error = timeout(Duration::from_secs(10), replaced)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap_err();
+    let (_usurper, _usurper_task) = server.local_hand(fresh("main", "local"), dir.path());
+    let error = ended(replaced).await.unwrap_err();
     assert!(
         matches!(error, Error::Refused(Refusal::Replaced)),
         "{error}"
@@ -754,28 +880,28 @@ async fn a_hand_in_the_same_process_is_refused_as_any_other() {
 async fn an_interrupt_kills_the_command_a_hand_runs_and_ends_the_turn() {
     let server = Server::start(Config::default()).await;
     let dir = tempfile::tempdir().unwrap();
-    let (_hand, _task) = server.hand(fresh("a1"), dir.path());
-    server.settled("a1").await;
+    let (_hand, _task) = server.hand(fresh("m", "a1"), dir.path());
+    server.settled("m").await;
 
     server.model.then(vec![bash(
         "tu_1",
         "echo started > mark; sleep 60; echo finished > end",
     )]);
-    server.prompt("a1", "Wait a minute.").await;
+    server.prompt("m", "Wait a minute.").await;
     eventually("the command has started", || async {
         dir.path().join("mark").exists()
     })
     .await;
 
     let interrupted = client()
-        .post(server.api("/minds/a1/interrupt"))
+        .post(server.api("/minds/m/interrupt"))
         .send()
         .await
         .unwrap();
     assert_eq!(interrupted.status(), 200);
-    server.settled("a1").await;
+    server.settled("m").await;
 
-    let items = server.history("a1");
+    let items = server.history("m");
     assert_eq!(outcome(&items, "tu_1"), &Outcome::Error("cancelled".into()));
     assert!(items.contains(&Item::Paused {
         reason: "interrupted".into()
@@ -785,9 +911,9 @@ async fn an_interrupt_kills_the_command_a_hand_runs_and_ends_the_turn() {
     assert_eq!(server.model.requests().len(), 1);
 
     server.model.then(vec![text("Stopped.")]);
-    server.prompt("a1", "Never mind.").await;
-    server.settled("a1").await;
-    assert_eq!(said(&server.history("a1")), ["Stopped."]);
+    server.prompt("m", "Never mind.").await;
+    server.settled("m").await;
+    assert_eq!(said(&server.history("m")), ["Stopped."]);
     let requests = server.model.requests();
     assert!(matches!(
         &requests[1].messages[2].content[0],
@@ -806,8 +932,8 @@ async fn a_conversation_past_its_limit_carries_on_from_a_summary() {
     })
     .await;
     let dir = tempfile::tempdir().unwrap();
-    let (_hand, _task) = server.hand(fresh("a1"), dir.path());
-    server.settled("a1").await;
+    let (_hand, _task) = server.hand(fresh("m", "a1"), dir.path());
+    server.settled("m").await;
 
     server.model.then_with(|_| ModelReply {
         content: vec![text("hi")],
@@ -817,17 +943,17 @@ async fn a_conversation_past_its_limit_carries_on_from_a_summary() {
             output: 5,
         },
     });
-    server.prompt("a1", "hello").await;
-    server.settled("a1").await;
+    server.prompt("m", "hello").await;
+    server.settled("m").await;
 
     server
         .model
         .then(vec![text("We greeted each other.")])
         .then(vec![text("Paris.")]);
-    server.prompt("a1", "What is the capital of France?").await;
-    server.settled("a1").await;
+    server.prompt("m", "What is the capital of France?").await;
+    server.settled("m").await;
 
-    let items = server.history("a1");
+    let items = server.history("m");
     assert!(items.iter().any(|item| matches!(
         item,
         Item::Summary { text, .. } if text == "We greeted each other."
@@ -835,13 +961,13 @@ async fn a_conversation_past_its_limit_carries_on_from_a_summary() {
     assert_eq!(said(&items), ["hi", "Paris."]);
     let requests = server.model.requests();
     assert!(requests[1].text_only);
-    // The step after the summary reads the summary and the prompt, and
-    // nothing of what came before.
+    // The step after the summary reads the summary, the hands, and the
+    // prompt, and nothing of what came before.
     assert_eq!(requests[2].messages.len(), 1);
-    assert_eq!(requests[2].messages[0].content.len(), 2);
+    assert_eq!(requests[2].messages[0].content.len(), 3);
 }
 
-/// A host over a database file whose pairs rest soon, and sum up early.
+/// A host over a database file whose minds rest soon, and sum up early.
 async fn restful(path: &Path) -> Server {
     let config = Config {
         rest_after: Duration::from_millis(50),
@@ -855,24 +981,22 @@ async fn restful(path: &Path) -> Server {
     Server::over(store, config, "127.0.0.1:0").await
 }
 
-/// Stops a hand, and waits until its pair has left the host's memory.
-async fn rested(server: &Server, hand: &Handle) -> Core {
-    let core = hand.snapshot().await.unwrap();
+/// Stops a hand, and waits until its mind has left the host's memory.
+async fn rested(server: &Server, hand: &Handle) {
     hand.stop();
-    eventually("the pair rests", || async {
+    eventually("the mind rests", || async {
         server.host.awake().await == 0
     })
     .await;
-    core
 }
 
 #[tokio::test]
-async fn a_pair_with_nothing_to_do_rests_in_the_store_and_wakes_when_needed() {
+async fn a_mind_with_nothing_to_do_rests_in_the_store_and_wakes_when_needed() {
     let dir = tempfile::tempdir().unwrap();
     let server = restful(&dir.path().join("mensor.sqlite")).await;
-    let a1 = name("a1");
-    let (hand, _task) = server.hand(fresh("a1"), dir.path());
-    server.settled("a1").await;
+    let m = name("m");
+    let (hand, _task) = server.hand(fresh("m", "a1"), dir.path());
+    server.settled("m").await;
     server.model.then_with(|_| ModelReply {
         content: vec![text("hi")],
         stop: Stop::EndTurn,
@@ -881,59 +1005,59 @@ async fn a_pair_with_nothing_to_do_rests_in_the_store_and_wakes_when_needed() {
             output: 5,
         },
     });
-    let keyed = |text: &str| server.host.prompt(&a1, Some("k1".into()), text.into());
+    let keyed = |text: &str| server.host.prompt(&m, Some("k1".into()), text.into());
     assert_eq!(keyed("hello").await.unwrap(), Prompted::Accepted);
-    server.settled("a1").await;
+    server.settled("m").await;
 
-    // A pair whose hand is connected stays awake, however long it idles.
+    // A mind whose hand is connected stays awake, however long it idles.
     sleep(Duration::from_millis(200)).await;
     assert_eq!(server.host.awake().await, 1);
 
     // One with no hand, no follower and no model asked leaves memory. What
     // it is doing is then read from the store, and wakes nothing.
-    let core = rested(&server, &hand).await;
-    let status = server.host.pair(&a1).await.unwrap();
+    rested(&server, &hand).await;
+    let status = server.host.mind(&m).await.unwrap();
     assert_eq!(
-        (status.state, status.attached, status.length),
-        (State::Idle, false, 3)
+        (status.state, status.hands.len(), status.length),
+        (State::Idle, 0, 3)
     );
-    assert_eq!(server.host.pairs().await.len(), 1);
-    assert_eq!(server.history("a1").len(), 3);
+    assert_eq!(server.host.minds().await.len(), 1);
+    assert_eq!(server.history("m").len(), 3);
     assert_eq!(server.host.awake().await, 0);
 
     // A prompt wakes it for as long as it takes to store. With no hand the
     // mind asks nobody, and rests again mid-turn.
-    server.prompt("a1", "What is the capital of France?").await;
-    eventually("the pair rests again", || async {
+    server.prompt("m", "What is the capital of France?").await;
+    eventually("the mind rests again", || async {
         server.host.awake().await == 0
     })
     .await;
-    let status = server.host.pair(&a1).await.unwrap();
+    let status = server.host.mind(&m).await.unwrap();
     assert_eq!((status.state, status.length), (State::Thinking, 4));
     assert_eq!(server.model.requests().len(), 1);
 
-    // Its hand wakes it, and the turn carries on: here by summing up.
+    // A hand wakes it, and the turn carries on: here by summing up.
     server
         .model
         .then(vec![text("We greeted each other.")])
         .then(vec![text("Paris.")]);
-    let (hand, _task) = server.hand(core, dir.path());
-    server.settled("a1").await;
-    assert_eq!(said(&server.history("a1")), ["hi", "Paris."]);
+    let (hand, _task) = server.hand(fresh("m", "a1"), dir.path());
+    server.settled("m").await;
+    assert_eq!(said(&server.history("m")), ["hi", "Paris."]);
 
     // Woken again, the mind is given only the end of its history: from
     // the summary. A key from before it is found in the store.
-    let core = rested(&server, &hand).await;
+    rested(&server, &hand).await;
     assert_eq!(keyed("hello").await.unwrap(), Prompted::Existing);
     assert!(matches!(
         keyed("goodbye").await,
         Err(HostError::Conflict(_))
     ));
     server.model.then(vec![text("Lyon is not.")]);
-    let (_hand, _task) = server.hand(core, dir.path());
-    server.settled("a1").await;
-    server.prompt("a1", "And Lyon?").await;
-    server.settled("a1").await;
+    let (_hand, _task) = server.hand(fresh("m", "a1"), dir.path());
+    server.settled("m").await;
+    server.prompt("m", "And Lyon?").await;
+    server.settled("m").await;
     let requests = server.model.requests();
     let asked = &requests.last().unwrap().messages;
     assert_eq!(asked.len(), 3);
@@ -941,20 +1065,17 @@ async fn a_pair_with_nothing_to_do_rests_in_the_store_and_wakes_when_needed() {
         &asked[0].content[0],
         Content::Text(summary) if summary.contains("We greeted each other.")
     ));
-    assert_eq!(
-        said(&server.history("a1")),
-        ["hi", "Paris.", "Lyon is not."]
-    );
+    assert_eq!(said(&server.history("m")), ["hi", "Paris.", "Lyon is not."]);
 }
 
 #[tokio::test]
-async fn a_pair_that_is_followed_stays_awake() {
+async fn a_mind_that_is_followed_stays_awake() {
     let dir = tempfile::tempdir().unwrap();
     let server = restful(&dir.path().join("mensor.sqlite")).await;
-    let (hand, _task) = server.hand(fresh("a1"), dir.path());
-    server.settled("a1").await;
+    let (hand, _task) = server.hand(fresh("m", "a1"), dir.path());
+    server.settled("m").await;
     let events = client()
-        .get(server.api("/minds/a1/events"))
+        .get(server.api("/minds/m/events"))
         .send()
         .await
         .unwrap();
@@ -964,87 +1085,27 @@ async fn a_pair_that_is_followed_stays_awake() {
 
     drop(events);
     // A stream that is dropped is noticed when the host next writes to it.
-    server.prompt("a1", "anyone?").await;
-    eventually("the pair rests", || async {
+    server.prompt("m", "anyone?").await;
+    eventually("the mind rests", || async {
         server.host.awake().await == 0
     })
     .await;
 }
 
 #[tokio::test]
-async fn a_clone_of_a_hand_whose_mind_summed_up_forks_from_the_whole_history() {
-    let dir = tempfile::tempdir().unwrap();
-    let server = restful(&dir.path().join("mensor.sqlite")).await;
-    let (hand, _task) = server.hand(fresh("a1"), dir.path());
-    server.settled("a1").await;
-    server.model.then_with(|_| ModelReply {
-        content: vec![bash("tu_1", "echo original > note.txt")],
-        stop: Stop::ToolUse,
-        usage: Usage {
-            input: 95,
-            output: 5,
-        },
-    });
-    server
-        .model
-        .then(vec![text("We wrote a note.")])
-        .then(vec![text("Written.")]);
-    server.prompt("a1", "write a note").await;
-    server.settled("a1").await;
-    let parent = server.history("a1");
-    assert!(
-        parent
-            .iter()
-            .any(|item| matches!(item, Item::Summary { .. }))
-    );
-
-    // The parent rests, so its mind is nowhere but the store.
-    let mut core = rested(&server, &hand).await;
-    core.rename(name("b7"));
-    let copy = tempfile::tempdir().unwrap();
-    std::fs::copy(dir.path().join("note.txt"), copy.path().join("note.txt")).unwrap();
-    let (_clone, _clone_task) = server.hand(core, copy.path());
-    server.settled("b7").await;
-
-    let child = server.history("b7");
-    assert_eq!(child[..parent.len()], parent[..]);
-    assert!(matches!(
-        child.last(),
-        Some(Item::Paused { reason }) if reason == "forked from a1"
-    ));
-    // Forking did not wake the parent.
-    assert_eq!(server.host.awake().await, 1);
-
-    server.model.then(vec![text("It says original.")]);
-    server.prompt("b7", "what does the note say?").await;
-    server.settled("b7").await;
-    let requests = server.model.requests();
-    let asked = &requests.last().unwrap().messages;
-    assert!(matches!(
-        &asked[0].content[0],
-        Content::Text(summary) if summary.contains("We wrote a note.")
-    ));
-    assert_eq!(
-        said(&server.history("b7")),
-        ["Written.", "It says original."]
-    );
-}
-
-#[tokio::test]
 async fn a_long_history_is_read_a_page_at_a_time() {
     let store = Arc::new(MemoryStore::new());
-    let pair = mensor_mind::Pair {
-        name: name("a1"),
-        origin: Origin::Root,
-    };
-    store.create(&pair).unwrap();
     let prompts: Vec<Item> = (0..1200)
         .map(|index| Item::Prompt {
             key: None,
             text: format!("prompt {index}"),
         })
         .collect();
-    store.append(&name("a1"), &prompts).unwrap();
+    let record = MindRecord {
+        name: name("m"),
+        origin: Origin::Root,
+    };
+    store.create(&record, &prompts).unwrap();
     let server = Server::over(store, Config::default(), "127.0.0.1:0").await;
     let http = client();
 
@@ -1053,7 +1114,7 @@ async fn a_long_history_is_read_a_page_at_a_time() {
     let mut read = 0;
     loop {
         let history: Value = http
-            .get(server.api(&format!("/minds/a1/history?after={next}")))
+            .get(server.api(&format!("/minds/m/history?after={next}")))
             .send()
             .await
             .unwrap()
@@ -1072,7 +1133,7 @@ async fn a_long_history_is_read_a_page_at_a_time() {
 
     // The events of a history carry on through every page of it.
     let mut events = http
-        .get(server.api("/minds/a1/events?after=5"))
+        .get(server.api("/minds/m/events?after=5"))
         .send()
         .await
         .unwrap();

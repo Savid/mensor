@@ -530,8 +530,6 @@ mod tests {
                 name: "bash".into(),
                 description: "Run a command.".into(),
                 input: json!({"type": "object"}),
-                capability: "commands".into(),
-                operation: "bash".into(),
             }],
             text_only: false,
         }

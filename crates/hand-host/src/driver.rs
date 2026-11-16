@@ -3,17 +3,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mensor_hand::{Capabilities, Core, Effect};
-use mensor_protocol::{Call, CallId, CallResult, FromHand, Name, Refusal, Reply};
-use tokio::sync::{mpsc, oneshot};
+use mensor_protocol::{Call, CallId, CallResult, FromHand, Refusal, Reply};
+use tokio::sync::mpsc;
 use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::{Instant, sleep_until};
 
 use crate::transport::{Dial, DialError, Incoming, Link};
-
-/// Asked before every dial for the name the hand should have now. A clone's
-/// answer differs from the name it holds, and it is renamed before it says
-/// hello. `None` keeps the name.
-pub type NameSource = Arc<dyn Fn() -> Option<Name> + Send + Sync>;
 
 /// How a hand runs.
 #[derive(Clone)]
@@ -22,12 +17,13 @@ pub struct Config {
     pub dial: Arc<dyn Dial>,
     /// What the hand can do.
     pub capabilities: Capabilities,
-    /// Asked before every dial for the hand's name.
-    pub name: Option<NameSource>,
     /// How long to wait between dials.
     pub backoff: Backoff,
     /// How often to show a quiet connection is alive.
     pub ping: Duration,
+    /// How long a hand keeps dialling a mind that is not made yet before it
+    /// gives up: a clone whose fork never finished.
+    pub give_up: Duration,
 }
 
 impl Config {
@@ -36,15 +32,15 @@ impl Config {
         Self {
             dial: Arc::new(dial),
             capabilities,
-            name: None,
             backoff: Backoff::default(),
             ping: Duration::from_secs(20),
+            give_up: Duration::from_mins(2),
         }
     }
 }
 
 /// The wait between dials: it doubles from `min` to `max`, and each wait is
-/// cut by a random part so that clones made together do not dial together.
+/// cut by a random part so that hands started together do not dial together.
 #[derive(Clone, Copy, Debug)]
 pub struct Backoff {
     /// The first wait.
@@ -67,7 +63,7 @@ impl Backoff {
         let doubled = self.min.saturating_mul(1 << attempt.min(16));
         let full = doubled.min(self.max);
         // The random part comes from the system each time, never from state a
-        // clone would share with its original.
+        // copy of the process would share with it.
         let mut random = [0u8; 1];
         let cut = if getrandom::fill(&mut random).is_ok() {
             u32::from(random[0])
@@ -111,9 +107,7 @@ pub fn boot() -> String {
 }
 
 enum Control {
-    Rename(Name),
     Redial,
-    Snapshot(oneshot::Sender<Core>),
     Stop,
 }
 
@@ -124,26 +118,13 @@ pub struct Handle {
 }
 
 impl Handle {
-    /// Feeds the hand a new name, because it is a clone. It drops its
-    /// connection and says hello again under the new name.
-    pub fn rename(&self, name: Name) {
-        let _ = self.control.send(Control::Rename(name));
-    }
-
-    /// Drops the connection and dials again, asking the name source first.
+    /// Drops the connection and dials again at once.
     pub fn redial(&self) {
         let _ = self.control.send(Control::Redial);
     }
 
-    /// A copy of what the hand remembers right now. A core started from it
-    /// is a clone, once it is fed a new name.
-    pub async fn snapshot(&self) -> Option<Core> {
-        let (reply, answer) = oneshot::channel();
-        self.control.send(Control::Snapshot(reply)).ok()?;
-        answer.await.ok()
-    }
-
-    /// Stops the hand. Calls it is running are dropped.
+    /// Stops the hand. Calls it is running are dropped. A hand whose every
+    /// handle is dropped runs on, until it is refused.
     pub fn stop(&self) {
         let _ = self.control.send(Control::Stop);
     }
@@ -160,6 +141,8 @@ struct Driver {
     core: Core,
     config: Config,
     controls: mpsc::UnboundedReceiver<Control>,
+    /// Whether every handle has been dropped, so no control can come.
+    unheld: bool,
     tasks: HashMap<CallId, AbortHandle>,
     done: mpsc::UnboundedSender<(CallId, Reply)>,
     finished: mpsc::UnboundedReceiver<(CallId, Reply)>,
@@ -170,7 +153,7 @@ enum Ended {
     /// Dial again after the backoff.
     Dropped,
     /// Dial again at once.
-    Renamed,
+    Redial,
     /// The hand was told to stop.
     Stopped,
     /// The host refused the hand.
@@ -187,6 +170,7 @@ impl Driver {
             core,
             config,
             controls,
+            unheld: false,
             tasks: HashMap::new(),
             done,
             finished,
@@ -194,31 +178,45 @@ impl Driver {
     }
 
     async fn run(mut self) -> Result<(), Error> {
+        let (mind, hand) = (self.core.mind().clone(), self.core.hand().clone());
         let mut attempt = 0;
+        // Since when the host has said the mind is not made yet.
+        let mut refused_since = None;
         loop {
-            let ended = match self.dial().await {
+            let hello = self.core.hello(self.config.capabilities.declare());
+            let ended = match self.config.dial.dial(hello).await {
                 Ok(link) => {
                     attempt = 0;
-                    tracing::info!(hand = %self.core.name(), "connected to the mind's host");
+                    refused_since = None;
+                    tracing::info!(%mind, %hand, "connected to the mind's host");
                     self.serve(link).await
                 }
                 Err(DialError::Fail(error)) => return Err(error),
                 Err(DialError::Refused(refusal)) => Ended::Refused(refusal),
                 Err(DialError::Retry(reason)) => {
-                    tracing::debug!(hand = %self.core.name(), %reason, "the dial failed");
+                    tracing::debug!(%mind, %hand, %reason, "the dial failed");
                     Ended::Dropped
                 }
             };
             let ended = match ended {
-                Ended::Dropped => {
+                Ended::Refused(Refusal::Released) => {
+                    tracing::info!(%mind, %hand, "the mind let this hand go");
+                    return Ok(());
+                }
+                Ended::Refused(refusal) if !refusal.is_final() => {
+                    let since = *refused_since.get_or_insert_with(Instant::now);
+                    if since.elapsed() >= self.config.give_up {
+                        return Err(Error::Refused(refusal));
+                    }
+                    tracing::debug!(%mind, %hand, reason = refusal.reason(), "refused for now");
                     let wait = self.config.backoff.wait(attempt);
                     attempt += 1;
                     self.wait(wait).await
                 }
-                Ended::Refused(refusal) if !refusal.is_final() => {
-                    tracing::info!(hand = %self.core.name(), reason = refusal.reason(), "refused for now");
+                Ended::Dropped => {
+                    let wait = self.config.backoff.wait(attempt);
                     attempt += 1;
-                    self.wait(self.config.backoff.max).await
+                    self.wait(wait).await
                 }
                 other => other,
             };
@@ -227,18 +225,9 @@ impl Driver {
                 Ended::Refused(refusal) if refusal.is_final() => {
                     return Err(Error::Refused(refusal));
                 }
-                Ended::Dropped | Ended::Renamed | Ended::Refused(_) => {}
+                Ended::Dropped | Ended::Redial | Ended::Refused(_) => {}
             }
         }
-    }
-
-    /// Asks for the hand's name, then opens a connection and says hello.
-    async fn dial(&mut self) -> Result<Box<dyn Link>, DialError> {
-        if let Some(name) = self.config.name.as_ref().and_then(|source| source()) {
-            self.core.rename(name);
-        }
-        let hello = self.core.hello(self.config.capabilities.declare());
-        self.config.dial.dial(hello).await
     }
 
     /// Carries one connection until it ends.
@@ -267,8 +256,8 @@ impl Driver {
                         return Ended::Dropped;
                     }
                 }
-                control = self.controls.recv() => {
-                    if let Some(ended) = self.control(control) {
+                control = self.controls.recv(), if !self.unheld => {
+                    if let Some(ended) = self.control(control.as_ref()) {
                         link.close().await;
                         return ended;
                     }
@@ -291,8 +280,8 @@ impl Driver {
                 Some((id, reply)) = self.finished.recv() => {
                     self.finish(id, reply);
                 }
-                control = self.controls.recv() => {
-                    if let Some(ended) = self.control(control) {
+                control = self.controls.recv(), if !self.unheld => {
+                    if let Some(ended) = self.control(control.as_ref()) {
                         return ended;
                     }
                 }
@@ -344,18 +333,14 @@ impl Driver {
     }
 
     /// Handles one control message. `Some` ends the connection or the wait.
-    fn control(&mut self, control: Option<Control>) -> Option<Ended> {
+    fn control(&mut self, control: Option<&Control>) -> Option<Ended> {
         match control {
-            Some(Control::Rename(name)) => {
-                self.core.rename(name);
-                Some(Ended::Renamed)
-            }
-            Some(Control::Redial) => Some(Ended::Renamed),
-            Some(Control::Snapshot(reply)) => {
-                let _ = reply.send(self.core.clone());
+            Some(Control::Redial) => Some(Ended::Redial),
+            None => {
+                self.unheld = true;
                 None
             }
-            Some(Control::Stop) | None => {
+            Some(Control::Stop) => {
                 for (_, task) in self.tasks.drain() {
                     task.abort();
                 }

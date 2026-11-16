@@ -277,7 +277,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_command_runs_in_the_bodys_directory() {
+    async fn a_command_runs_in_the_hands_directory() {
         let (dir, commands) = here();
         bash(&commands, json!({"command": "echo hi > note.txt"})).await;
         assert_eq!(

@@ -183,19 +183,7 @@ fn says(text: &str) -> Block {
 }
 
 fn kinds(items: &[Item]) -> Vec<&'static str> {
-    items
-        .iter()
-        .map(|item| match item {
-            Item::Prompt { .. } => "prompt",
-            Item::Step { .. } => "step",
-            Item::Call { .. } => "call",
-            Item::Outcome { .. } => "outcome",
-            Item::Attached { .. } => "attached",
-            Item::Paused { .. } => "paused",
-            Item::Failed { .. } => "failed",
-            Item::Summary { .. } => "summary",
-        })
-        .collect()
+    items.iter().map(Item::kind).collect()
 }
 
 fn outcome<'a>(items: &'a [Item], of: &str) -> &'a Outcome {
@@ -287,7 +275,7 @@ fn an_object_opened_again_is_the_same_hand_and_stores_nothing_new() {
 }
 
 #[test]
-fn nothing_opens_where_no_pair_has_started() {
+fn nothing_opens_where_no_mind_has_started() {
     let storage = MemoryStorage::new();
     let opened = Object::open(Vec::new(), Settings::default(), storage.clone()).unwrap();
     assert!(opened.is_none());

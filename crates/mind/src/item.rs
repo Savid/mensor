@@ -1,4 +1,6 @@
-use mensor_protocol::{CallId, Reply};
+use std::collections::BTreeMap;
+
+use mensor_protocol::{CallId, CapabilityDecl, Name, Reply};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -36,17 +38,19 @@ pub enum Item {
         #[serde(default)]
         usage: Usage,
     },
-    /// A call to the hand, stored before it is sent.
+    /// A call to a hand, stored before it is sent.
     Call {
         /// The call's id, as the hand knows it.
         id: CallId,
+        /// The hand it is for.
+        hand: Name,
         /// The model's tool use this call carries out.
         tool_use: String,
         /// The capability asked.
         capability: String,
         /// The operation of that capability.
         operation: String,
-        /// The operation's input.
+        /// The operation's input, without the `hand` the model named.
         input: Value,
     },
     /// How one of the model's tool uses ended.
@@ -59,10 +63,29 @@ pub enum Item {
         /// What happened.
         outcome: Outcome,
     },
-    /// A hand process the mind had not recorded said hello.
+    /// A hand process the mind had not recorded said hello: a new hand, or
+    /// one that restarted.
     Attached {
+        /// The hand.
+        hand: Name,
         /// That process's boot.
         boot: String,
+        /// What it can do.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        capabilities: Vec<CapabilityDecl>,
+    },
+    /// A hand is no longer the mind's. Its calls are settled, and it is
+    /// refused if it says hello again.
+    Released {
+        /// The hand.
+        hand: Name,
+        /// Why, as the model is told it.
+        reason: String,
+    },
+    /// How many more minds this mind may fork.
+    Forks {
+        /// The number.
+        left: u64,
     },
     /// The mind stopped without asking its model, and waits for a prompt.
     Paused {
@@ -90,12 +113,28 @@ pub enum Item {
         /// The index a mind starts from: that of the first item the steps
         /// before the summary had not seen.
         from: u64,
-        /// The hand process the history last recorded, if it had one.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        boot: Option<String>,
+        /// Every hand the history had recorded, released ones included.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        hands: BTreeMap<Name, HandRecord>,
         /// The id of the last call the history holds, or 0.
         last_call: CallId,
+        /// How many more minds the mind may fork.
+        forks_left: u64,
     },
+}
+
+/// What a history records of one hand.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HandRecord {
+    /// The hand process last recorded.
+    pub boot: String,
+    /// What it can do.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<CapabilityDecl>,
+    /// Whether the mind released it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub released: bool,
 }
 
 impl Item {
@@ -107,6 +146,8 @@ impl Item {
             Self::Call { .. } => "call",
             Self::Outcome { .. } => "outcome",
             Self::Attached { .. } => "attached",
+            Self::Released { .. } => "released",
+            Self::Forks { .. } => "forks",
             Self::Paused { .. } => "paused",
             Self::Failed { .. } => "failed",
             Self::Summary { .. } => "summary",
@@ -217,12 +258,13 @@ mod tests {
             (
                 Item::Call {
                     id: 3,
+                    hand: Name::new("a1").unwrap(),
                     tool_use: "tu_1".into(),
                     capability: "commands".into(),
                     operation: "bash".into(),
                     input: json!({"command": "ls"}),
                 },
-                json!({"type": "call", "id": 3, "toolUse": "tu_1", "capability": "commands",
+                json!({"type": "call", "id": 3, "hand": "a1", "toolUse": "tu_1", "capability": "commands",
                        "operation": "bash", "input": {"command": "ls"}}),
             ),
             (
@@ -255,11 +297,30 @@ mod tests {
                         output: 2,
                     },
                     from: 4,
-                    boot: Some("9f3c".into()),
+                    hands: BTreeMap::from([(
+                        Name::new("a1").unwrap(),
+                        HandRecord {
+                            boot: "9f3c".into(),
+                            capabilities: Vec::new(),
+                            released: false,
+                        },
+                    )]),
                     last_call: 3,
+                    forks_left: 64,
                 },
                 json!({"type": "summary", "text": "So far.", "usage": {"input": 10, "output": 2},
-                       "from": 4, "boot": "9f3c", "lastCall": 3}),
+                       "from": 4, "hands": {"a1": {"boot": "9f3c"}}, "lastCall": 3, "forksLeft": 64}),
+            ),
+            (
+                Item::Released {
+                    hand: Name::new("b2").unwrap(),
+                    reason: "it stayed with m".into(),
+                },
+                json!({"type": "released", "hand": "b2", "reason": "it stayed with m"}),
+            ),
+            (
+                Item::Forks { left: 20 },
+                json!({"type": "forks", "left": 20}),
             ),
         ];
         for (item, written) in cases {

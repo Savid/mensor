@@ -1,9 +1,11 @@
 use std::borrow::Cow;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+use mensor_protocol::{CapabilityDecl, Name};
 use serde_json::Value;
 
-use crate::{Block, Content, Item, Message, Outcome, Role};
+use crate::tools::abilities;
+use crate::{Block, Content, HandRecord, Item, Message, Outcome, Role};
 
 /// What stands before a summary when the model is shown one.
 const SUMMARISED: &str =
@@ -15,10 +17,12 @@ const SUMMARISED: &str =
 /// results of the tools that step used, then every prompt that arrived before
 /// the next step was asked for. A prompt that arrived while a step was being
 /// asked for follows that step. A pause is told where it happened, among the
-/// prompts, so that the model knows the turn before it was cut short.
+/// prompts, so that the model knows the turn before it was cut short. So is
+/// a hand joining the mind, with what it can do, and a hand let go.
 ///
-/// A history that holds a summary starts at its last one: the summary, then
-/// every prompt no step had seen when it was written.
+/// A history that holds a summary starts at its last one: the summary, the
+/// hands the mind has, then every prompt no step had seen when it was
+/// written.
 ///
 /// `items` are the end of a history, and `before` is how many items of it
 /// come before them: none, or those a summary replaced. The results of one
@@ -51,16 +55,21 @@ fn conversation(
         .enumerate()
         .rev()
         .find_map(|(at, item)| match item {
-            Item::Summary { text, from, .. } => Some((at, text, *from)),
+            Item::Summary {
+                text, from, hands, ..
+            } => Some((at, text, *from, hands)),
             _ => None,
         });
     // What the next user message holds: results first, then prompts.
     let mut user: Vec<Content> = Vec::new();
+    // The hands the model has been told of.
+    let mut told = BTreeSet::new();
     // Steps count from the summary. Prompts count from the index it names:
     // what the last step before it had seen.
     let (steps_from, prompts_from) = match summary {
-        Some((at, text, from)) => {
-            user.push(Content::Text(format!("{SUMMARISED}\n\n{text}")));
+        Some((at, text, from, hands)) => {
+            user.extend(summed_up(text, hands));
+            told.extend(hands.keys());
             let from = usize::try_from(from.saturating_sub(before)).unwrap_or(usize::MAX);
             (at, from.min(at))
         }
@@ -76,8 +85,18 @@ fn conversation(
         match item {
             Item::Prompt { text, .. } => prompts.push_back((index, Cow::Borrowed(text))),
             Item::Paused { reason } => {
-                let told = format!("(The turn before this was stopped: {reason}.)");
-                prompts.push_back((index, Cow::Owned(told)));
+                let note = format!("(The turn before this was stopped: {reason}.)");
+                prompts.push_back((index, Cow::Owned(note)));
+            }
+            Item::Attached {
+                hand, capabilities, ..
+            } if told.insert(hand) => {
+                let note = format!("(Hand {hand} joined. It can: {}.)", can(capabilities));
+                prompts.push_back((index, Cow::Owned(note)));
+            }
+            Item::Released { hand, reason } if counted => {
+                let note = format!("(Hand {hand} was let go: {reason}.)");
+                prompts.push_back((index, Cow::Owned(note)));
             }
             Item::Step { seen, content, .. } if counted => {
                 user.extend(results(&asked, max_results));
@@ -116,6 +135,8 @@ fn conversation(
             | Item::Outcome { .. }
             | Item::Call { .. }
             | Item::Attached { .. }
+            | Item::Released { .. }
+            | Item::Forks { .. }
             | Item::Failed { .. }
             | Item::Summary { .. } => {}
         }
@@ -131,6 +152,34 @@ fn conversation(
     }
     push_user(&mut messages, user);
     messages
+}
+
+/// A summary, and the hands the mind has, as the model is told them.
+fn summed_up(text: &str, hands: &BTreeMap<Name, HandRecord>) -> Vec<Content> {
+    let mut told = vec![Content::Text(format!("{SUMMARISED}\n\n{text}"))];
+    let kept: Vec<String> = hands
+        .iter()
+        .filter(|(_, hand)| !hand.released)
+        .map(|(name, hand)| format!("{name} ({})", can(&hand.capabilities)))
+        .collect();
+    if !kept.is_empty() {
+        told.push(Content::Text(format!("(Your hands: {}.)", kept.join("; "))));
+    }
+    told
+}
+
+/// What a hand can do, as the model is told it.
+fn can(capabilities: &[CapabilityDecl]) -> String {
+    let (operations, clones) = abilities(capabilities);
+    let mut can = operations.join(", ");
+    if clones {
+        can.push_str(if can.is_empty() {
+            "be cloned"
+        } else {
+            ", and be cloned"
+        });
+    }
+    can
 }
 
 /// The results of a step's tool asked that have ended, in the step's order,

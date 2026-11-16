@@ -10,6 +10,13 @@ use mensor_protocol::{Call, CallId, CapabilityDecl, FromHand, FromMind, Name, Re
 
 use crate::{Storage, StorageError, Stored};
 
+/// The name of an object's one hand.
+pub const LOCAL: &str = "local";
+
+fn local() -> Name {
+    Name::new(LOCAL).expect("local is a name")
+}
+
 /// A language model an object asks.
 ///
 /// A model retries what is worth retrying itself. An error it returns ends
@@ -40,8 +47,9 @@ pub enum PromptError {
     Storage(#[from] StorageError),
 }
 
-/// One pair in one place: a mind, what its hand remembers, and the storage
-/// that holds both.
+/// A mind and its one hand in one place: the mind, what its hand remembers,
+/// and the storage that holds both. The hand is named [`LOCAL`], and the
+/// mind has the object's name.
 #[derive(Debug)]
 pub struct Object<S> {
     mind: Mind,
@@ -53,7 +61,7 @@ pub struct Object<S> {
 
 impl<S: Storage> Object<S> {
     /// Opens the object stored in `storage`. `None` when nothing is stored
-    /// there: no pair has started.
+    /// there: no mind has started.
     ///
     /// An object that is opened again is the same hand, with everything it
     /// remembered. Calls it was running when it stopped are lost, and the
@@ -71,7 +79,7 @@ impl<S: Storage> Object<S> {
         if !hand.interrupted().is_empty() {
             storage.keep(&hand)?;
         }
-        let mind = Mind::load(from, items, settings);
+        let mind = Mind::load(hand.mind().clone(), from, items, settings);
         Self::settled(mind, hand, declared, storage).map(Some)
     }
 
@@ -88,14 +96,14 @@ impl<S: Storage> Object<S> {
         let mut hand = if let Some(hand) = hand {
             hand
         } else {
-            let hand = Core::new(name, boot(), Limits::default());
+            let hand = Core::new(name, local(), boot(), Limits::default());
             storage.keep(&hand)?;
             hand
         };
         if !hand.interrupted().is_empty() {
             storage.keep(&hand)?;
         }
-        let mind = Mind::load(from, items, settings);
+        let mind = Mind::load(hand.mind().clone(), from, items, settings);
         Self::settled(mind, hand, declared, storage)
     }
 
@@ -116,9 +124,9 @@ impl<S: Storage> Object<S> {
         Ok(object)
     }
 
-    /// The pair's name.
+    /// The mind's name.
     pub fn name(&self) -> &Name {
-        self.hand.name()
+        self.hand.mind()
     }
 
     /// How many items the history holds.
@@ -190,14 +198,16 @@ impl<S: Storage> Object<S> {
         let Some(result) = self.hand.finished(id, reply) else {
             return Ok(());
         };
-        let outputs = self.mind.result(result);
+        let outputs = self.mind.result(&local(), result);
         self.perform(outputs)
     }
 
     /// The hand says hello, and the mind settles every call it waits on.
+    /// The one hand is never released and is within any limit, so it is
+    /// never refused.
     fn settle(&mut self) -> Result<(), StorageError> {
         let hello = self.hand.hello(self.declared.clone());
-        let outputs = self.mind.attach(&hello);
+        let outputs = self.mind.attach(&hello).unwrap_or_default();
         self.perform(outputs)
     }
 
@@ -210,8 +220,8 @@ impl<S: Storage> Object<S> {
         for output in outputs {
             match output {
                 Output::Append(item) => items.push(item),
-                Output::Send(_) if refused => {}
-                Output::Send(message) => {
+                Output::Send { .. } if refused => {}
+                Output::Send { message, .. } => {
                     self.store(&mut items)?;
                     refused = self.deliver(message, &mut cancelled)?;
                 }
@@ -219,6 +229,9 @@ impl<S: Storage> Object<S> {
                     self.store(&mut items)?;
                     self.work.push_back(Work::Ask(request));
                 }
+                // The hand cannot clone, so its mind forks nothing and
+                // lets no hand go.
+                Output::Close { .. } | Output::Fork(_) => {}
             }
         }
         self.store(&mut items)?;
@@ -233,7 +246,7 @@ impl<S: Storage> Object<S> {
             // What a dropped connection does between a server and a remote
             // hand: the two say hello again, and the call the hand would not
             // start settles as one it may have run.
-            self.mind.detach();
+            self.mind.detach(&local());
             self.settle()?;
         }
         Ok(())

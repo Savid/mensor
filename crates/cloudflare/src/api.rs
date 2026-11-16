@@ -6,7 +6,7 @@ use mensor_api::{Problem, Writing, authorized};
 use mensor_mind::Item;
 use mensor_protocol::Name;
 
-/// What a request asks of one pair.
+/// What a request asks of one mind.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Route {
     /// `POST /v1/minds/{name}/prompt`
@@ -22,7 +22,7 @@ pub(crate) enum Route {
 }
 
 impl Route {
-    /// The pair asked about.
+    /// The mind asked about.
     pub(crate) fn name(&self) -> &Name {
         match self {
             Self::Prompt(name)
@@ -41,7 +41,7 @@ pub(crate) fn route(method: &str, path: &str) -> Result<Route, Problem> {
         ["v1", "minds"] => {
             return Err(Problem::new(
                 501,
-                "each pair is an object of its own, and none of them lists the others",
+                "each mind is an object of its own, and none of them lists the others",
             ));
         }
         ["v1", "minds", name, ref rest @ ..] => (name, rest),
@@ -111,7 +111,7 @@ mod tests {
     }
 
     #[test]
-    fn each_path_is_one_question_about_one_pair() {
+    fn each_path_is_one_question_about_one_mind() {
         assert_eq!(route("GET", "/v1/minds/a1"), Ok(Route::Status(name("a1"))));
         assert_eq!(
             route("POST", "/v1/minds/a1/prompt"),

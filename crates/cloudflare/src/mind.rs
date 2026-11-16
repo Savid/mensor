@@ -1,4 +1,4 @@
-//! One pair as one Durable Object.
+//! One mind and its hand as one Durable Object.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -10,8 +10,8 @@ use futures_util::future::{Either, select};
 use futures_util::{StreamExt, stream};
 use mensor_api::{History, MindStatus, PAGE, Problem, PromptBody, PromptReply, Prompted};
 use mensor_hand::{Capabilities, Files};
-use mensor_mind::{Origin, Settings};
-use mensor_object::{Object, PromptError, StorageError, step};
+use mensor_mind::{MindRecord, Origin, Settings};
+use mensor_object::{LOCAL, Object, PromptError, StorageError, step};
 use mensor_protocol::Name;
 // The object's attribute expands to code that names this crate.
 use worker::wasm_bindgen;
@@ -43,31 +43,32 @@ const WAKE: Duration = Duration::from_mins(8);
 
 type Shared = Rc<RefCell<Object<SqlStore>>>;
 
-/// One pair: a mind, its hand and its files, in this object's database.
+/// One mind: its history, its one hand and the hand's files, in this
+/// object's database.
 ///
 /// The alarm is the object's only worker. A prompt is stored and sets the
 /// alarm; the alarm asks the model and runs the hand's calls until the mind
 /// is idle. An object that is stopped mid-work wakes on the same alarm and
 /// carries on from what it stored.
 #[durable_object]
-pub(crate) struct Pair {
+pub(crate) struct Mind {
     state: State,
     env: Env,
     capabilities: Capabilities,
-    /// The pair, once a request or an alarm has needed it.
+    /// The mind, once a request or an alarm has needed it.
     object: RefCell<Option<Shared>>,
     /// Whether an alarm is doing the object's work now.
     working: Cell<bool>,
     /// Whether this object has set an alarm that is still to fire, so that
     /// it need not set another.
     armed: Cell<bool>,
-    /// Those following the pair, each told what happens in its order.
+    /// Those following the mind, each told what happens in its order.
     watchers: RefCell<Vec<UnboundedSender<Told>>>,
     /// Tells the alarm that is working to give up what it waits for.
     stopper: RefCell<Option<UnboundedSender<()>>>,
 }
 
-impl DurableObject for Pair {
+impl DurableObject for Mind {
     fn new(state: State, env: Env) -> Self {
         let storage = state.storage();
         if let Err(error) = sql::prepare(&storage.sql()) {
@@ -122,7 +123,7 @@ impl DurableObject for Pair {
     }
 }
 
-/// What those following a pair are told.
+/// What those following a mind are told.
 #[derive(Clone)]
 enum Told {
     /// The history grew.
@@ -159,7 +160,7 @@ impl From<StorageError> for Unserved {
     }
 }
 
-impl Pair {
+impl Mind {
     fn store(&self) -> SqlStore {
         SqlStore::new(self.state.storage().sql())
     }
@@ -184,7 +185,7 @@ impl Pair {
             .map_or(RECOVERY, Duration::from_millis)
     }
 
-    /// The pair stored here, if one has started.
+    /// The mind stored here, if one has started.
     fn open(&self) -> std::result::Result<Option<Shared>, StorageError> {
         if let Some(object) = self.object.borrow().clone() {
             return Ok(Some(object));
@@ -193,7 +194,7 @@ impl Pair {
         Ok(opened.map(|object| self.hold(object)))
     }
 
-    /// The pair stored here, or a new one named `name`.
+    /// The mind stored here, or a new one named `name`.
     fn start(&self, name: Name) -> std::result::Result<Shared, StorageError> {
         if let Some(object) = self.object.borrow().clone() {
             return Ok(object);
@@ -209,7 +210,7 @@ impl Pair {
         object
     }
 
-    /// Lets go of the pair in memory after its storage failed, so the next
+    /// Lets go of the mind in memory after its storage failed, so the next
     /// request reads what was really stored. Those following it are cut
     /// off, and follow again from their cursors.
     fn forget(&self) {
@@ -217,11 +218,11 @@ impl Pair {
         self.watchers.borrow_mut().clear();
     }
 
-    /// The pair `name` asks about, which must be the one stored here.
+    /// The mind `name` asks about, which must be the one stored here.
     fn known(&self, name: &Name) -> std::result::Result<Shared, Unserved> {
         match self.open()? {
             Some(object) if object.borrow().name() == name => Ok(object),
-            _ => Err(Problem::new(404, format!("no pair is named {name}")).into()),
+            _ => Err(Problem::new(404, format!("no mind is named {name}")).into()),
         }
     }
 
@@ -230,21 +231,21 @@ impl Pair {
         self.tell(&Told::Grew);
     }
 
-    /// Tells everyone following the pair, and forgets those who have gone.
+    /// Tells everyone following the mind, and forgets those who have gone.
     fn tell(&self, told: &Told) {
         self.watchers
             .borrow_mut()
             .retain(|watcher| watcher.unbounded_send(told.clone()).is_ok());
     }
 
-    /// Tells everyone following the pair the text its model has written.
+    /// Tells everyone following the mind the text its model has written.
     fn wrote(&self, at: u64, text: &str) {
         if !self.watchers.borrow().is_empty() {
             self.tell(&Told::Wrote(api::writing(at, text)));
         }
     }
 
-    /// Sets the alarm for now if the pair has work, and no alarm is doing
+    /// Sets the alarm for now if the mind has work, and no alarm is doing
     /// it or is set to.
     async fn wake(&self, object: &Shared) -> Result<()> {
         if object.borrow().has_work() && !self.working.get() && !self.armed.replace(true) {
@@ -262,6 +263,12 @@ impl Pair {
             let detail = "a prompt is JSON with a text, and may have a key";
             return Err(Problem::new(400, detail).into());
         };
+        // An object's mind starts from nothing, so it has a root name.
+        if !name.is_root() {
+            let detail =
+                "a mind that starts from nothing has no '.' in its name, and at most 55 bytes";
+            return Err(Problem::new(400, detail).into());
+        }
         let object = self.start(name)?;
         let prompted = object.borrow_mut().prompt(body.key, body.text);
         let existing = match prompted {
@@ -284,7 +291,7 @@ impl Pair {
         Ok(json(status.status(), &PromptReply { status })?)
     }
 
-    /// Stops the pair's turn, and whatever the alarm waits on for it.
+    /// Stops the mind's turn, and whatever the alarm waits on for it.
     async fn interrupt(&self, name: &Name) -> std::result::Result<Response, Unserved> {
         let object = self.known(name)?;
         let interrupted = object.borrow_mut().interrupt();
@@ -303,14 +310,16 @@ impl Pair {
         let object = self.known(name)?;
         self.wake(&object).await?;
         let object = object.borrow();
-        // A pair here is never a fork, and its hand is always with it.
+        // A mind here is never a fork, its one hand is always with it, and
+        // so its turn waits for no hand.
         let status = MindStatus {
-            pair: mensor_mind::Pair {
+            mind: MindRecord {
                 name: object.name().clone(),
                 origin: Origin::Root,
             },
             state: object.state(),
-            attached: true,
+            hands: vec![Name::new(LOCAL).map_err(|error| Problem::new(500, error.to_string()))?],
+            waiting: Vec::new(),
             length: object.length(),
         };
         Ok(json(200, &status)?)
@@ -351,7 +360,7 @@ impl Pair {
         Ok(response)
     }
 
-    /// Does the pair's work until none is left, or this wake has done its
+    /// Does the mind's work until none is left, or this wake has done its
     /// share.
     async fn work(&self) -> std::result::Result<(), Unserved> {
         let Some(object) = self.open()? else {
@@ -415,7 +424,7 @@ impl Pair {
     }
 }
 
-/// A followed pair: the index of the next item to read, what the pair
+/// A followed mind: the index of the next item to read, what the mind
 /// tells, whether the history may hold that item, and the events read and
 /// not yet sent.
 type Following = (
@@ -426,8 +435,8 @@ type Following = (
     VecDeque<Vec<u8>>,
 );
 
-/// The next event of a followed pair, once there is one. The stream ends
-/// when the object lets go of the pair, or its history cannot be read.
+/// The next event of a followed mind, once there is one. The stream ends
+/// when the object lets go of the mind, or its history cannot be read.
 ///
 /// The history is read a page at a time: at the start, and then only when
 /// it is told to have grown. What is told comes in the order it happened,

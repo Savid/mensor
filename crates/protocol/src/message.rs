@@ -3,9 +3,6 @@ use serde_json::Value;
 
 use crate::Name;
 
-/// The version of the protocol this crate speaks. A [`Hello`] carries it.
-pub const VERSION: u32 = 1;
-
 /// The largest message either end accepts, in bytes.
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
@@ -46,15 +43,14 @@ pub enum FromMind {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Hello {
-    /// The protocol version the hand speaks.
-    pub v: u32,
-    /// The hand's name. One the mind's host has not seen is a new hand.
-    pub name: Name,
-    /// The name this hand had before it was cloned and fed a new one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub was: Option<Name>,
-    /// Random per hand process. A clone made with its memory keeps it; a hand
-    /// that restarted has a new one, and remembers nothing of earlier calls.
+    /// The mind this hand joins. A name its host does not know starts a
+    /// mind, unless it is the name of a fork child, which has a `.`: that
+    /// mind is being made, and the hand dials again.
+    pub mind: Name,
+    /// The hand's name, unique within its mind.
+    pub hand: Name,
+    /// Random per hand process. A hand that restarted has a new one, and
+    /// remembers nothing of earlier calls.
     pub boot: String,
     /// The highest call id this hand has read, or 0.
     pub last_id: CallId,
@@ -178,19 +174,6 @@ impl FromMind {
     }
 }
 
-/// The protocol version a `hello` claims, read without the rest of it, so a
-/// host can refuse another version before it reads fields that may have
-/// changed. `None` when `text` is not a `hello` with a version.
-pub fn version_of(text: &str) -> Option<u32> {
-    #[derive(Deserialize)]
-    struct Peek {
-        r#type: String,
-        v: u32,
-    }
-    let peek: Peek = serde_json::from_str(text).ok()?;
-    (peek.r#type == "hello").then_some(peek.v)
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -203,12 +186,11 @@ mod tests {
 
     #[test]
     fn a_hello_reads_as_it_is_written() {
-        let text = r#"{"type":"hello","v":1,"name":"b7","was":"a1","boot":"9f3c","lastId":41}"#;
+        let text = r#"{"type":"hello","mind":"m","hand":"a1","boot":"9f3c","lastId":41}"#;
         let FromHand::Hello(hello) = FromHand::decode(text).unwrap() else {
             panic!("not a hello");
         };
-        assert_eq!(hello.name, name("b7"));
-        assert_eq!(hello.was, Some(name("a1")));
+        assert_eq!((&hello.mind, &hello.hand), (&name("m"), &name("a1")));
         assert_eq!(hello.last_id, 41);
         assert!(hello.running.is_empty() && hello.held.is_empty());
         assert_eq!(FromHand::Hello(hello).encode(), text);
@@ -268,18 +250,8 @@ mod tests {
     }
 
     #[test]
-    fn a_version_is_read_before_the_rest() {
-        assert_eq!(
-            version_of(r#"{"type":"hello","v":9,"shape":"changed"}"#),
-            Some(9)
-        );
-        assert_eq!(version_of(r#"{"type":"result","v":9}"#), None);
-        assert_eq!(version_of("nonsense"), None);
-    }
-
-    #[test]
     fn a_bad_name_refuses_the_hello() {
-        let text = r#"{"type":"hello","v":1,"name":"a/b","boot":"x","lastId":0}"#;
+        let text = r#"{"type":"hello","mind":"m","hand":"a/b","boot":"x","lastId":0}"#;
         assert!(matches!(FromHand::decode(text), Err(DecodeError::Json(_))));
     }
 }

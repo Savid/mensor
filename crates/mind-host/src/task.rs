@@ -1,25 +1,26 @@
+use std::collections::BTreeMap;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use mensor_api::Writing;
 use mensor_mind::{
-    Conflict, Item, Mind, ModelReply, ModelRequest, Output, Pair, Settings, State, Store,
-    StoreError,
+    Conflict, Fork, Item, Mind, MindRecord, ModelReply, ModelRequest, NoHand, Origin, Output,
+    State, Store, StoreError,
 };
 use mensor_protocol::{FromHand, FromMind, Hello, Name, Refusal};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::AbortHandle;
 use tokio::time::timeout;
 
-use crate::host::Inner;
+use crate::host::{Inner, Slot};
 use crate::model::{Model, ModelError};
 
-/// How much those following a pair may fall behind before they miss some
+/// How much those following a mind may fall behind before they miss some
 /// of what it tells. One that does reads the history again, and has lost
 /// only text the next stored step holds.
 const TOLD: usize = 256;
 
-/// What a pair's task is asked to do.
+/// What a mind's task is asked to do.
 pub(crate) enum Command {
     Prompt {
         key: Option<String>,
@@ -31,10 +32,12 @@ pub(crate) enum Command {
         link: Link,
     },
     FromHand {
+        hand: Name,
         link: u64,
         message: FromHand,
     },
     Detached {
+        hand: Name,
         link: u64,
     },
     Model {
@@ -42,6 +45,10 @@ pub(crate) enum Command {
         result: Result<ModelReply, ModelError>,
     },
     Interrupt,
+    Release {
+        hand: Name,
+        reply: oneshot::Sender<Result<(), NoHand>>,
+    },
     Status {
         reply: oneshot::Sender<Status>,
     },
@@ -50,15 +57,18 @@ pub(crate) enum Command {
     },
 }
 
-/// What a pair is doing.
+/// What a mind is doing.
 pub(crate) struct Status {
     pub(crate) state: State,
-    pub(crate) attached: bool,
-    /// How many items of the pair's history are stored.
+    /// The hands connected.
+    pub(crate) hands: Vec<Name>,
+    /// The hands its turn waits for.
+    pub(crate) waiting: Vec<Name>,
+    /// How many items of its history are stored.
     pub(crate) length: u64,
 }
 
-/// What those following a pair are told, in the order it happened.
+/// What those following a mind are told, in the order it happened.
 #[derive(Clone, Debug)]
 pub(crate) enum Told {
     /// The history grew.
@@ -83,21 +93,8 @@ pub enum Outgoing {
     Close(Refusal),
 }
 
-/// What a pair's task starts with.
-pub(crate) enum Start {
-    /// The end of its history, read from the store.
-    Stored,
-    /// A mind just forked, the outputs that made it, and its hand's
-    /// connection.
-    Forked {
-        mind: Box<Mind>,
-        first: Vec<Output>,
-        link: Link,
-    },
-}
-
-/// The task of one pair that is awake. It holds the pair's mind, and is
-/// the only one to change its history.
+/// The task of one mind that is awake. It holds the mind, and is the only
+/// one to change its history.
 struct Task {
     name: Name,
     mind: Mind,
@@ -105,11 +102,12 @@ struct Task {
     model: Arc<dyn Model>,
     /// The host, for the day the task leaves it.
     host: Weak<Inner>,
-    /// How long the pair stays awake with nothing to stay awake for.
+    /// How long the mind stays awake with nothing to stay awake for.
     rest_after: Duration,
     commands: mpsc::UnboundedReceiver<Command>,
     myself: mpsc::WeakUnboundedSender<Command>,
-    link: Option<Link>,
+    /// The connection of each hand that is connected.
+    links: BTreeMap<Name, Link>,
     /// The request the model is answering now: what it had seen, and the
     /// way to give it up.
     asking: Option<(u64, AbortHandle)>,
@@ -125,65 +123,54 @@ pub(crate) async fn blocking<T: Send + 'static>(
     done.unwrap_or_else(|error| Err(StoreError::Backend(format!("a store call died: {error}"))))
 }
 
-/// Wakes one pair: starts its task, and gives the way to reach it.
+/// Wakes one mind: starts its task, which loads the end of its history, and
+/// gives the way to reach it.
 ///
-/// The task serves commands until the pair has had nothing to stay awake
+/// The task serves commands until the mind has had nothing to stay awake
 /// for (no hand, no follower, no model asked) for as long as the host lets
 /// it rest, or until its history cannot be read or stored. Either way it
 /// then leaves the host's memory, and the next thing that concerns the
-/// pair wakes it from its store.
-pub(crate) fn spawn(
-    pair: &Pair,
-    start: Start,
-    host: &Arc<Inner>,
-) -> mpsc::UnboundedSender<Command> {
+/// mind wakes it from its store.
+pub(crate) fn spawn(name: &Name, host: &Arc<Inner>) -> mpsc::UnboundedSender<Command> {
     let (sender, commands) = mpsc::unbounded_channel();
     let task = Task {
-        name: pair.name.clone(),
-        mind: Mind::new(host.config.mind.clone()),
+        name: name.clone(),
+        mind: Mind::new(name.clone(), host.config.mind.clone()),
         store: Arc::clone(&host.store),
         model: Arc::clone(&host.model),
         host: Arc::downgrade(host),
         rest_after: host.config.rest_after,
         commands,
         myself: sender.downgrade(),
-        link: None,
+        links: BTreeMap::new(),
         asking: None,
         told: broadcast::Sender::new(TOLD),
     };
-    tokio::spawn(task.run(start, host.config.mind.clone()));
+    tokio::spawn(task.run());
     sender
 }
 
 impl Task {
-    async fn run(mut self, start: Start, settings: Settings) {
-        if let Err(error) = self.serve(start, settings).await {
-            tracing::error!(pair = %self.name, %error, "the pair stopped: its history could not be read or stored");
-            // Whoever asks next wakes the pair from what is stored.
+    async fn run(mut self) {
+        if let Err(error) = self.serve().await {
+            tracing::error!(mind = %self.name, %error, "the mind stopped: its history could not be read or stored");
+            // Whoever asks next wakes the mind from what is stored.
             if let Some(host) = self.host.upgrade()
-                && let Some(slot) = host.pairs.lock().await.get_mut(&self.name)
+                && let Some(slot) = host.minds.lock().await.get_mut(&self.name)
             {
                 slot.awake = None;
             }
         }
     }
 
-    async fn serve(&mut self, start: Start, settings: Settings) -> Result<(), StoreError> {
-        match start {
-            Start::Stored => {
-                let (store, name) = (Arc::clone(&self.store), self.name.clone());
-                let (from, items) = blocking(move || store.tail(&name)).await?;
-                self.mind = Mind::load(from, items, settings);
-            }
-            Start::Forked { mind, first, link } => {
-                self.mind = *mind;
-                self.link = Some(link);
-                self.perform(first).await?;
-            }
-        }
+    async fn serve(&mut self) -> Result<(), StoreError> {
+        let (store, name) = (Arc::clone(&self.store), self.name.clone());
+        let (from, items) = blocking(move || store.tail(&name)).await?;
+        let settings = self.host.upgrade().map(|host| host.config.mind.clone());
+        self.mind = Mind::load(self.name.clone(), from, items, settings.unwrap_or_default());
         loop {
             let resting =
-                self.link.is_none() && self.asking.is_none() && self.told.receiver_count() == 0;
+                self.links.is_empty() && self.asking.is_none() && self.told.receiver_count() == 0;
             let command = if resting {
                 match timeout(self.rest_after, self.commands.recv()).await {
                     Ok(command) => command,
@@ -210,14 +197,14 @@ impl Task {
         let Some(host) = self.host.upgrade() else {
             return true;
         };
-        let mut pairs = host.pairs.lock().await;
+        let mut minds = host.minds.lock().await;
         if self.commands.sender_strong_count() > 1 || !self.commands.is_empty() {
             return false;
         }
-        if let Some(slot) = pairs.get_mut(&self.name) {
+        if let Some(slot) = minds.get_mut(&self.name) {
             slot.awake = None;
         }
-        tracing::debug!(pair = %self.name, "the pair rests");
+        tracing::debug!(mind = %self.name, "the mind rests");
         true
     }
 
@@ -244,29 +231,16 @@ impl Task {
                     }
                 }
             }
-            Command::Attach { hello, link } => {
-                if let Some(old) = self.link.replace(link) {
-                    let _ = old.outbound.send(Outgoing::Close(Refusal::Replaced));
-                }
-                tracing::info!(pair = %self.name, boot = %hello.boot, last_id = hello.last_id, "the hand attached");
-                let outputs = self.mind.attach(&hello);
-                self.perform(outputs).await?;
-            }
-            Command::FromHand { link, message } if self.is_current(link) => match message {
-                FromHand::Result(result) => {
-                    let outputs = self.mind.result(result);
-                    self.perform(outputs).await?;
-                }
-                FromHand::Refused(refused) => {
-                    tracing::warn!(pair = %self.name, call = refused.id, reason = %refused.reason, "the hand refused a call");
-                    self.drop_link(Refusal::Protocol);
-                }
-                FromHand::Hello(_) => self.drop_link(Refusal::Protocol),
-            },
-            Command::Detached { link } if self.is_current(link) => {
-                tracing::info!(pair = %self.name, "the hand detached");
-                self.link = None;
-                self.mind.detach();
+            Command::Attach { hello, link } => self.attach(&hello, link).await?,
+            Command::FromHand {
+                hand,
+                link,
+                message,
+            } if self.is_current(&hand, link) => self.heard(hand, message).await?,
+            Command::Detached { hand, link } if self.is_current(&hand, link) => {
+                tracing::info!(mind = %self.name, %hand, "a hand detached");
+                self.links.remove(&hand);
+                self.mind.detach(&hand);
             }
             Command::FromHand { .. } | Command::Detached { .. } => {}
             Command::Model { seen, result } => {
@@ -274,7 +248,7 @@ impl Task {
                 let outputs = match result {
                     Ok(reply) => self.mind.replied(seen, reply),
                     Err(error) => {
-                        tracing::warn!(pair = %self.name, %error, "the model could not be asked");
+                        tracing::warn!(mind = %self.name, %error, "the model could not be asked");
                         self.mind.failed(seen, error.to_string())
                     }
                 };
@@ -283,7 +257,7 @@ impl Task {
             Command::Interrupt => {
                 let outputs = self.mind.interrupt();
                 if !outputs.is_empty() {
-                    tracing::info!(pair = %self.name, "the turn was interrupted");
+                    tracing::info!(mind = %self.name, "the turn was interrupted");
                 }
                 // The request is given up, so its answer is not paid for
                 // in full. One that lands anyway is one the mind drops.
@@ -292,10 +266,21 @@ impl Task {
                 }
                 self.perform(outputs).await?;
             }
+            Command::Release { hand, reply } => match self.mind.release(&hand) {
+                Ok(outputs) => {
+                    tracing::info!(mind = %self.name, %hand, "a hand was released");
+                    self.perform(outputs).await?;
+                    let _ = reply.send(Ok(()));
+                }
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                }
+            },
             Command::Status { reply } => {
                 let status = Status {
                     state: self.mind.state(),
-                    attached: self.mind.is_attached(),
+                    hands: self.mind.connected(),
+                    waiting: self.mind.waiting(),
                     length: self.mind.length(),
                 };
                 let _ = reply.send(status);
@@ -307,30 +292,77 @@ impl Task {
         Ok(())
     }
 
-    fn is_current(&self, link: u64) -> bool {
-        self.link.as_ref().is_some_and(|current| current.id == link)
+    /// Joins a hand that said hello, or turns it away.
+    async fn attach(&mut self, hello: &Hello, link: Link) -> Result<(), StoreError> {
+        let hand = hello.hand.clone();
+        match self.mind.attach(hello) {
+            Ok(outputs) => {
+                if let Some(old) = self.links.insert(hand.clone(), link) {
+                    let _ = old.outbound.send(Outgoing::Close(Refusal::Replaced));
+                }
+                tracing::info!(mind = %self.name, %hand, boot = %hello.boot, last_id = hello.last_id, "a hand attached");
+                self.perform(outputs).await
+            }
+            Err(refusal) => {
+                tracing::info!(mind = %self.name, %hand, reason = refusal.reason(), "a hand was refused");
+                let _ = link.outbound.send(Outgoing::Close(refusal));
+                Ok(())
+            }
+        }
     }
 
-    /// Ends the current connection. The hand settles again when it redials.
-    fn drop_link(&mut self, refusal: Refusal) {
-        if let Some(link) = self.link.take() {
+    /// Takes a message from a connected hand.
+    async fn heard(&mut self, hand: Name, message: FromHand) -> Result<(), StoreError> {
+        match message {
+            FromHand::Result(result) => {
+                let outputs = self.mind.result(&hand, result);
+                self.perform(outputs).await?;
+            }
+            FromHand::Refused(refused) => {
+                tracing::warn!(mind = %self.name, %hand, call = refused.id, reason = %refused.reason, "a hand refused a call");
+                self.drop_link(&hand, Refusal::Protocol);
+            }
+            FromHand::Hello(_) => self.drop_link(&hand, Refusal::Protocol),
+        }
+        Ok(())
+    }
+
+    fn is_current(&self, hand: &Name, link: u64) -> bool {
+        self.links
+            .get(hand)
+            .is_some_and(|current| current.id == link)
+    }
+
+    /// Ends a hand's connection. The hand settles again when it redials.
+    fn drop_link(&mut self, hand: &Name, refusal: Refusal) {
+        if let Some(link) = self.links.remove(hand) {
             let _ = link.outbound.send(Outgoing::Close(refusal));
         }
-        self.mind.detach();
+        self.mind.detach(hand);
     }
 
-    /// Performs a mind's outputs in order. Items are stored before the
-    /// output that follows them is performed.
+    /// Performs a mind's outputs in order. Items are stored, and children
+    /// made, before the output that follows them is performed.
     async fn perform(&mut self, outputs: Vec<Output>) -> Result<(), StoreError> {
         let mut items = Vec::new();
         for output in outputs {
             match output {
                 Output::Append(item) => items.push(item),
-                Output::Send(message) => {
+                Output::Send { hand, message } => {
                     self.store(&mut items).await?;
-                    if let Some(link) = &self.link {
+                    if let Some(link) = self.links.get(&hand) {
                         let _ = link.outbound.send(Outgoing::Message(message));
                     }
+                }
+                Output::Close { hand, refusal } => {
+                    self.store(&mut items).await?;
+                    if let Some(link) = self.links.remove(&hand) {
+                        let _ = link.outbound.send(Outgoing::Close(refusal));
+                    }
+                }
+                Output::Fork(fork) => {
+                    self.store(&mut items).await?;
+                    self.fork(fork).await?;
                 }
                 Output::Ask(request) => {
                     self.store(&mut items).await?;
@@ -339,6 +371,33 @@ impl Task {
             }
         }
         self.store(&mut items).await
+    }
+
+    /// Makes a child mind, in one write with its first items, and adds it
+    /// to the host's minds, resting. A child the store already has with
+    /// this origin was made before a stop, and is the one made.
+    async fn fork(&mut self, fork: Fork) -> Result<(), StoreError> {
+        let Fork {
+            name,
+            parent,
+            inherited,
+            items,
+        } = fork;
+        let record = MindRecord {
+            name: name.clone(),
+            origin: Origin::Fork { parent, inherited },
+        };
+        let (store, made) = (Arc::clone(&self.store), record.clone());
+        blocking(move || store.create(&made, &items)).await?;
+        tracing::info!(mind = %self.name, child = %name, inherited, "a child mind was made");
+        if let Some(host) = self.host.upgrade() {
+            let mut minds = host.minds.lock().await;
+            minds.entry(name).or_insert(Slot {
+                record,
+                awake: None,
+            });
+        }
+        Ok(())
     }
 
     /// Appends `items` to the history, and returns once they are stored.
@@ -353,7 +412,7 @@ impl Task {
         Ok(())
     }
 
-    /// Asks the model on a task of its own. Those following the pair are
+    /// Asks the model on a task of its own. Those following the mind are
     /// told what it writes, unless it writes a summary, which is no reply.
     fn ask(&mut self, request: ModelRequest) {
         let model = Arc::clone(&self.model);

@@ -1,10 +1,11 @@
-# Protocol v1
+# Protocol
 
-What a mind and a hand say to each other. `mensor-protocol` implements it.
+What a mind and its hands say to each other. `mensor-protocol` implements it.
 
-The protocol joins one mind to one hand and keeps nothing itself. Every
-guarantee comes from what the two ends remember: the mind its history, the
-hand the ids it has read and the results it holds.
+A mind has several hands, and each is joined to it by a connection of its
+own. The protocol is what one hand and its mind say over theirs, and keeps
+nothing itself. Every guarantee comes from what the two ends remember: the
+mind its history, the hand the ids it has read and the results it holds.
 
 ## Transport
 
@@ -15,7 +16,7 @@ hand the ids it has read and the results it holds.
   section does not apply to it.
 - A host with a token requires `Authorization: Bearer <token>` on the
   upgrade, and answers 401 without it.
-- One connection per name. A newer one replaces the older.
+- One connection per mind and hand. A newer one replaces the older.
 - Each message is one JSON object with a `type`. Fields are camelCase. A
   field a reader does not know is ignored.
 - The hand speaks first, with a `hello`, within 10 s. The mind sends nothing
@@ -27,20 +28,22 @@ hand the ids it has read and the results it holds.
 **`hello`**, first on every connection:
 
 ```json
-{"type":"hello","v":1,"name":"b7","was":"a1","boot":"9f3c2a…","lastId":41,
+{"type":"hello","mind":"m","hand":"a1","boot":"9f3c2a…","lastId":41,
  "running":[41],"held":[{"id":40,"output":"…"}],"capabilities":[…]}
 ```
 
 | Field | Meaning |
 | --- | --- |
-| `v` | The protocol version. A host refuses another before it reads the rest. |
-| `name` | The hand's name: 1 to 64 letters, digits, `-`, `_` or `.`, starting with a letter or digit. |
-| `was` | The name the hand had before it was cloned and fed this one. |
-| `boot` | Random per hand process. A clone made with its memory keeps it. A hand that restarted has a new one and remembers no earlier call. |
+| `mind` | The mind the hand joins. |
+| `hand` | The hand's name, unique within its mind. |
+| `boot` | Random per hand process. A hand that restarted has a new one and remembers no earlier call. |
 | `lastId` | The highest call id the hand has read, or 0. |
 | `running` | The calls still running. |
 | `held` | The results not yet acked, oldest first. |
 | `capabilities` | What the hand can do: each a `name` and its `operations`, each of those a `name`, a `description` and the JSON Schema of its `input`. |
+
+A name is 1 to 64 letters, digits, `-`, `_` or `.`, starting with a letter
+or digit.
 
 **`result`**, a call finished. It carries `output`, any JSON the operation
 returned, or `error`, a string:
@@ -70,11 +73,14 @@ hand may forget them.
 
 ## Delivery
 
-- **At most once.** The mind stores a call before it sends it, under ids that
-  only grow. The hand starts a call only if its id is above `lastId`.
+- **At most once.** The mind stores a call before it sends it, under ids
+  that only grow. One mind numbers the calls of all its hands, so each hand
+  sees ids that rise. The hand starts a call only if its id is above
+  `lastId`.
 - **At least once.** The hand sends a result when its call ends, if it is
   connected, and repeats it in every hello until it is acked. The mind stores
-  the first result for a call and only acks any other.
+  the first result for a call, taken from the hand it was sent to, and only
+  acks any other.
 - **Calls outlive connections.** A dropped connection stops nothing. The hand
   dials again, waiting 100 ms and doubling up to 5 s, each wait cut by a
   random part.
@@ -84,11 +90,11 @@ hand may forget them.
 
 ## Settling a hello
 
-`pending` is every call in the mind's history with no outcome yet.
+`pending` is every call the mind sent this hand that has no outcome yet.
 
-1. **The boot changed** from the one the mind last stored: the hand restarted
-   and remembers none of the pending calls. Each may have run, so each is
-   recorded as unknown, and nothing is sent again.
+1. **The boot changed** from the one the mind last stored for this hand: the
+   hand restarted and remembers none of the pending calls. Each may have
+   run, so each is recorded as unknown, and nothing is sent again.
 2. Otherwise, for each pending call, the first row that matches:
 
    | The pending call is… | The mind |
@@ -103,34 +109,42 @@ hand may forget them.
 An unknown outcome reaches the model as an error that says the call may have
 run, and to check the current state before running it again.
 
-## Names, clones and forks
+A call is sent only to a hand that is connected. One the model asks of a
+hand that is away waits, unsent, until the hand says hello, and an interrupt
+meanwhile ends it as not run.
 
-A host decides what a hello means from its `name` and `was`:
+## Minds and names
 
-| The name is… | The host |
+A host decides what a hello means from its `mind`:
+
+| The mind is… | The host |
 | --- | --- |
-| one it knows | attaches the connection to that pair, and settles it |
-| new, with no `was` | starts a pair with an empty history |
-| new, with a `was` it knows | forks that pair's mind for the clone |
-| new, with a `was` it does not know | refuses for now: the original may yet attach |
+| one it knows | gives it the hand: a hand it knows is reconnecting, a new one joins |
+| new, with no `.` in its name | starts it, with an empty history |
+| new, with a `.` in its name | refuses for now: it is a fork's child, not made yet |
 
-Whoever copies a hand must feed the copy a new name. A copy that dials under
-the old name is a reconnect, and takes the original's place.
+A mind refuses a hand it has released, and a new one once it has all the
+hands it may.
 
-A forked mind shares its parent's history up to a point the clone's hello
-fixes:
+A mind makes its children itself, when its model forks. It asks one of its
+hands to clone itself with a `call` to the hand's `clone` capability:
 
-- **The clone kept its memory** (its `boot` is one the history records). It
-  shares everything up to the call `lastId` names. If the clone had finished
-  with that call (it neither runs it nor holds its result), it also shares
-  what followed, up to the next call or the next boot. If it has read no call,
-  it shares everything before the first call made since its boot.
-- **The clone remembers nothing** (its `boot` is new). It shares everything,
-  and every pending call settles as unknown.
+```json
+{"type":"call","id":43,"capability":"clone","operation":"clone",
+ "input":{"into":[{"mind":"m.k3x9q2ab","hand":"a1"},{"mind":"m.p8d1rx0q","hand":"a1"}]}}
+```
 
-Then, in the new mind: tool uses that had not yet become calls are recorded
-as not run, a `paused` item is stored, and the hello is settled as above. The
-mind asks no model until it is prompted.
+The hand copies itself once for each target and starts a hand on each copy,
+which says hello to that mind under that name. Every copy is made or none.
+When the result is an output, the host makes each child, sharing its
+parent's history up to that call, and only then stores the fork. A clone
+that dialled before its child was made was refused for now, and dials
+again. A child's name is its parent's root, the part before the first `.`,
+and a code: no longer than 64 bytes at any depth, so a mind that starts
+from nothing has a name of at most 55 bytes.
+
+A `clone` into the hand's own mind, under a new name, makes another hand of
+that mind: the mind's `clone_hand`.
 
 ## Refusals
 
@@ -140,11 +154,11 @@ A hand dials again only after one that is not final.
 | Code | Meaning | Final |
 | --- | --- | --- |
 | 4000 | The hand sent something the protocol does not define | yes |
-| 4001 | The hand speaks another version | yes |
-| 4002 | The lineage has all the clones it may | yes |
-| 4003 | `was` names a hand the host does not know | no |
-| 4004 | A newer connection has this name | yes |
-| 4005 | Not a clone of the hand it names: it has read a call that hand's mind never made | yes |
+| 4001 | The mind has all the hands it may | yes |
+| 4002 | The mind is a fork's child that is not made yet | no: the hand dials again, and gives up after 2 minutes |
+| 4003 | A newer connection has this mind and hand | yes |
+| 4004 | The mind released this hand | yes: the hand's process ends |
+| 4005 | A new mind's name has a `.`, or is longer than 55 bytes | yes |
 
 ## Limits
 
@@ -152,4 +166,4 @@ A hand dials again only after one that is not final.
 | --- | --- |
 | One message | 16 MiB |
 | Held results | 16 MiB less 64 KiB, as written in messages |
-| A name | 64 bytes |
+| A name | 64 bytes, and 55 for a mind that starts from nothing |

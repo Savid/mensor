@@ -27,7 +27,7 @@ mensor-mind-host.workspace = true
 mensor-model.workspace = true
 mensor-protocol.workspace = true
 mensor-store-sqlite.workspace = true
-tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
+tokio = { workspace = true, features = ["macros", "net", "process", "rt-multi-thread", "signal", "time"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

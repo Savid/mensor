@@ -1,5 +1,5 @@
-# mensor on Cloudflare Workers. Each pair is one Durable Object: its mind,
-# its hand and its files, in the object's own SQLite database.
+# mensor on Cloudflare Workers. Each mind is one Durable Object: its history,
+# its one hand and the hand's files, in the object's own SQLite database.
 name = "mensor"
 main = "build/index.js"
 compatibility_date = "2026-10-01"
@@ -8,12 +8,12 @@ compatibility_date = "2026-10-01"
 command = "worker-build --release"
 
 [[durable_objects.bindings]]
-name = "PAIRS"
-class_name = "Pair"
+name = "MINDS"
+class_name = "Mind"
 
 [[migrations]]
 tag = "v1"
-new_sqlite_classes = ["Pair"]
+new_sqlite_classes = ["Mind"]
 
 [vars]
 # The model every mind asks.

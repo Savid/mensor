@@ -8,7 +8,8 @@
 //!
 //! This crate is pure: no I/O, no clock and no randomness.
 
-use mensor_mind::{Item, Pair, State};
+use mensor_mind::{Item, MindRecord, State};
+use mensor_protocol::Name;
 use serde::{Deserialize, Serialize};
 
 /// A refusal, as RFC 9457 problem details.
@@ -71,18 +72,27 @@ pub struct PromptReply {
     pub status: Prompted,
 }
 
-/// A pair and what it is doing: the answer to `GET /v1/minds/{name}`.
+/// A mind and what it is doing: the answer to `GET /v1/minds/{name}`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct MindStatus {
-    /// The pair and where its history begins.
+    /// The mind and where its history begins.
     #[serde(flatten)]
-    pub pair: Pair,
-    /// What its mind is doing.
+    pub mind: MindRecord,
+    /// What it is doing.
     pub state: State,
-    /// Whether its hand is connected.
-    pub attached: bool,
+    /// Its hands that are connected.
+    pub hands: Vec<Name>,
+    /// The hands its turn waits for, because they are not connected.
+    pub waiting: Vec<Name>,
     /// How many items its history holds.
     pub length: u64,
+}
+
+/// The body of `POST /v1/minds/{name}/release`.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct ReleaseBody {
+    /// The hand to let go.
+    pub hand: Name,
 }
 
 /// The most items one answer to `GET /v1/minds/{name}/history` holds. A
@@ -146,7 +156,6 @@ pub fn authorized(token: &str, authorization: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use mensor_mind::Origin;
-    use mensor_protocol::Name;
     use serde_json::json;
 
     use super::*;
@@ -154,17 +163,19 @@ mod tests {
     #[test]
     fn answers_are_written_as_a_client_reads_them() {
         let status = MindStatus {
-            pair: Pair {
-                name: Name::new("a1").unwrap(),
+            mind: MindRecord {
+                name: Name::new("m").unwrap(),
                 origin: Origin::Root,
             },
-            state: State::Thinking,
-            attached: true,
+            state: State::Working,
+            hands: vec![Name::new("a1").unwrap()],
+            waiting: vec![Name::new("b2").unwrap()],
             length: 3,
         };
         assert_eq!(
             serde_json::to_value(status).unwrap(),
-            json!({"name": "a1", "origin": "root", "state": "thinking", "attached": true, "length": 3})
+            json!({"name": "m", "origin": "root", "state": "working", "hands": ["a1"],
+                   "waiting": ["b2"], "length": 3})
         );
         let reply = PromptReply {
             status: Prompted::Accepted,
@@ -178,8 +189,8 @@ mod tests {
             (202, 200)
         );
         assert_eq!(
-            serde_json::to_value(Problem::new(404, "no pair is named a1")).unwrap(),
-            json!({"status": 404, "detail": "no pair is named a1"})
+            serde_json::to_value(Problem::new(404, "no mind is named m")).unwrap(),
+            json!({"status": 404, "detail": "no mind is named m"})
         );
         let writing = Writing {
             at: 5,

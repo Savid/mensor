@@ -2,7 +2,7 @@ use std::collections::{BTreeSet, VecDeque};
 
 use mensor_protocol::{
     Call, CallId, CallResult, CapabilityDecl, FromHand, FromMind, Hello, MAX_FRAME_BYTES, Name,
-    Refused, Reply, VERSION,
+    Refused, Reply,
 };
 use serde::{Deserialize, Serialize};
 
@@ -40,8 +40,8 @@ pub enum Effect {
 /// wherever it keeps anything else.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Core {
-    name: Name,
-    was: Option<Name>,
+    mind: Name,
+    hand: Name,
     boot: String,
     last_id: CallId,
     running: BTreeSet<CallId>,
@@ -57,15 +57,15 @@ struct Held {
 }
 
 impl Core {
-    /// A hand that has read no call.
+    /// The hand `hand` of the mind `mind`, which has read no call.
     ///
     /// `boot` is random per hand process: a host draws a new one each time it
     /// starts a hand from nothing, and keeps the old one when it restores a
     /// hand with everything it remembered.
-    pub fn new(name: Name, boot: impl Into<String>, limits: Limits) -> Self {
+    pub fn new(mind: Name, hand: Name, boot: impl Into<String>, limits: Limits) -> Self {
         Self {
-            name,
-            was: None,
+            mind,
+            hand,
             boot: boot.into(),
             last_id: 0,
             running: BTreeSet::new(),
@@ -75,14 +75,14 @@ impl Core {
         }
     }
 
-    /// The hand's name.
-    pub fn name(&self) -> &Name {
-        &self.name
+    /// The mind this hand joins.
+    pub fn mind(&self) -> &Name {
+        &self.mind
     }
 
-    /// The name this hand had before it was last cloned.
-    pub fn was(&self) -> Option<&Name> {
-        self.was.as_ref()
+    /// The hand's name in its mind.
+    pub fn hand(&self) -> &Name {
+        &self.hand
     }
 
     /// The highest call id this hand has read.
@@ -95,24 +95,11 @@ impl Core {
         self.running.iter().copied()
     }
 
-    /// Feeds this hand a new name, because it is a clone.
-    ///
-    /// Whoever copies a hand must feed the copy a name no other hand has. A
-    /// copy that connects under the old name is indistinguishable from the
-    /// original reconnecting, and the latest connection wins. The hand
-    /// remembers the name it had, which its `hello` reports as `was`.
-    pub fn rename(&mut self, name: Name) {
-        if name != self.name {
-            self.was = Some(std::mem::replace(&mut self.name, name));
-        }
-    }
-
     /// The first message of a connection.
     pub fn hello(&self, capabilities: Vec<CapabilityDecl>) -> Hello {
         Hello {
-            v: VERSION,
-            name: self.name.clone(),
-            was: self.was.clone(),
+            mind: self.mind.clone(),
+            hand: self.hand.clone(),
             boot: self.boot.clone(),
             last_id: self.last_id,
             running: self.running.iter().copied().collect(),
@@ -213,8 +200,12 @@ mod tests {
 
     use super::*;
 
+    fn name(name: &str) -> Name {
+        Name::new(name).unwrap()
+    }
+
     fn core() -> Core {
-        Core::new(Name::new("a1").unwrap(), "boot-1", Limits::default())
+        Core::new(name("m"), name("a1"), "boot-1", Limits::default())
     }
 
     fn call(id: CallId) -> Call {
@@ -236,9 +227,9 @@ mod tests {
     #[test]
     fn a_new_hand_has_read_nothing() {
         let hello = core().hello(Vec::new());
-        assert_eq!((hello.v, hello.last_id), (VERSION, 0));
-        assert_eq!(hello.boot, "boot-1");
-        assert!(hello.was.is_none() && hello.running.is_empty() && hello.held.is_empty());
+        assert_eq!((hello.mind, hello.hand), (name("m"), name("a1")));
+        assert_eq!((hello.boot.as_str(), hello.last_id), ("boot-1", 0));
+        assert!(hello.running.is_empty() && hello.held.is_empty());
     }
 
     #[test]
@@ -289,26 +280,10 @@ mod tests {
     }
 
     #[test]
-    fn a_clone_remembers_the_name_it_had() {
-        let mut clone = core();
-        start(&mut clone, 1);
-        clone.rename(Name::new("b7").unwrap());
-        let hello = clone.hello(Vec::new());
-        assert_eq!(hello.name.as_str(), "b7");
-        assert_eq!(hello.was.as_ref().map(Name::as_str), Some("a1"));
-        assert_eq!(
-            (hello.boot.as_str(), hello.last_id, hello.running),
-            ("boot-1", 1, vec![1])
-        );
-
-        clone.rename(Name::new("b7").unwrap());
-        assert_eq!(clone.was().map(Name::as_str), Some("a1"));
-    }
-
-    #[test]
     fn the_oldest_results_go_when_the_hand_holds_too_much() {
         let mut core = Core::new(
-            Name::new("a1").unwrap(),
+            name("m"),
+            name("a1"),
             "boot-1",
             Limits {
                 max_held_bytes: 200,
@@ -326,7 +301,8 @@ mod tests {
     #[test]
     fn a_result_too_large_to_hold_becomes_an_error() {
         let mut core = Core::new(
-            Name::new("a1").unwrap(),
+            name("m"),
+            name("a1"),
             "boot-1",
             Limits {
                 max_held_bytes: 200,

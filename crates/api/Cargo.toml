@@ -10,10 +10,10 @@ repository.workspace = true
 
 [dependencies]
 mensor-mind.workspace = true
+mensor-protocol.workspace = true
 serde.workspace = true
 
 [dev-dependencies]
-mensor-protocol.workspace = true
 serde_json.workspace = true
 
 [lints]

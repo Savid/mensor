@@ -13,10 +13,10 @@ use axum::{Json, Router};
 use futures_util::stream::{self, Stream};
 use futures_util::{SinkExt, StreamExt};
 use mensor_api::{
-    History, MindStatus, PAGE, Problem, PromptBody, PromptReply, Writing, authorized,
+    History, MindStatus, PAGE, Problem, PromptBody, PromptReply, ReleaseBody, Writing, authorized,
 };
 use mensor_mind::{Item, StoreError};
-use mensor_protocol::{FromHand, Hello, MAX_FRAME_BYTES, Name, Refusal, VERSION, version_of};
+use mensor_protocol::{FromHand, Hello, MAX_FRAME_BYTES, Name, Refusal};
 use serde::Deserialize;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::time::timeout;
@@ -29,10 +29,11 @@ impl Host {
     pub fn router(&self) -> Router {
         Router::new()
             .route("/v1/attach", get(attach))
-            .route("/v1/minds", get(pairs))
-            .route("/v1/minds/{name}", get(pair))
+            .route("/v1/minds", get(minds))
+            .route("/v1/minds/{name}", get(mind))
             .route("/v1/minds/{name}/prompt", post(prompt))
             .route("/v1/minds/{name}/interrupt", post(interrupt))
+            .route("/v1/minds/{name}/release", post(release))
             .route("/v1/minds/{name}/history", get(history))
             .route("/v1/minds/{name}/events", get(events))
             .layer(middleware::from_fn_with_state(self.clone(), guard))
@@ -53,7 +54,7 @@ fn problem(status: StatusCode, detail: impl Into<String>) -> Response {
 impl IntoResponse for HostError {
     fn into_response(self) -> Response {
         let status = match &self {
-            Self::Missing(_) | Self::Name(_) => StatusCode::NOT_FOUND,
+            Self::Missing(_) | Self::Name(_) | Self::NoHand(_) => StatusCode::NOT_FOUND,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::Stopped(_) | Self::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
@@ -79,15 +80,15 @@ async fn guard(State(host): State<Host>, request: Request, next: Next) -> Respon
     next.run(request).await
 }
 
-async fn pairs(State(host): State<Host>) -> Json<Vec<MindStatus>> {
-    Json(host.pairs().await)
+async fn minds(State(host): State<Host>) -> Json<Vec<MindStatus>> {
+    Json(host.minds().await)
 }
 
-async fn pair(
+async fn mind(
     State(host): State<Host>,
     Path(name): Path<String>,
 ) -> Result<Json<MindStatus>, HostError> {
-    Ok(Json(host.pair(&Name::new(name)?).await?))
+    Ok(Json(host.mind(&Name::new(name)?).await?))
 }
 
 async fn prompt(
@@ -107,6 +108,14 @@ async fn interrupt(
     Ok(Json(host.interrupt(&Name::new(name)?).await?))
 }
 
+async fn release(
+    State(host): State<Host>,
+    Path(name): Path<String>,
+    Json(body): Json<ReleaseBody>,
+) -> Result<Json<MindStatus>, HostError> {
+    Ok(Json(host.release(&Name::new(name)?, body.hand).await?))
+}
+
 #[derive(Deserialize)]
 struct Cursor {
     #[serde(default)]
@@ -122,7 +131,7 @@ async fn history(
     Ok(Json(History::from(cursor.after, &items)).into_response())
 }
 
-/// Reads a pair's history off the runtime's own threads, because a store
+/// Reads a mind's history off the runtime's own threads, because a store
 /// may wait on a disk.
 async fn read(host: &Host, name: &Name, from: u64) -> Result<Vec<Item>, HostError> {
     let (host, name) = (host.clone(), name.clone());
@@ -130,7 +139,7 @@ async fn read(host: &Host, name: &Name, from: u64) -> Result<Vec<Item>, HostErro
     read.unwrap_or_else(|error| Err(HostError::Store(StoreError::Backend(error.to_string()))))
 }
 
-/// A pair's history as server-sent events: every item from the cursor, then
+/// A mind's history as server-sent events: every item from the cursor, then
 /// each new one as it is stored. An event's id is its item's index, so a
 /// client that reconnects resumes with `after` set to the last id plus one.
 ///
@@ -207,7 +216,7 @@ async fn serve(host: Host, mut socket: WebSocket) {
             return close(socket, refusal.code(), "no hello in time").await;
         }
     };
-    let name = hello.name.clone();
+    let (mind, hand) = (hello.mind.clone(), hello.hand.clone());
     let mut connection = match host.connect(hello).await {
         Ok(connection) => connection,
         Err(Rejected::Refused(refusal)) => {
@@ -241,7 +250,7 @@ async fn serve(host: Host, mut socket: WebSocket) {
                         }
                     }
                     Err(error) => {
-                        tracing::warn!(hand = %name, %error, "a hand sent what the protocol does not define");
+                        tracing::warn!(%mind, %hand, %error, "a hand sent what the protocol does not define");
                         let refusal = Refusal::Protocol;
                         let frame = CloseFrame { code: refusal.code(), reason: refusal.reason().into() };
                         let _ = sink.send(Message::Close(Some(frame))).await;
@@ -255,19 +264,14 @@ async fn serve(host: Host, mut socket: WebSocket) {
     }
 }
 
-/// Reads a connection's first message, which must be a `hello` of this
-/// version.
+/// Reads a connection's first message, which must be a `hello`.
 async fn hello(socket: &mut WebSocket) -> Result<Hello, Refusal> {
     loop {
         match socket.recv().await {
             Some(Ok(Message::Text(text))) => {
-                return match version_of(&text) {
-                    Some(VERSION) => match FromHand::decode(&text) {
-                        Ok(FromHand::Hello(hello)) => Ok(*hello),
-                        _ => Err(Refusal::Protocol),
-                    },
-                    Some(_) => Err(Refusal::Version),
-                    None => Err(Refusal::Protocol),
+                return match FromHand::decode(&text) {
+                    Ok(FromHand::Hello(hello)) => Ok(*hello),
+                    _ => Err(Refusal::Protocol),
                 };
             }
             Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}

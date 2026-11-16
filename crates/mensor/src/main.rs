@@ -3,11 +3,10 @@
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
-use mensor::hand::{Does, Hand, alive};
+use mensor::hand::{Does, Hand};
 use mensor::host::{Hosting, open};
-use mensor::local::Local;
-use mensor_hand::{Core, Limits};
-use mensor_hand_host::boot;
+use mensor::local::InProcess;
+use mensor::stopped;
 use mensor_protocol::Name;
 
 #[derive(Parser)]
@@ -27,11 +26,11 @@ enum Command {
     Serve(Hosting),
     /// Run a hand on this machine, and dial a mind's host.
     Hand(Hand),
-    /// Host minds and run one hand, in this one process.
+    /// Host minds and run one hand, named `local`, in this one process.
     ///
     /// The hand's commands run on this machine as this user, beside a
     /// process that holds the model's credentials. Use it on a machine you
-    /// trust the model with.
+    /// trust the model with. Its clones run in this process too.
     Run(Run),
 }
 
@@ -39,9 +38,9 @@ enum Command {
 struct Run {
     #[command(flatten)]
     host: Hosting,
-    /// The hand's name, and so the pair's.
-    #[arg(long, default_value = "local")]
-    name: Name,
+    /// The mind the hand joins.
+    #[arg(long, default_value = "main")]
+    mind: Name,
     #[command(flatten)]
     does: Does,
 }
@@ -56,15 +55,20 @@ async fn main() -> ExitCode {
     })
 }
 
+/// Serves until the process is asked to stop. The hand may end before
+/// then, when its mind lets it go, and the host serves on.
 async fn run(run: Run) -> Result<(), String> {
-    let capabilities = run.does.capabilities()?;
     let (host, listener) = open(run.host).await?;
-    let core = Core::new(run.name, boot(), Limits::default());
-    let dial = Local::new(host.clone());
+    let hands = InProcess::new(host.clone(), run.does.clone());
+    let local = Name::new("local").map_err(|error| error.to_string())?;
+    let hand = hands.start(run.mind, local, &run.does)?;
     tokio::select! {
         served = host.serve(listener, std::future::pending()) => {
             served.map_err(|error| format!("the host stopped: {error}"))
         }
-        ended = alive(core, dial, capabilities, None) => ended,
+        () = stopped() => {
+            hand.stop();
+            Ok(())
+        }
     }
 }

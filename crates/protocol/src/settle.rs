@@ -29,9 +29,9 @@ pub struct Plan {
 
 /// Settles a connection.
 ///
-/// One rule covers a first connection, a reconnect and a clone. `recorded` is
-/// the boot the mind last stored, and `pending` the calls in its history with
-/// no result yet.
+/// One rule covers a hand's first connection and every reconnect. `recorded`
+/// is the boot the mind last stored for this hand, and `pending` the calls it
+/// sent this hand that have no result yet.
 ///
 /// 1. The boot changed: the hand restarted and remembers none of the pending
 ///    calls. Each may have run, so each is [`Settled::Unknown`].
@@ -72,13 +72,12 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::{CallResult, Name, VERSION};
+    use crate::{CallResult, Name};
 
     fn hello(boot: &str, last_id: CallId, running: &[CallId], held: &[CallId]) -> Hello {
         Hello {
-            v: VERSION,
-            name: Name::new("a1").unwrap(),
-            was: None,
+            mind: Name::new("m").unwrap(),
+            hand: Name::new("a1").unwrap(),
             boot: boot.into(),
             last_id,
             running: running.to_vec(),
@@ -138,7 +137,7 @@ mod tests {
     }
 
     #[test]
-    fn a_restarted_bodys_results_are_acked_but_not_taken() {
+    fn a_restarted_hands_results_are_acked_but_not_taken() {
         let plan = settle(Some("b1"), &[1], &hello("b2", 1, &[], &[1]));
         assert_eq!(plan.calls, vec![(1, Settled::Unknown)]);
         assert_eq!(plan.ack, vec![1]);

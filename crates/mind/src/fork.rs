@@ -1,247 +1,92 @@
-use mensor_protocol::{CallId, Hello};
+//! What a fork makes: its children's names, their shares of the fork
+//! budget, and the first items of each.
 
-use crate::{Item, Mind, Outcome, Output, Settings};
+use mensor_protocol::{CallId, Name};
 
-/// A mind made for a cloned hand.
-#[derive(Clone, Debug)]
+use crate::Item;
+
+/// A child mind for the host to make, before it performs anything after.
+///
+/// The child shares the first `inherited` items of its parent's history,
+/// which end with the call that cloned its hand, and starts with `items` of
+/// its own. A host that makes a child it already made, because it stopped
+/// before the parent stored the fork, finds it made.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Fork {
-    /// How many of the parent's items the new mind shares. Its own items
-    /// follow from this index.
+    /// The child's name.
+    pub name: Name,
+    /// Its parent.
+    pub parent: Name,
+    /// How many of the parent's items it shares.
     pub inherited: u64,
-    /// The new mind, already attached to its hand.
-    pub mind: Mind,
-    /// What the new mind's host must do, starting with the first items of
-    /// its own.
-    pub outputs: Vec<Output>,
+    /// Its first items of its own.
+    pub items: Vec<Item>,
 }
 
-/// Why a mind could not fork.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum ForkError {
-    /// The clone has read a call its parent's mind never made, so it is not
-    /// a clone of that mind's hand.
-    #[error("the clone has read call {0}, which this mind never made")]
-    UnknownCall(CallId),
+/// The name of child `index` of a fork by the call `call` of the mind
+/// `parent`: `<root>.<code>`, where `<root>` is `parent` up to its first `.`
+/// and `<code>` eight base-32 characters of a hash of all three. The same
+/// fork names its children the same way every time, and a name stays the
+/// same length at any depth.
+pub(crate) fn child_name(parent: &Name, call: CallId, index: usize) -> Option<Name> {
+    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+    // FNV-1a, 64 bits: fixed, so a name never depends on a build.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let index = u64::try_from(index).unwrap_or(u64::MAX);
+    let bytes = parent.as_str().bytes().chain([0]);
+    for byte in bytes.chain(call.to_le_bytes()).chain(index.to_le_bytes()) {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let code: String = (0..8)
+        .map(|at| char::from(ALPHABET[usize::try_from((hash >> (at * 5)) & 31).unwrap_or(0)]))
+        .collect();
+    Name::new(format!("{}.{code}", parent.root())).ok()
 }
 
-/// Where a clone's history parts from its parent's.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Parting {
-    /// How many of the parent's items the clone shares.
-    pub cut: u64,
-    /// The index the clone's mind starts from: the one the last summary
-    /// they share names, or 0. The clone's mind is made from the parent's
-    /// items from here up to `cut`.
-    pub from: u64,
+/// How a mind with `left` forks shares what remains after it forks
+/// `children`: each child's share, and its own. What remains is split
+/// evenly between the mind and its children, the mind keeping what does not
+/// divide. `children` is at most `left`.
+pub(crate) fn shares(left: u64, children: u64) -> (u64, u64) {
+    let remains = left.saturating_sub(children);
+    let share = remains / (children + 1);
+    (share, remains - share * children)
 }
 
-/// Finds where a clone's history parts from its parent's.
-///
-/// A host reads the parent's history to it once, in order, a page at a
-/// time, so that a fork holds no more of a long history than one page.
-///
-/// A clone whose boot the history records kept its memory, and says how far
-/// it had read. Everything up to that call is shared. What follows the call
-/// is shared too, up to the next thing that touched the hand (the next
-/// call, or a new boot), unless the clone still runs the call or holds its
-/// result: then its own outcome may differ from the one the history holds,
-/// and nothing after the call is shared.
-///
-/// A clone whose boot is new remembers nothing, and shares everything.
-#[derive(Clone, Debug)]
-pub struct Cut {
-    boot: String,
-    last_id: CallId,
-    /// Whether the clone still runs the last call it read, or holds its
-    /// result.
-    with_clone: bool,
-    /// How many items have been read.
-    at: u64,
-    /// Where the history first records the clone's boot.
-    booted: Option<u64>,
-    /// Where the clone had read to: the last call it read, or its boot if
-    /// it had read none.
-    read: Option<u64>,
-    /// The next thing after that to touch the hand.
-    next: Option<u64>,
-    /// Each summary read: its index, and the index it names.
-    summaries: Vec<(u64, u64)>,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl Cut {
-    /// A search for where the hand that says `hello` parted from the one
-    /// it is a clone of.
-    pub fn new(hello: &Hello) -> Self {
-        let last = hello.last_id;
-        Self {
-            boot: hello.boot.clone(),
-            last_id: last,
-            with_clone: hello.running.contains(&last)
-                || hello.held.iter().any(|held| held.id == last),
-            at: 0,
-            booted: None,
-            read: None,
-            next: None,
-            summaries: Vec::new(),
-        }
+    fn name(name: &str) -> Name {
+        Name::new(name).unwrap()
     }
 
-    /// Takes the next items of the parent's history.
-    pub fn read(&mut self, items: &[Item]) {
-        for item in items {
-            let at = self.at;
-            self.at += 1;
-            match item {
-                Item::Attached { boot } if *boot == self.boot && self.booted.is_none() => {
-                    self.booted = Some(at);
-                    if self.last_id == 0 {
-                        self.read = Some(at);
-                        continue;
-                    }
-                }
-                Item::Call { id, .. } if *id == self.last_id && self.read.is_none() => {
-                    self.read = Some(at);
-                    continue;
-                }
-                Item::Summary { from, .. } => self.summaries.push((at, *from)),
-                _ => {}
-            }
-            let touches = matches!(item, Item::Call { .. } | Item::Attached { .. });
-            if touches && self.next.is_none() && self.read.is_some() {
-                self.next = Some(at);
-            }
-        }
+    #[test]
+    fn a_child_is_named_from_its_root_the_same_way_every_time() {
+        let first = child_name(&name("m"), 7, 0).unwrap();
+        assert_eq!(first, child_name(&name("m"), 7, 0).unwrap());
+        assert_ne!(first, child_name(&name("m"), 7, 1).unwrap());
+        assert_ne!(first, child_name(&name("m"), 8, 0).unwrap());
+        assert!(first.as_str().starts_with("m.") && first.as_str().len() == 10);
+
+        // A grandchild keeps the root and the length.
+        let grandchild = child_name(&first, 3, 0).unwrap();
+        assert!(grandchild.as_str().starts_with("m.") && grandchild.as_str().len() == 10);
+        assert_ne!(grandchild, first);
+
+        let longest = name(&"x".repeat(Name::ROOT_MAX_LEN));
+        assert_eq!(
+            child_name(&longest, 1, 0).unwrap().as_str().len(),
+            Name::MAX_LEN
+        );
     }
 
-    /// Where the two part, once the whole history has been read. An error
-    /// when the clone has read a call the history does not hold.
-    pub fn end(self) -> Result<Parting, ForkError> {
-        let cut = if self.booted.is_none() {
-            self.at
-        } else {
-            let read = self.read.ok_or(ForkError::UnknownCall(self.last_id))?;
-            if self.with_clone {
-                read + 1
-            } else {
-                self.next.unwrap_or(self.at)
-            }
-        };
-        let shared = self.summaries.iter().rev().find(|(at, _)| *at < cut);
-        Ok(Parting {
-            cut,
-            from: shared.map_or(0, |(_, from)| *from),
-        })
-    }
-}
-
-/// The mind for a clone of a hand, in the making.
-///
-/// It is made from the end of the history the clone shares. If the clone
-/// has lost calls its parent's hand went on to finish, a host then reads it
-/// the parent's later items, a page at a time, for how those calls ended.
-///
-/// Tool uses that had not yet become calls do not run. The new mind is then
-/// paused: it settles what its hand still holds or runs, and calls no model
-/// until it is prompted.
-#[derive(Clone, Debug)]
-pub struct Forking {
-    mind: Mind,
-    inherited: u64,
-    hello: Hello,
-    /// Whether the clone kept its memory: the history's last boot is its.
-    remembers: bool,
-    /// The calls the clone no longer has, each with its tool use, and how
-    /// the parent's history says it ended, once that is read.
-    lost: Vec<(CallId, String, Option<Outcome>)>,
-}
-
-impl Forking {
-    /// Starts the mind of the clone that says `hello`, from `shared`: its
-    /// parent's items from `parting.from` up to `parting.cut`.
-    pub fn new(parting: Parting, shared: Vec<Item>, settings: Settings, hello: &Hello) -> Self {
-        let mind = Mind::load(parting.from, shared, settings);
-        let remembers = mind.recorded_boot() == Some(hello.boot.as_str());
-        let with_clone = |id: &CallId| {
-            hello.running.contains(id) || hello.held.iter().any(|held| held.id == *id)
-        };
-        let lost = if remembers {
-            let pending = mind.pending().into_iter();
-            let lost = pending.filter(|(id, _)| !with_clone(id));
-            lost.map(|(id, tool_use)| (id, tool_use, None)).collect()
-        } else {
-            Vec::new()
-        };
-        Self {
-            mind,
-            inherited: parting.cut,
-            hello: hello.clone(),
-            remembers,
-            lost,
-        }
-    }
-
-    /// Whether the parent's items from `parting.cut` on are still wanted:
-    /// some call the clone has lost has no outcome yet.
-    pub fn wants(&self) -> bool {
-        self.lost.iter().any(|(_, _, outcome)| outcome.is_none())
-    }
-
-    /// Takes the next of the parent's later items.
-    pub fn later(&mut self, items: &[Item]) {
-        for item in items {
-            let Item::Outcome {
-                call: Some(call),
-                outcome,
-                ..
-            } = item
-            else {
-                continue;
-            };
-            let mut lost = self.lost.iter_mut();
-            if let Some((_, _, ended)) = lost.find(|(id, _, ended)| id == call && ended.is_none()) {
-                *ended = Some(outcome.clone());
-            }
-        }
-    }
-
-    /// The new mind, attached to its hand, and what its host must do.
-    pub fn end(self) -> Fork {
-        let mut mind = self.mind;
-        let mut outputs = Vec::new();
-        for (id, tool_use, outcome) in self.lost {
-            if let Some(outcome) = outcome {
-                let call = Some(id);
-                let item = Item::Outcome {
-                    tool_use,
-                    call,
-                    outcome,
-                };
-                mind.append(item, &mut outputs);
-            }
-        }
-        for tool_use in mind.unissued() {
-            let outcome = Outcome::NotRun("the mind was forked before this call started".into());
-            let item = Item::Outcome {
-                tool_use,
-                call: None,
-                outcome,
-            };
-            mind.append(item, &mut outputs);
-        }
-        let mut reason = match &self.hello.was {
-            Some(parent) => format!("forked from {parent}"),
-            None => "forked".into(),
-        };
-        if !self.remembers {
-            reason.push_str(", as a copy of its hand made without its memory");
-        }
-        mind.append(Item::Paused { reason }, &mut outputs);
-        outputs.extend(mind.attach(&self.hello));
-        mind.shed();
-        Fork {
-            inherited: self.inherited,
-            mind,
-            outputs,
-        }
+    #[test]
+    fn what_remains_of_a_budget_is_split_evenly() {
+        assert_eq!(shares(64, 2), (20, 22));
+        assert_eq!(shares(64, 1), (31, 32));
+        assert_eq!(shares(3, 3), (0, 0));
+        assert_eq!(shares(10, 8), (0, 2));
     }
 }

@@ -1,6 +1,6 @@
-//! A mind and its hand as one object.
+//! A mind and its one hand as one object.
 //!
-//! Some hosts keep a whole pair in one place: a serverless object that owns
+//! Some hosts keep a mind and a hand in one place: a serverless object that owns
 //! a small database and is woken to do a piece of work. There is no socket
 //! to speak the protocol over, and no second process to dial in, but the
 //! rules are the ones a server and a remote hand keep. An [`Object`] holds a
@@ -55,5 +55,5 @@ mod object;
 pub mod rows;
 mod storage;
 
-pub use object::{Model, Object, PromptError, Work, step};
+pub use object::{LOCAL, Model, Object, PromptError, Work, step};
 pub use storage::{MemoryStorage, Storage, StorageError, Stored};

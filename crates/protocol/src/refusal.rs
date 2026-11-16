@@ -1,4 +1,4 @@
-/// Why a mind's host ends a connection.
+/// Why a mind's host ends a hand's connection.
 ///
 /// Each refusal is a WebSocket close code in the range kept for applications,
 /// so a hand can tell a refusal that will never change from one worth another
@@ -7,39 +7,40 @@
 pub enum Refusal {
     /// The hand sent something the protocol does not define.
     Protocol,
-    /// The hand speaks another version of the protocol.
-    Version,
-    /// The lineage already has as many clones as it may.
+    /// The mind has all the hands it may.
     Limit,
-    /// The hand says it was cloned from a hand the host does not know.
-    UnknownParent,
-    /// A newer connection under the same name took this one's place.
+    /// The hand names a fork child that is not made yet.
+    UnknownMind,
+    /// A newer connection for the same mind and hand took this one's place.
     Replaced,
-    /// The hand is not a clone of the hand it names: it has read a call that
-    /// hand's mind never made.
-    Stranger,
+    /// The mind released this hand.
+    Released,
+    /// The hand names a mind that cannot be started: a new mind's name has
+    /// no `.` and is at most [`Name::ROOT_MAX_LEN`](crate::Name::ROOT_MAX_LEN)
+    /// bytes.
+    Name,
 }
 
 impl Refusal {
     /// Every refusal.
     pub const ALL: [Self; 6] = [
         Self::Protocol,
-        Self::Version,
         Self::Limit,
-        Self::UnknownParent,
+        Self::UnknownMind,
         Self::Replaced,
-        Self::Stranger,
+        Self::Released,
+        Self::Name,
     ];
 
     /// The WebSocket close code.
     pub const fn code(self) -> u16 {
         match self {
             Self::Protocol => 4000,
-            Self::Version => 4001,
-            Self::Limit => 4002,
-            Self::UnknownParent => 4003,
-            Self::Replaced => 4004,
-            Self::Stranger => 4005,
+            Self::Limit => 4001,
+            Self::UnknownMind => 4002,
+            Self::Replaced => 4003,
+            Self::Released => 4004,
+            Self::Name => 4005,
         }
     }
 
@@ -47,11 +48,11 @@ impl Refusal {
     pub const fn reason(self) -> &'static str {
         match self {
             Self::Protocol => "not a message of the protocol",
-            Self::Version => "another version of the protocol",
-            Self::Limit => "the lineage has all the clones it may",
-            Self::UnknownParent => "cloned from a hand this host does not know",
-            Self::Replaced => "a newer connection has this name",
-            Self::Stranger => "not a clone of the hand it names",
+            Self::Limit => "the mind has all the hands it may",
+            Self::UnknownMind => "no mind of that name yet",
+            Self::Replaced => "a newer connection has this mind and hand",
+            Self::Released => "the mind released this hand",
+            Self::Name => "a new mind's name has no '.' and is at most 55 bytes",
         }
     }
 
@@ -60,11 +61,11 @@ impl Refusal {
         Self::ALL.into_iter().find(|refusal| refusal.code() == code)
     }
 
-    /// Whether dialling again could end differently. The hand a clone was
-    /// made from may yet connect; the others stay as they are until someone
-    /// changes the hand or the host.
+    /// Whether dialling again could end differently. A fork child is made
+    /// once its parent stores the fork; the others stay as they are until
+    /// someone changes the hand or the host.
     pub const fn is_final(self) -> bool {
-        !matches!(self, Self::UnknownParent)
+        !matches!(self, Self::UnknownMind)
     }
 }
 
@@ -78,13 +79,14 @@ mod tests {
             assert!((4000..5000).contains(&refusal.code()));
             assert_eq!(Refusal::from_code(refusal.code()), Some(refusal));
         }
-        assert_eq!(Refusal::from_code(1000), None);
     }
 
     #[test]
-    fn only_an_unknown_parent_is_worth_another_dial() {
-        for refusal in Refusal::ALL {
-            assert_eq!(refusal.is_final(), refusal != Refusal::UnknownParent);
-        }
+    fn only_a_mind_not_made_yet_is_worth_another_try() {
+        let retried: Vec<_> = Refusal::ALL
+            .into_iter()
+            .filter(|refusal| !refusal.is_final())
+            .collect();
+        assert_eq!(retried, [Refusal::UnknownMind]);
     }
 }

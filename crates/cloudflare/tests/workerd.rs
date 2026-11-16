@@ -267,7 +267,7 @@ impl Worker {
     async fn up(&mut self, within: Duration) -> Result<(), String> {
         let deadline = Instant::now() + within;
         loop {
-            let answered = match self.http.get(self.pair("a1", "")).send().await {
+            let answered = match self.http.get(self.mind("a1", "")).send().await {
                 Ok(response) => {
                     let kind = response.headers().get("content-type").cloned();
                     let ours =
@@ -300,14 +300,14 @@ impl Worker {
         let _ = self.process.wait();
     }
 
-    fn pair(&self, pair: &str, rest: &str) -> String {
-        format!("{}/v1/minds/{pair}{rest}", self.url)
+    fn mind(&self, mind: &str, rest: &str) -> String {
+        format!("{}/v1/minds/{mind}{rest}", self.url)
     }
 
-    async fn prompt(&self, pair: &str, hand: Value) -> (StatusCode, Value) {
+    async fn prompt(&self, mind: &str, hand: Value) -> (StatusCode, Value) {
         let sent = self
             .http
-            .post(self.pair(pair, "/prompt"))
+            .post(self.mind(mind, "/prompt"))
             .bearer_auth(TOKEN)
             .json(&hand);
         let response = sent.send().await.unwrap();
@@ -319,28 +319,28 @@ impl Worker {
         )
     }
 
-    async fn interrupt(&self, pair: &str) -> (StatusCode, Value) {
+    async fn interrupt(&self, mind: &str) -> (StatusCode, Value) {
         let sent = self
             .http
-            .post(self.pair(pair, "/interrupt"))
+            .post(self.mind(mind, "/interrupt"))
             .bearer_auth(TOKEN);
         let response = sent.send().await.unwrap();
         (response.status(), response.json().await.unwrap())
     }
 
-    async fn get(&self, pair: &str, rest: &str) -> (StatusCode, Value) {
-        let sent = self.http.get(self.pair(pair, rest)).bearer_auth(TOKEN);
+    async fn get(&self, mind: &str, rest: &str) -> (StatusCode, Value) {
+        let sent = self.http.get(self.mind(mind, rest)).bearer_auth(TOKEN);
         let response = sent.send().await.unwrap();
         (response.status(), response.json().await.unwrap())
     }
 
-    async fn idle(&self, pair: &str) -> bool {
-        let (_, status) = self.get(pair, "").await;
+    async fn idle(&self, mind: &str) -> bool {
+        let (_, status) = self.get(mind, "").await;
         status["state"] == "idle"
     }
 
-    async fn history(&self, pair: &str) -> Vec<Value> {
-        let (_, history) = self.get(pair, "/history").await;
+    async fn history(&self, mind: &str) -> Vec<Value> {
+        let (_, history) = self.get(mind, "/history").await;
         history["items"].as_array().unwrap().clone()
     }
 }
@@ -431,12 +431,12 @@ fn told(request: &Value) -> Vec<(String, bool)> {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs Node and the built worker: run `make test-cloudflare`"]
-async fn a_pair_runs_whole_turns_inside_one_object() {
+async fn a_mind_runs_whole_turns_inside_one_object() {
     let directory = tempfile::tempdir().unwrap();
     let (model, model_url) = Model::serve().await;
     let worker = Worker::start(directory.path(), &model_url).await;
 
-    // A prompt starts the pair. The model writes a file through the hand.
+    // A prompt starts the mind. The model writes a file through the hand.
     let haiku = json!({"path": "notes/haiku.txt", "content": "an old pond\n"});
     model
         .then(uses("tu_1", "write", &haiku))
@@ -492,14 +492,14 @@ async fn a_pair_runs_whole_turns_inside_one_object() {
     assert_eq!(outcome(&items, "tu_2"), &json!({"output": "an old pond\n"}));
     assert_eq!(outcome(&items, "tu_3"), &json!({"output": "haiku.txt"}));
 
-    // Another pair is another object, with a database of its own.
+    // Another mind is another object, with a database of its own.
     model
         .then(uses("tu_4", "list", &json!({})))
         .then(text("Nothing here."));
     worker
         .prompt("b2", json!({"text": "What files are there?"}))
         .await;
-    eventually("the other pair's turn ends", || async {
+    eventually("the other mind's turn ends", || async {
         worker.idle("b2").await && worker.history("b2").await.len() == 6
     })
     .await;
@@ -516,8 +516,8 @@ async fn the_api_is_the_one_a_server_has() {
     let (model, model_url) = Model::serve().await;
     let worker = Worker::start(directory.path(), &model_url).await;
 
-    // Nothing is served without the token, and no pair exists unprompted.
-    let unauthorized = worker.http.get(worker.pair("a1", "")).send().await.unwrap();
+    // Nothing is served without the token, and no mind exists unprompted.
+    let unauthorized = worker.http.get(worker.mind("a1", "")).send().await.unwrap();
     assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(worker.get("a1", "").await.0, StatusCode::NOT_FOUND);
 
@@ -533,7 +533,8 @@ async fn the_api_is_the_one_a_server_has() {
     let (_, status) = worker.get("a1", "").await;
     assert_eq!(
         status,
-        json!({"name": "a1", "origin": "root", "state": "idle", "attached": true, "length": 3})
+        json!({"name": "a1", "origin": "root", "state": "idle", "hands": ["local"], "waiting": [],
+               "length": 3})
     );
 
     // The same prompt under its key is not a second prompt.
@@ -552,7 +553,7 @@ async fn the_api_is_the_one_a_server_has() {
     let (_, history) = worker.get("a1", "/history?after=2").await;
     assert_eq!(kinds(history["items"].as_array().unwrap()), ["step"]);
     assert_eq!(history["next"], 3);
-    let events = worker.http.get(worker.pair("a1", "/events?after=1"));
+    let events = worker.http.get(worker.mind("a1", "/events?after=1"));
     let mut events = events.bearer_auth(TOKEN).send().await.unwrap();
     assert_eq!(events.headers()["content-type"], "text/event-stream");
     let mut read = String::new();
@@ -607,7 +608,7 @@ async fn an_object_killed_while_its_model_is_asked_carries_on_by_itself() {
     worker.kill();
     let worker = Worker::start(directory.path(), &model_url).await;
 
-    // Nobody asks the pair anything. Its alarm wakes it, and it asks again.
+    // Nobody asks the mind anything. Its alarm wakes it, and it asks again.
     eventually("the model is asked again", || async { model.asked() == 2 }).await;
     eventually("the turn ends", || async { worker.idle("a1").await }).await;
     let items = worker.history("a1").await;
@@ -672,9 +673,9 @@ async fn an_interrupt_ends_the_turn_and_frees_the_object_at_once() {
         .prompt("a1", json!({"text": "Write a long essay."}))
         .await;
     eventually("the model is asked", || async { model.asked() == 1 }).await;
-    let (status, pair) = worker.interrupt("a1").await;
+    let (status, mind) = worker.interrupt("a1").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(pair["state"], "idle");
+    assert_eq!(mind["state"], "idle");
     let items = worker.history("a1").await;
     assert_eq!(kinds(&items), ["attached", "prompt", "paused"]);
 
@@ -702,8 +703,8 @@ async fn an_interrupt_ends_the_turn_and_frees_the_object_at_once() {
         model.slow.load(Ordering::SeqCst) == 1
     })
     .await;
-    let (_, pair) = worker.interrupt("a1").await;
-    assert_eq!(pair["state"], "idle");
+    let (_, mind) = worker.interrupt("a1").await;
+    assert_eq!(mind["state"], "idle");
     let items = worker.history("a1").await;
     assert_eq!(outcome(&items, "tu_1")["error"], "cancelled");
     // The model is not asked what to do about a call the user stopped.

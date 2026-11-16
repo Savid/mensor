@@ -1,20 +1,41 @@
-use mensor_protocol::{Call, CallId, CallResult, FromMind, Hello, Settled, settle};
-use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet};
 
+use mensor_protocol::{
+    Call, CallId, CallResult, FromMind, Hello, Name, Refusal, Reply, Settled, settle,
+};
+use serde_json::{Value, json};
+
+use crate::fork::{Fork, child_name, shares};
+use crate::tools::{CLONE, Does, MAX_CHILDREN, MindTool, Table, split};
 use crate::window::{to_summarise, window};
-use crate::{Block, Content, Item, Message, ModelReply, ModelRequest, Outcome, Stop, Tool, tools};
+use crate::{Block, Content, HandRecord, Item, Message, ModelReply, ModelRequest, Outcome, Stop};
 
 /// Something the host of a mind must do. A host performs a mind's outputs in
-/// the order given, and makes each [`Output::Append`] durable before it
-/// performs what follows it.
+/// the order given, and makes each [`Output::Append`] and [`Output::Fork`]
+/// durable before it performs what follows it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Output {
     /// Store this item at the end of the history.
     Append(Item),
-    /// Send this to the hand.
-    Send(FromMind),
+    /// Send this to a hand, if it is connected. A hand that is not is told
+    /// what it needs when it next says hello.
+    Send {
+        /// The hand.
+        hand: Name,
+        /// What to send it.
+        message: FromMind,
+    },
+    /// End a hand's connection with this refusal, if it is connected.
+    Close {
+        /// The hand.
+        hand: Name,
+        /// Why.
+        refusal: Refusal,
+    },
     /// Ask the model, and answer with [`Mind::replied`] or [`Mind::failed`].
     Ask(ModelRequest),
+    /// Make a child mind.
+    Fork(Fork),
 }
 
 /// What the model is asked for a summary. A fact the user gave for later has
@@ -43,6 +64,11 @@ Keep every identifier and value exact and stay under 2000 words. Reply with the 
 /// Why an interrupted mind is paused, as its history says it.
 const INTERRUPTED: &str = "interrupted";
 
+/// What a tool use is told when its step already used one of the mind's own
+/// tools.
+const ONE_OWN: &str = "a step runs one of fork, clone_hand and release_hand, and this was not \
+                       the first; ask for it again on its own";
+
 /// What a mind is doing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -51,8 +77,20 @@ pub enum State {
     Idle,
     /// It has a model to ask, or is asking it.
     Thinking,
-    /// It has a call for its hand, or waits on one.
+    /// It has a call for a hand, or waits on one.
     Working,
+}
+
+/// What a mind is doing, told from its history.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Status {
+    /// What it is doing.
+    pub state: State,
+    /// How many items its history holds.
+    pub length: u64,
+    /// The hands a call or a tool use of its turn waits for, because they
+    /// are not connected.
+    pub waiting: Vec<Name>,
 }
 
 /// What became of a prompt.
@@ -73,6 +111,11 @@ pub struct Conflict {
     pub key: String,
 }
 
+/// A hand the mind does not have, or has released.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("the mind has no hand named {0}")]
+pub struct NoHand(pub Name);
+
 /// What a mind is told when it is made.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settings {
@@ -90,18 +133,26 @@ pub struct Settings {
     /// equally between the tools that step used. A result longer than its
     /// share is shown with its middle left out. The history keeps it whole.
     pub max_results: usize,
+    /// How many hands the mind may have that it has not released.
+    pub max_hands: usize,
+    /// How many minds a mind that starts from nothing may fork, its
+    /// children's included: each fork shares what remains of it between the
+    /// mind and its children.
+    pub max_forks: u64,
 }
 
 impl Default for Settings {
     /// No system prompt, a summary once a request would pass 150,000
-    /// tokens, and 96 KB of results a step, which is 40,000 tokens at the
-    /// most. The summary is asked for with the last step's results, so a
-    /// model that reads 200,000 has room for it.
+    /// tokens, 96 KB of results a step (40,000 tokens at the most), four
+    /// hands and 64 forks. The summary is asked for with the last step's
+    /// results, so a model that reads 200,000 has room for it.
     fn default() -> Self {
         Self {
             system: None,
             compact_at: Some(150_000),
             max_results: 96 * 1024,
+            max_hands: 4,
+            max_forks: 64,
         }
     }
 }
@@ -113,14 +164,26 @@ impl Default for Settings {
 /// index that summary names. What came before is in its host's store.
 #[derive(Clone, Debug)]
 pub struct Mind {
+    name: Name,
     /// How many items of the history come before `items`.
     before: u64,
     items: Vec<Item>,
     settings: Settings,
-    tools: Vec<Tool>,
-    attached: bool,
+    /// Every hand the history records, released ones included.
+    hands: BTreeMap<Name, Hand>,
+    forks_left: u64,
     /// The request the model is answering now.
     asking: Option<Asking>,
+}
+
+#[derive(Clone, Debug)]
+struct Hand {
+    record: HandRecord,
+    attached: bool,
+    /// Where the history first records it, or 0 for a hand a summary carries.
+    joined: u64,
+    /// Where it was released.
+    released: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -130,15 +193,35 @@ struct Asking {
     summary: bool,
 }
 
+/// Where a clone is to go.
+enum Target {
+    /// Into this mind, as a hand of this name.
+    Hand(Name),
+    /// Into this many children of a fork.
+    Children(usize),
+}
+
 enum Next {
-    /// A tool use in a reply that did not stop for tools: it does not run.
+    /// A tool use that does not run, for this reason.
     Skip {
         tool_use: String,
+        why: String,
     },
     Issue {
         tool_use: String,
-        name: String,
+        hand: Name,
+        capability: String,
+        operation: String,
         input: Value,
+    },
+    Clone {
+        tool_use: String,
+        hand: Name,
+        into: Target,
+    },
+    Release {
+        tool_use: String,
+        hand: Name,
     },
     Await,
     Ask,
@@ -146,37 +229,36 @@ enum Next {
 }
 
 impl Mind {
-    /// A mind with no history.
-    pub fn new(settings: Settings) -> Self {
-        Self::load(0, Vec::new(), settings)
+    /// A mind named `name` with no history.
+    pub fn new(name: Name, settings: Settings) -> Self {
+        Self::load(name, 0, Vec::new(), settings)
     }
 
     /// A mind with this history, as stored: its items from index `from`,
     /// which is 0 for all of it, or else the index a store gives with a
-    /// history's tail. It does nothing until its hand says hello.
-    pub fn load(from: u64, items: Vec<Item>, settings: Settings) -> Self {
-        let mut mind = Self {
-            before: from,
-            items,
-            settings,
-            tools: Vec::new(),
-            attached: false,
-            asking: None,
-        };
+    /// history's tail. It asks no model until a hand says hello.
+    pub fn load(name: Name, from: u64, items: Vec<Item>, settings: Settings) -> Self {
+        let mut mind = Self::whole(name, from, items, settings);
         mind.shed();
         mind
     }
 
-    /// What the mind of a history is doing, and how many items the history
-    /// holds, told from its latest items alone: those from index `from`,
-    /// which a store gives as a history's [`recent`](crate::Store::recent)
-    /// items. A host says this of a pair it has not loaded.
-    pub fn status(from: u64, items: Vec<Item>) -> (State, u64) {
-        let mind = Self {
-            before: from,
-            ..Self::whole(items, Settings::default())
-        };
-        (mind.state(), mind.length())
+    /// What the mind of a history is doing, told from its latest items
+    /// alone: those from index `from`, which a store gives as a history's
+    /// [`recent`](crate::Store::recent) items. A host says this of a mind it
+    /// has not loaded, which has no hand connected.
+    pub fn status(name: Name, from: u64, items: Vec<Item>) -> Status {
+        let mind = Self::whole(name, from, items, Settings::default());
+        Status {
+            state: mind.state(),
+            length: mind.length(),
+            waiting: mind.waiting(),
+        }
+    }
+
+    /// The mind's name.
+    pub fn name(&self) -> &Name {
+        &self.name
     }
 
     /// The items this mind holds: the end of its history.
@@ -195,9 +277,10 @@ impl Mind {
         self.before + index(self.items.len())
     }
 
-    /// Whether a hand is connected and settled.
-    pub fn is_attached(&self) -> bool {
-        self.attached
+    /// The hands connected and settled, by name.
+    pub fn connected(&self) -> Vec<Name> {
+        let hands = self.hands.iter().filter(|(_, hand)| hand.attached);
+        hands.map(|(name, _)| name.clone()).collect()
     }
 
     /// What the mind is doing.
@@ -205,8 +288,43 @@ impl Mind {
         match self.next() {
             Next::Idle => State::Idle,
             Next::Ask => State::Thinking,
-            Next::Skip { .. } | Next::Issue { .. } | Next::Await => State::Working,
+            Next::Skip { .. }
+            | Next::Issue { .. }
+            | Next::Clone { .. }
+            | Next::Release { .. }
+            | Next::Await => State::Working,
         }
+    }
+
+    /// The hands a call or a tool use of the turn waits for, because they
+    /// are not connected.
+    pub fn waiting(&self) -> Vec<Name> {
+        let mut waiting = BTreeSet::new();
+        for (_, hand, _) in self.pending() {
+            if !self.is_attached(&hand) {
+                waiting.insert(hand);
+            }
+        }
+        if let Some((at, content)) = self.last_step() {
+            let table = self.table();
+            for block in content {
+                let Block::ToolUse { id, name, input } = block else {
+                    continue;
+                };
+                if self.outcome_of(id).is_some() || self.call_of(id).is_some() {
+                    continue;
+                }
+                let Some((Does::Hand { .. }, holders)) = table.find(name) else {
+                    continue;
+                };
+                if let Ok(hand) = self.hand_for(split(input).0, at, holders, name)
+                    && !self.is_attached(&hand)
+                {
+                    waiting.insert(hand);
+                }
+            }
+        }
+        waiting.into_iter().collect()
     }
 
     /// Says something to the mind.
@@ -253,7 +371,8 @@ impl Mind {
         })
     }
 
-    /// Takes a hand's `hello` and settles every call the mind waits on.
+    /// Takes a hand's `hello` and settles every call the mind waits on from
+    /// that hand.
     ///
     /// Results the hand holds are stored, calls it may have run without a
     /// result are stored as unknown, and only then is anything sent: acks for
@@ -261,10 +380,25 @@ impl Mind {
     ///
     /// A turn interrupted while the hand was away is stopped now: a call the
     /// hand never read does not run, and one it still runs is cancelled.
-    pub fn attach(&mut self, hello: &Hello) -> Vec<Output> {
-        let pending = self.pending();
+    ///
+    /// A hand the mind released is refused, and so is a new one once the
+    /// mind has all the hands it may.
+    pub fn attach(&mut self, hello: &Hello) -> Result<Vec<Output>, Refusal> {
+        let hand = hello.hand.clone();
+        match self.hands.get(&hand) {
+            Some(known) if known.released.is_some() => return Err(Refusal::Released),
+            None if self.unreleased() >= self.settings.max_hands => return Err(Refusal::Limit),
+            _ => {}
+        }
+        let pending: Vec<(CallId, String)> = self
+            .pending()
+            .into_iter()
+            .filter(|(_, of, _)| *of == hand)
+            .map(|(id, _, tool_use)| (id, tool_use))
+            .collect();
         let ids: Vec<CallId> = pending.iter().map(|(id, _)| *id).collect();
-        let plan = settle(self.recorded_boot(), &ids, hello);
+        let recorded = self.hands.get(&hand).map(|known| known.record.boot.clone());
+        let plan = settle(recorded.as_deref(), &ids, hello);
         let interrupted = self
             .round()
             .iter()
@@ -275,7 +409,10 @@ impl Mind {
         let mut cancel = Vec::new();
         for ((id, tool_use), (_, settled)) in pending.into_iter().zip(plan.calls) {
             let outcome = match settled {
-                Settled::Take(reply) => Outcome::from(reply),
+                Settled::Take(reply) => {
+                    self.took(id, tool_use, reply, &mut outputs);
+                    continue;
+                }
                 Settled::Unknown if plan.new_boot => Outcome::Unknown(
                     "the hand restarted after it was sent this call, and remembers nothing of it"
                         .into(),
@@ -297,66 +434,69 @@ impl Mind {
                     continue;
                 }
             };
-            self.append(
-                Item::Outcome {
-                    tool_use,
-                    call: Some(id),
-                    outcome,
-                },
-                &mut outputs,
-            );
+            let item = Item::Outcome {
+                tool_use,
+                call: Some(id),
+                outcome,
+            };
+            self.append(item, &mut outputs);
         }
         if plan.new_boot {
-            self.append(
-                Item::Attached {
-                    boot: hello.boot.clone(),
-                },
-                &mut outputs,
-            );
+            let item = Item::Attached {
+                hand: hand.clone(),
+                boot: hello.boot.clone(),
+                capabilities: hello.capabilities.clone(),
+            };
+            self.append(item, &mut outputs);
+        }
+        if let Some(known) = self.hands.get_mut(&hand) {
+            known.attached = true;
         }
 
-        self.tools = tools(&hello.capabilities);
-        self.attached = true;
+        let send = |message| Output::Send {
+            hand: hand.clone(),
+            message,
+        };
         if !plan.ack.is_empty() {
-            outputs.push(Output::Send(FromMind::Ack { ids: plan.ack }));
+            outputs.push(send(FromMind::Ack { ids: plan.ack }));
         }
         for id in resend {
             if let Some(call) = self.call(id) {
-                outputs.push(Output::Send(FromMind::Call(call)));
+                outputs.push(send(FromMind::Call(call)));
             }
         }
         for id in cancel {
-            outputs.push(Output::Send(FromMind::Cancel { id }));
+            outputs.push(send(FromMind::Cancel { id }));
         }
         self.drive(&mut outputs);
-        outputs
+        Ok(outputs)
     }
 
-    /// The hand's connection dropped. The mind starts nothing until the hand
-    /// says hello again.
-    pub fn detach(&mut self) {
-        self.attached = false;
-    }
-
-    /// Takes a result from the hand. The first result for a call is stored
-    /// and acked; any other is only acked.
-    pub fn result(&mut self, result: CallResult) -> Vec<Output> {
-        let mut outputs = Vec::new();
-        let waiting = self.pending().into_iter().find(|(id, _)| *id == result.id);
-        if let Some((id, tool_use)) = waiting {
-            let outcome = Outcome::from(result.reply);
-            self.append(
-                Item::Outcome {
-                    tool_use,
-                    call: Some(id),
-                    outcome,
-                },
-                &mut outputs,
-            );
+    /// A hand's connection dropped. The mind sends it nothing until it says
+    /// hello again.
+    pub fn detach(&mut self, hand: &Name) {
+        if let Some(known) = self.hands.get_mut(hand) {
+            known.attached = false;
         }
-        outputs.push(Output::Send(FromMind::Ack {
-            ids: vec![result.id],
-        }));
+    }
+
+    /// Takes a result from a hand. The first result for a call sent to that
+    /// hand is stored and acked; any other is only acked.
+    pub fn result(&mut self, hand: &Name, result: CallResult) -> Vec<Output> {
+        let mut outputs = Vec::new();
+        let waiting = self
+            .pending()
+            .into_iter()
+            .find(|(id, of, _)| *id == result.id && of == hand);
+        if let Some((id, _, tool_use)) = waiting {
+            self.took(id, tool_use, result.reply, &mut outputs);
+        }
+        outputs.push(Output::Send {
+            hand: hand.clone(),
+            message: FromMind::Ack {
+                ids: vec![result.id],
+            },
+        });
         self.drive(&mut outputs);
         outputs
     }
@@ -386,8 +526,8 @@ impl Mind {
                     error: "the model wrote no summary of the conversation".into(),
                 }
             } else {
-                // A mind carries on from the last step's prompts, the hand
-                // the history last recorded and the last call it made.
+                // A mind carries on from the last step's prompts, the hands
+                // the history recorded and the last call it made.
                 let from = match self.round().first() {
                     Some(Item::Step { seen, .. }) => *seen,
                     _ => self.length(),
@@ -396,8 +536,13 @@ impl Mind {
                     text,
                     usage,
                     from,
-                    boot: self.recorded_boot().map(str::to_owned),
+                    hands: self
+                        .hands
+                        .iter()
+                        .map(|(name, hand)| (name.clone(), hand.record.clone()))
+                        .collect(),
                     last_call: self.last_call(),
+                    forks_left: self.forks_left,
                 }
             }
         } else {
@@ -434,9 +579,9 @@ impl Mind {
     /// Stops the turn.
     ///
     /// The reply to a request the model is still answering is dropped, tool
-    /// uses that had not become calls do not run, and the hand is told to
+    /// uses that had not become calls do not run, and every hand is told to
     /// cancel every call it runs. The mind is then paused: it stores what
-    /// the hand returns for those calls, and asks no model until it is
+    /// its hands return for those calls, and asks no model until it is
     /// prompted. A hand that is away is told when it next says hello. A mind
     /// with nothing to stop does nothing.
     pub fn interrupt(&mut self) -> Vec<Output> {
@@ -462,27 +607,74 @@ impl Mind {
             },
             &mut outputs,
         );
-        for (id, _) in self.pending() {
-            outputs.push(Output::Send(FromMind::Cancel { id }));
+        for (id, hand, _) in self.pending() {
+            outputs.push(Output::Send {
+                hand,
+                message: FromMind::Cancel { id },
+            });
         }
         outputs
     }
 
-    /// A mind that holds these items, with nothing shed.
-    fn whole(items: Vec<Item>, settings: Settings) -> Self {
-        Self {
-            before: 0,
-            items,
-            settings,
-            tools: Vec::new(),
-            attached: false,
-            asking: None,
+    /// Lets a hand go from outside the conversation: a hand that died while
+    /// it ran a call is how a turn would otherwise wait for ever. Every call
+    /// it was sent and did not answer is stored as unknown, and the hand is
+    /// refused from now on.
+    pub fn release(&mut self, hand: &Name) -> Result<Vec<Output>, NoHand> {
+        if !self.is_known(hand) {
+            return Err(NoHand(hand.clone()));
         }
+        let mut outputs = Vec::new();
+        self.release_hand(
+            hand,
+            "it was released from outside the conversation",
+            &mut outputs,
+        );
+        self.drive(&mut outputs);
+        Ok(outputs)
+    }
+
+    /// A mind that holds `items`, from index `from`, with nothing shed.
+    fn whole(name: Name, from: u64, items: Vec<Item>, settings: Settings) -> Self {
+        let mut mind = Self {
+            name,
+            before: from,
+            items,
+            forks_left: settings.max_forks,
+            settings,
+            hands: BTreeMap::new(),
+            asking: None,
+        };
+        // What the last summary carries, then what came after it.
+        let summary = mind
+            .items
+            .iter()
+            .rposition(|item| matches!(item, Item::Summary { .. }));
+        if let Some(Item::Summary {
+            hands, forks_left, ..
+        }) = summary.map(|at| &mind.items[at])
+        {
+            for (name, record) in hands {
+                let hand = Hand {
+                    record: record.clone(),
+                    attached: false,
+                    joined: 0,
+                    released: record.released.then_some(0),
+                };
+                mind.hands.insert(name.clone(), hand);
+            }
+            mind.forks_left = *forks_left;
+        }
+        let after = summary.map_or(0, |at| at + 1);
+        for (at, item) in (mind.before..).zip(&mind.items).skip(after) {
+            note(&mut mind.hands, &mut mind.forks_left, item, at);
+        }
+        mind
     }
 
     /// Forgets what the last summary replaced: every item before the index
     /// it names.
-    pub(crate) fn shed(&mut self) {
+    fn shed(&mut self) {
         let from = self.items.iter().rev().find_map(|item| match item {
             Item::Summary { from, .. } => Some(*from),
             _ => None,
@@ -503,7 +695,9 @@ impl Mind {
         usize::try_from(at.saturating_sub(self.before)).unwrap_or(usize::MAX)
     }
 
-    pub(crate) fn append(&mut self, item: Item, outputs: &mut Vec<Output>) {
+    fn append(&mut self, item: Item, outputs: &mut Vec<Output>) {
+        let at = self.length();
+        note(&mut self.hands, &mut self.forks_left, &item, at);
         self.items.push(item.clone());
         outputs.push(Output::Append(item));
     }
@@ -512,53 +706,49 @@ impl Mind {
     fn drive(&mut self, outputs: &mut Vec<Output>) {
         loop {
             match self.next() {
-                Next::Skip { tool_use } => {
-                    let outcome = Outcome::NotRun(
-                        "the model stopped before it finished asking for this call".into(),
-                    );
-                    self.append(
-                        Item::Outcome {
-                            tool_use,
-                            call: None,
-                            outcome,
-                        },
-                        outputs,
-                    );
+                Next::Skip { tool_use, why } => {
+                    let item = Item::Outcome {
+                        tool_use,
+                        call: None,
+                        outcome: Outcome::NotRun(why),
+                    };
+                    self.append(item, outputs);
                 }
                 Next::Issue {
                     tool_use,
-                    name,
+                    hand,
+                    capability,
+                    operation,
                     input,
-                } if self.attached => {
-                    let Some(tool) = self.tools.iter().find(|tool| tool.name == name) else {
-                        let outcome = Outcome::NotRun(format!("the hand has no tool named {name}"));
-                        self.append(
-                            Item::Outcome {
-                                tool_use,
-                                call: None,
-                                outcome,
-                            },
-                            outputs,
-                        );
-                        continue;
+                } => self.issue(tool_use, hand, capability, operation, input, outputs),
+                Next::Clone {
+                    tool_use,
+                    hand,
+                    into,
+                } => {
+                    let id = self.last_call() + 1;
+                    let into: Vec<Value> = match into {
+                        Target::Hand(clone) => vec![json!({"mind": self.name, "hand": clone})],
+                        Target::Children(count) => (0..count)
+                            .map_while(|child| child_name(&self.name, id, child))
+                            .map(|child| json!({"mind": child, "hand": hand}))
+                            .collect(),
                     };
-                    let call = Call {
-                        id: self.last_call() + 1,
-                        capability: tool.capability.clone(),
-                        operation: tool.operation.clone(),
-                        input,
-                    };
-                    let stored = Item::Call {
-                        id: call.id,
-                        tool_use,
-                        capability: call.capability.clone(),
-                        operation: call.operation.clone(),
-                        input: call.input.clone(),
-                    };
-                    self.append(stored, outputs);
-                    outputs.push(Output::Send(FromMind::Call(call)));
+                    let input = json!({ "into": into });
+                    self.issue(tool_use, hand, CLONE.into(), CLONE.into(), input, outputs);
                 }
-                Next::Ask if self.attached && self.asking.is_none() => {
+                Next::Release { tool_use, hand } => {
+                    self.release_hand(&hand, "the model released it", outputs);
+                    let item = Item::Outcome {
+                        tool_use,
+                        call: None,
+                        outcome: Outcome::Output(json!({ "released": hand })),
+                    };
+                    self.append(item, outputs);
+                }
+                Next::Ask
+                    if self.asking.is_none() && self.hands.values().any(|hand| hand.attached) =>
+                {
                     let (request, summary) = self.request();
                     self.asking = Some(Asking {
                         seen: request.seen,
@@ -567,9 +757,175 @@ impl Mind {
                     outputs.push(Output::Ask(request));
                     return;
                 }
-                Next::Issue { .. } | Next::Await | Next::Ask | Next::Idle => return,
+                Next::Await | Next::Ask | Next::Idle => return,
             }
         }
+    }
+
+    fn issue(
+        &mut self,
+        tool_use: String,
+        hand: Name,
+        capability: String,
+        operation: String,
+        input: Value,
+        outputs: &mut Vec<Output>,
+    ) {
+        let call = Call {
+            id: self.last_call() + 1,
+            capability,
+            operation,
+            input,
+        };
+        let stored = Item::Call {
+            id: call.id,
+            hand: hand.clone(),
+            tool_use,
+            capability: call.capability.clone(),
+            operation: call.operation.clone(),
+            input: call.input.clone(),
+        };
+        self.append(stored, outputs);
+        outputs.push(Output::Send {
+            hand,
+            message: FromMind::Call(call),
+        });
+    }
+
+    /// Stores how a call ended. A clone that the mind's own tools asked for
+    /// is told to the model in their terms, and the children of a fork are
+    /// made before the fork is stored.
+    fn took(&mut self, id: CallId, tool_use: String, reply: Reply, outputs: &mut Vec<Output>) {
+        let clone = self.round().iter().find_map(|item| match item {
+            Item::Call {
+                id: of,
+                hand,
+                capability,
+                input,
+                ..
+            } if *of == id && capability == CLONE => Some((hand.clone(), input.clone())),
+            _ => None,
+        });
+        let outcome = match (clone, reply) {
+            (Some((hand, input)), Reply::Output(_)) => {
+                let into: Vec<(Name, Name)> = input["into"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|target| {
+                        let name = |key: &str| Name::new(target[key].as_str()?).ok();
+                        Some((name("mind")?, name("hand")?))
+                    })
+                    .collect();
+                if into.iter().all(|(mind, _)| *mind == self.name) {
+                    let clone = into.first().map(|(_, clone)| clone);
+                    Outcome::Output(json!({ "hand": clone }))
+                } else {
+                    let children: Vec<Name> = into.into_iter().map(|(mind, _)| mind).collect();
+                    self.forked(id, &tool_use, &hand, &children, outputs);
+                    return;
+                }
+            }
+            (_, reply) => Outcome::from(reply),
+        };
+        let item = Item::Outcome {
+            tool_use,
+            call: Some(id),
+            outcome,
+        };
+        self.append(item, outputs);
+    }
+
+    /// A fork's clones exist: its children are made, then the fork stored.
+    fn forked(
+        &mut self,
+        id: CallId,
+        tool_use: &str,
+        hand: &Name,
+        children: &[Name],
+        outputs: &mut Vec<Output>,
+    ) {
+        let prompts: Vec<String> = self
+            .last_step()
+            .into_iter()
+            .flat_map(|(_, content)| content)
+            .find_map(|block| match block {
+                Block::ToolUse { id: of, input, .. } if of == tool_use => {
+                    input["prompts"].as_array().map(|prompts| {
+                        let prompts = prompts.iter().filter_map(Value::as_str);
+                        prompts.map(str::to_owned).collect()
+                    })
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
+        let at = self
+            .items
+            .iter()
+            .rposition(|item| matches!(item, Item::Call { id: of, .. } if *of == id));
+        let inherited = self.before + index(at.map_or(self.items.len(), |at| at + 1));
+        let (share, kept) = shares(self.forks_left, index(children.len()));
+        let others: Vec<Name> = self
+            .hands
+            .iter()
+            .filter(|(name, known)| *name != hand && known.released.is_none())
+            .map(|(name, _)| name.clone())
+            .collect();
+        for (child, prompt) in children.iter().zip(prompts) {
+            let mut items = vec![Item::Outcome {
+                tool_use: tool_use.to_owned(),
+                call: Some(id),
+                outcome: Outcome::Output(json!({"you": child, "parent": self.name})),
+            }];
+            items.extend(others.iter().map(|other| Item::Released {
+                hand: other.clone(),
+                reason: format!(
+                    "it stayed with {} when this mind was forked from it",
+                    self.name
+                ),
+            }));
+            items.push(Item::Forks { left: share });
+            items.push(Item::Prompt {
+                key: None,
+                text: prompt,
+            });
+            outputs.push(Output::Fork(Fork {
+                name: child.clone(),
+                parent: self.name.clone(),
+                inherited,
+                items,
+            }));
+        }
+        let item = Item::Outcome {
+            tool_use: tool_use.to_owned(),
+            call: Some(id),
+            outcome: Outcome::Output(json!({ "children": children })),
+        };
+        self.append(item, outputs);
+        self.append(Item::Forks { left: kept }, outputs);
+    }
+
+    fn release_hand(&mut self, hand: &Name, reason: &str, outputs: &mut Vec<Output>) {
+        for (id, of, tool_use) in self.pending() {
+            if of == *hand {
+                let outcome = Outcome::Unknown("the hand was released before it answered".into());
+                let item = Item::Outcome {
+                    tool_use,
+                    call: Some(id),
+                    outcome,
+                };
+                self.append(item, outputs);
+            }
+        }
+        let item = Item::Released {
+            hand: hand.clone(),
+            reason: reason.into(),
+        };
+        self.append(item, outputs);
+        outputs.push(Output::Close {
+            hand: hand.clone(),
+            refusal: Refusal::Released,
+        });
     }
 
     fn next(&self) -> Next {
@@ -587,28 +943,10 @@ impl Mind {
                 } => Some((at, *seen, content, *stop)),
                 _ => None,
             });
-        if let Some((_, _, content, stop)) = step {
-            for block in content {
-                let Block::ToolUse { id, name, input } = block else {
-                    continue;
-                };
-                if self.outcome_of(id).is_some() {
-                    continue;
-                }
-                if self.call_of(id).is_some() {
-                    return Next::Await;
-                }
-                if stop != Stop::ToolUse {
-                    return Next::Skip {
-                        tool_use: id.clone(),
-                    };
-                }
-                return Next::Issue {
-                    tool_use: id.clone(),
-                    name: name.clone(),
-                    input: input.clone(),
-                };
-            }
+        if let Some((at, _, content, stop)) = step
+            && let Some(next) = self.next_in(at, content, stop)
+        {
+            return next;
         }
 
         // The round is closed. A pause or a failure after the last step holds
@@ -641,6 +979,261 @@ impl Mind {
         }
     }
 
+    /// What the tool uses of the step at `at` call for next, or nothing
+    /// once every one of them has ended.
+    fn next_in(&self, at: usize, content: &[Block], stop: Stop) -> Option<Next> {
+        let table = self.table();
+        // Hands an earlier tool use of this step still waits on.
+        let mut busy = BTreeSet::new();
+        let mut waiting = false;
+        let mut own = None;
+        for block in content {
+            let Block::ToolUse { id, name, input } = block else {
+                continue;
+            };
+            if self.outcome_of(id).is_some() {
+                continue;
+            }
+            let skip = |why: String| {
+                Some(Next::Skip {
+                    tool_use: id.clone(),
+                    why,
+                })
+            };
+            if stop != Stop::ToolUse {
+                return skip("the model stopped before it finished asking for this call".into());
+            }
+            let Some((does, holders)) = table.find(name) else {
+                return skip(format!("there is no tool named {name}"));
+            };
+            match does {
+                Does::Mind(_) if own.is_some() => return skip(ONE_OWN.into()),
+                Does::Mind(tool) => own = Some((id, *tool, input)),
+                Does::Hand {
+                    capability,
+                    operation,
+                } => {
+                    let (named, rest) = split(input);
+                    let hand = match self.hand_for(named, at, holders, name) {
+                        Ok(hand) => hand,
+                        Err(why) => return skip(why),
+                    };
+                    if self.call_of(id).is_some()
+                        || busy.contains(&hand)
+                        || !self.is_attached(&hand)
+                    {
+                        busy.insert(hand);
+                        waiting = true;
+                        continue;
+                    }
+                    return Some(Next::Issue {
+                        tool_use: id.clone(),
+                        hand,
+                        capability: capability.clone(),
+                        operation: operation.clone(),
+                        input: rest,
+                    });
+                }
+            }
+        }
+        // The mind's own tool runs once every other tool of its step has
+        // ended, so nothing runs on any hand while one is cloned.
+        match own {
+            Some((id, _, _)) if waiting || self.call_of(id).is_some() => Some(Next::Await),
+            Some((id, tool, input)) => Some(self.own(id, tool, input, &table)),
+            None if waiting => Some(Next::Await),
+            None => None,
+        }
+    }
+
+    /// What the mind's own tool `tool`, used as `id` with `input`, does next.
+    fn own(&self, id: &str, tool: MindTool, input: &Value, table: &Table) -> Next {
+        let skip = |why: String| Next::Skip {
+            tool_use: id.to_owned(),
+            why,
+        };
+        let (named, rest) = split(input);
+        if tool == MindTool::ReleaseHand {
+            return match named {
+                Some(Ok(hand)) if self.is_known(&hand) => Next::Release {
+                    tool_use: id.to_owned(),
+                    hand,
+                },
+                Some(Ok(hand)) => skip(format!(
+                    "there is no hand named {hand}. {}",
+                    self.hands_line()
+                )),
+                _ => skip(format!("say which hand to let go. {}", self.hands_line())),
+            };
+        }
+        let cloners = table
+            .find(tool.name())
+            .map_or(&[][..], |(_, cloners)| cloners);
+        let listed = join(cloners);
+        let hand = match named {
+            Some(Ok(hand)) => hand,
+            Some(Err(bad)) => {
+                return skip(format!(
+                    "{bad} is not the name of a hand. {}",
+                    self.hands_line()
+                ));
+            }
+            None => match cloners {
+                [only] => only.clone(),
+                _ => return skip(format!("say which hand to clone: {listed}")),
+            },
+        };
+        if !cloners.contains(&hand) {
+            return skip(format!(
+                "{hand} cannot be cloned. These hands can: {listed}."
+            ));
+        }
+        let into = if tool == MindTool::Fork {
+            let prompts = rest["prompts"].as_array();
+            let prompts = prompts.filter(|prompts| prompts.iter().all(Value::is_string));
+            let count = prompts
+                .map(Vec::len)
+                .filter(|count| (1..=MAX_CHILDREN).contains(count));
+            let Some(count) = count else {
+                return skip(format!(
+                    "prompts are 1 to {MAX_CHILDREN} strings, one per child"
+                ));
+            };
+            if index(count) > self.forks_left {
+                return skip(format!(
+                    "this mind may fork {} more minds, and this asked for {count}",
+                    self.forks_left
+                ));
+            }
+            Target::Children(count)
+        } else {
+            if self.unreleased() >= self.settings.max_hands {
+                return skip(format!(
+                    "this mind has all the hands it may: {}",
+                    self.settings.max_hands
+                ));
+            }
+            let clone = match &rest["name"] {
+                Value::Null => self.clone_name(&hand),
+                Value::String(name) => Name::new(name.as_str()).ok(),
+                _ => None,
+            };
+            match clone {
+                Some(clone) if !self.hands.contains_key(&clone) => Target::Hand(clone),
+                Some(clone) => return skip(format!("a hand is already named {clone}")),
+                None => return skip("that cannot name a hand".into()),
+            }
+        };
+        if !self.is_attached(&hand) {
+            return Next::Await;
+        }
+        Next::Clone {
+            tool_use: id.to_owned(),
+            hand,
+            into,
+        }
+    }
+
+    /// The hand a hand tool's use runs on. A use that names none means the
+    /// only hand the mind had when the step was stored.
+    fn hand_for(
+        &self,
+        named: Option<Result<Name, String>>,
+        step_at: usize,
+        holders: &[Name],
+        tool: &str,
+    ) -> Result<Name, String> {
+        let hand = match named {
+            Some(Ok(hand)) => hand,
+            Some(Err(bad)) => {
+                return Err(format!(
+                    "{bad} is not the name of a hand. {}",
+                    self.hands_line()
+                ));
+            }
+            None => {
+                let step = self.before + index(step_at);
+                let mut then = self.hands.iter().filter(|(_, hand)| {
+                    hand.joined < step && hand.released.is_none_or(|released| released > step)
+                });
+                match (then.next(), then.next()) {
+                    (Some((only, _)), None) => only.clone(),
+                    (None, _) => return Err("there was no hand to run this".into()),
+                    (Some(_), Some(_)) => {
+                        return Err(format!("say which hand runs this. {}", self.hands_line()));
+                    }
+                }
+            }
+        };
+        if !self.is_known(&hand) {
+            return Err(format!(
+                "there is no hand named {hand}. {}",
+                self.hands_line()
+            ));
+        }
+        if !holders.contains(&hand) {
+            return Err(format!(
+                "{hand} cannot do {tool}. These hands can: {}.",
+                join(holders)
+            ));
+        }
+        Ok(hand)
+    }
+
+    /// The hands, as a tool use that named a wrong one is told them.
+    fn hands_line(&self) -> String {
+        let hands: Vec<Name> = self
+            .hands
+            .iter()
+            .filter(|(_, hand)| hand.released.is_none())
+            .map(|(name, _)| name.clone())
+            .collect();
+        if hands.is_empty() {
+            "You have no hands.".into()
+        } else {
+            format!("Your hands are: {}.", join(&hands))
+        }
+    }
+
+    /// A name for a clone of `hand`: `<hand>-<n>`, the lowest `n` from 2 no
+    /// hand has had.
+    fn clone_name(&self, hand: &Name) -> Option<Name> {
+        // Of one more name than there are hands, one is free.
+        (2..=self.hands.len() + 2)
+            .map(|n| Name::new(format!("{hand}-{n}")))
+            .find(|name| {
+                name.as_ref()
+                    .map_or(true, |name| !self.hands.contains_key(name))
+            })?
+            .ok()
+    }
+
+    fn is_known(&self, hand: &Name) -> bool {
+        self.hands
+            .get(hand)
+            .is_some_and(|hand| hand.released.is_none())
+    }
+
+    fn is_attached(&self, hand: &Name) -> bool {
+        self.hands.get(hand).is_some_and(|hand| hand.attached)
+    }
+
+    fn unreleased(&self) -> usize {
+        self.hands
+            .values()
+            .filter(|hand| hand.released.is_none())
+            .count()
+    }
+
+    fn table(&self) -> Table {
+        Table::new(
+            self.hands
+                .iter()
+                .filter(|(_, hand)| hand.released.is_none())
+                .map(|(name, hand)| (name, hand.record.capabilities.as_slice())),
+        )
+    }
+
     /// The next request: for a step, or for a summary when the conversation
     /// has outgrown what one request may hold.
     fn request(&self) -> (ModelRequest, bool) {
@@ -654,7 +1247,7 @@ impl Mind {
             seen: self.length(),
             system: self.settings.system.clone(),
             messages,
-            tools: self.tools.clone(),
+            tools: self.table().tools(),
             text_only: summary,
         };
         (request, summary)
@@ -713,6 +1306,18 @@ impl Mind {
         &self.items[from.unwrap_or(0)..]
     }
 
+    /// The last step, where it is among the items, and what it said.
+    fn last_step(&self) -> Option<(usize, &[Block])> {
+        self.items
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(at, item)| match item {
+                Item::Step { content, .. } => Some((at, content.as_slice())),
+                _ => None,
+            })
+    }
+
     fn outcome_of(&self, tool_use: &str) -> Option<&Outcome> {
         self.round().iter().find_map(|item| match item {
             Item::Outcome {
@@ -734,7 +1339,7 @@ impl Mind {
     }
 
     fn call(&self, id: CallId) -> Option<Call> {
-        self.items.iter().rev().find_map(|item| match item {
+        self.round().iter().find_map(|item| match item {
             Item::Call {
                 id: of,
                 capability,
@@ -751,13 +1356,16 @@ impl Mind {
         })
     }
 
-    /// The calls with no outcome yet, oldest first, each with its tool use.
-    pub(crate) fn pending(&self) -> Vec<(CallId, String)> {
+    /// The calls with no outcome yet, oldest first, each with its hand and
+    /// its tool use.
+    fn pending(&self) -> Vec<(CallId, Name, String)> {
         self.round()
             .iter()
             .filter_map(|item| match item {
-                Item::Call { id, tool_use, .. } if self.outcome_of(tool_use).is_none() => {
-                    Some((*id, tool_use.clone()))
+                Item::Call {
+                    id, hand, tool_use, ..
+                } if self.outcome_of(tool_use).is_none() => {
+                    Some((*id, hand.clone(), tool_use.clone()))
                 }
                 _ => None,
             })
@@ -765,14 +1373,10 @@ impl Mind {
     }
 
     /// The last step's tool uses that have neither a call nor an outcome.
-    pub(crate) fn unissued(&self) -> Vec<String> {
-        let content = self.items.iter().rev().find_map(|item| match item {
-            Item::Step { content, .. } => Some(content),
-            _ => None,
-        });
-        content
+    fn unissued(&self) -> Vec<String> {
+        self.last_step()
             .into_iter()
-            .flatten()
+            .flat_map(|(_, content)| content)
             .filter_map(|block| match block {
                 Block::ToolUse { id, .. }
                     if self.outcome_of(id).is_none() && self.call_of(id).is_none() =>
@@ -782,17 +1386,6 @@ impl Mind {
                 _ => None,
             })
             .collect()
-    }
-
-    /// The hand process the history last recorded. A summary says which
-    /// it was when it was written, for a mind that holds nothing older.
-    pub(crate) fn recorded_boot(&self) -> Option<&str> {
-        let last = self.items.iter().rev().find_map(|item| match item {
-            Item::Attached { boot } => Some(Some(boot.as_str())),
-            Item::Summary { boot, .. } => Some(boot.as_deref()),
-            _ => None,
-        });
-        last.flatten()
     }
 
     /// The id of the last call made, or 0: ids only grow, so the last is
@@ -805,6 +1398,45 @@ impl Mind {
         });
         last.unwrap_or(0)
     }
+}
+
+/// What an item at index `at` changes in what a mind knows of its hands and
+/// its forks.
+fn note(hands: &mut BTreeMap<Name, Hand>, forks_left: &mut u64, item: &Item, at: u64) {
+    match item {
+        Item::Attached {
+            hand,
+            boot,
+            capabilities,
+        } => {
+            let known = hands.entry(hand.clone()).or_insert_with(|| Hand {
+                record: HandRecord {
+                    boot: String::new(),
+                    capabilities: Vec::new(),
+                    released: false,
+                },
+                attached: false,
+                joined: at,
+                released: None,
+            });
+            known.record.boot.clone_from(boot);
+            known.record.capabilities.clone_from(capabilities);
+        }
+        Item::Released { hand, .. } => {
+            if let Some(known) = hands.get_mut(hand) {
+                known.record.released = true;
+                known.attached = false;
+                known.released = Some(at);
+            }
+        }
+        Item::Forks { left } => *forks_left = *left,
+        _ => {}
+    }
+}
+
+fn join(names: &[Name]) -> String {
+    let names: Vec<&str> = names.iter().map(Name::as_str).collect();
+    names.join(", ")
 }
 
 fn index(len: usize) -> u64 {

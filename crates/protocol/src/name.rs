@@ -3,12 +3,12 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-/// A hand's name.
+/// The name of a mind, or of a hand within its mind.
 ///
-/// A name is opaque to the mind, which neither issues nor checks one: it only
-/// asks whether it has seen the name before. Whoever starts or clones a hand
-/// feeds it its name. Because a mind and its hand are always a pair, the name
-/// also identifies the pair.
+/// A mind that starts from nothing has a root name: no `.`, and at most
+/// [`Name::ROOT_MAX_LEN`] bytes. A mind made by a fork is named
+/// `<root>.<code>`, so a `.` marks a fork child, and its name fits in
+/// [`Name::MAX_LEN`] however deep the fork.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct Name(String);
@@ -33,6 +33,10 @@ impl Name {
     /// The longest a name can be, in bytes.
     pub const MAX_LEN: usize = 64;
 
+    /// The longest a root name can be, in bytes: room for a `.` and the
+    /// eight characters of a fork child's code.
+    pub const ROOT_MAX_LEN: usize = 55;
+
     /// Checks `name` and wraps it.
     ///
     /// A name is 1 to [`Name::MAX_LEN`] ASCII letters, digits, `-`, `_` or
@@ -55,6 +59,17 @@ impl Name {
     /// The name as text.
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Whether this can name a mind that starts from nothing: it has no `.`
+    /// and is at most [`Name::ROOT_MAX_LEN`] bytes.
+    pub fn is_root(&self) -> bool {
+        !self.0.contains('.') && self.0.len() <= Self::ROOT_MAX_LEN
+    }
+
+    /// The root this name descends from: all of it up to its first `.`.
+    pub fn root(&self) -> &str {
+        self.0.split('.').next().unwrap_or(&self.0)
     }
 }
 
@@ -119,6 +134,20 @@ mod tests {
         for bad in [".", "..", "-a", "a/b", "a b", "ä", "a\n"] {
             assert_eq!(Name::new(bad), Err(InvalidName::Character), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn a_root_has_no_dot_and_room_for_a_child_code() {
+        assert!(Name::new("m").unwrap().is_root());
+        assert!(Name::new("x".repeat(Name::ROOT_MAX_LEN)).unwrap().is_root());
+        assert!(
+            !Name::new("x".repeat(Name::ROOT_MAX_LEN + 1))
+                .unwrap()
+                .is_root()
+        );
+        let child = Name::new("m.k3x9q2ab").unwrap();
+        assert!(!child.is_root());
+        assert_eq!(child.root(), "m");
     }
 
     #[test]

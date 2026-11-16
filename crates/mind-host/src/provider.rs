@@ -22,7 +22,7 @@ impl Provider {
     /// A client for the API `config` names.
     pub fn new(config: Config) -> Result<Self, ModelError> {
         // The cryptography TLS uses. The first choice in a process stands,
-        // so a body in this process and its mind's host share one.
+        // so a hand in this process and its mind's host share one.
         let _ = rustls::crypto::ring::default_provider().install_default();
         let http = Client::builder()
             .timeout(config.timeout)
