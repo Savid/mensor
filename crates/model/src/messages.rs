@@ -44,7 +44,9 @@ pub(crate) fn reasoning_is_unbound(failure: &Failure) -> bool {
 #[derive(Serialize)]
 struct Body<'a> {
     model: &'a str,
-    max_tokens: u32,
+    /// The API refuses a request without one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     system: Option<&'a str>,
@@ -154,8 +156,12 @@ fn part(content: &Content) -> Option<Part<'_>> {
         Content::Text(text) if text.is_empty() => return None,
         Content::Text(text) => Part::Text { text },
         Content::ToolUse { id, name, input } => Part::ToolUse { id, name, input },
-        // Reasoning another API wrote means nothing to this one.
-        Content::Other(block) if crate::chat::is_reasoning(block) => return None,
+        // What another API wrote means nothing to this one.
+        Content::Other(block)
+            if crate::chat::is_reasoning(block) || crate::responses::is_item(block) =>
+        {
+            return None;
+        }
         Content::Other(block) => Part::Other(block),
         Content::ToolResult {
             tool_use,
@@ -424,6 +430,7 @@ mod tests {
                     {"role": "assistant", "content": [
                         {"type": "thinking", "thinking": "", "signature": "s"},
                         {"type": "tool_use", "id": "tu_1", "name": "bash", "input": {"command": "ls"}},
+                        {"type": "tool_use", "id": "tu_2", "name": "bash", "input": {"command": "cat x"}},
                     ]},
                     {"role": "user", "content": [
                         {"type": "tool_result", "tool_use_id": "tu_1", "content": "(no output)"},
@@ -441,7 +448,7 @@ mod tests {
     fn a_mind_with_a_model_of_its_own_asks_it() {
         let mut config = config();
         config.effort = Some("high".into());
-        config.max_tokens = 24_000;
+        config.max_tokens = Some(24_000);
         let request = ModelRequest {
             model: Some("claude-haiku-5-5".into()),
             effort: Some("low".into()),
@@ -559,7 +566,10 @@ mod tests {
         let body = written(&config(), &request, false);
         assert_eq!(
             body["messages"][1]["content"],
-            json!([{"type": "tool_use", "id": "tu_1", "name": "bash", "input": {"command": "ls"}}])
+            json!([
+                {"type": "tool_use", "id": "tu_1", "name": "bash", "input": {"command": "ls"}},
+                {"type": "tool_use", "id": "tu_2", "name": "bash", "input": {"command": "cat x"}},
+            ])
         );
     }
 }

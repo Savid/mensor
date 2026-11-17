@@ -92,7 +92,7 @@
   <circle class="badge k-model" cx="286" cy="60.0" r="13"/>
   <use href="#i-model" class="ic k-model" x="278" y="52" width="16" height="16"/>
   <text x="308" y="57.0" class="title">model API</text>
-  <text x="308" y="74.0" class="sub">Messages · Chat Completions</text>
+  <text x="308" y="74.0" class="sub">Messages · Chat · Responses</text>
   <text x="360" y="112" class="lbl" text-anchor="end">request</text>
   <text x="408" y="112" class="lbl">stream</text>
 

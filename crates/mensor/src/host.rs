@@ -41,19 +41,21 @@ pub struct Hosting {
     mind_tools: Tools,
     /// The model every mind asks, unless it was made with its own.
     /// `ANTHROPIC_API_KEY` reaches it through the Messages API,
-    /// `OPENAI_API_KEY` through Chat Completions.
+    /// `OPENAI_API_KEY` through Chat Completions, or the Responses API
+    /// with `MENSOR_API=responses`.
     #[arg(long, default_value = "claude-opus-5-5")]
     model: String,
     /// A comma list of more models a mind may be made with, beside
     /// `--model`, through the same API and credential.
     #[arg(long, value_delimiter = ',', value_parser = model_name)]
     models: Vec<String>,
-    /// The most tokens one reply may hold. A reply cut off while it asks
-    /// for a tool is asked for again, with that tool not run; one cut off
-    /// in its text ends the turn. Chat Completions counts a model's
-    /// reasoning in it too.
-    #[arg(long, default_value_t = 16_000, value_parser = clap::value_parser!(u32).range(1..))]
-    max_tokens: u32,
+    /// The most tokens one reply may hold, at least 16. A reply cut off
+    /// while it asks for a tool is asked for again, with that tool not run;
+    /// one cut off in its text ends the turn. A model's reasoning counts in
+    /// it. `none` sends no cap, for a server that refuses one: Chat
+    /// Completions and the Responses API only.
+    #[arg(long, default_value = "16000", value_parser = cap)]
+    max_tokens: Cap,
     /// How hard the model works, in its API's words: for Claude low,
     /// medium, high, xhigh or max.
     #[arg(long)]
@@ -83,6 +85,22 @@ fn forks(said: &str) -> Result<Forks, String> {
     said.parse()
         .map(|limit| Forks(Some(limit)))
         .map_err(|_| format!("{said} is neither a number nor unlimited"))
+}
+
+/// A cap on a reply's tokens, or none.
+#[derive(Clone, Copy, Debug)]
+struct Cap(Option<u32>);
+
+/// `none`, or a number of at least 16, the least the APIs take.
+fn cap(said: &str) -> Result<Cap, String> {
+    if said == "none" {
+        return Ok(Cap(None));
+    }
+    said.parse()
+        .ok()
+        .filter(|tokens| *tokens >= 16)
+        .map(|tokens| Cap(Some(tokens)))
+        .ok_or_else(|| format!("{said} is neither a number of at least 16 nor none"))
 }
 
 /// A model's name, which is not empty.
@@ -145,9 +163,12 @@ pub async fn open(hosting: Hosting) -> Result<(Host, TcpListener), String> {
             ));
         }
     }
+    if hosting.max_tokens.0.is_none() && model.api == mensor_model::Api::Messages {
+        return Err("--max-tokens none is not one the Messages API takes: it needs a cap".into());
+    }
     model.effort = hosting.effort;
     model.fallbacks = !hosting.no_fallbacks;
-    model.max_tokens = hosting.max_tokens;
+    model.max_tokens = hosting.max_tokens.0;
     let model = Provider::new(model).map_err(|error| error.to_string())?;
 
     let config = Config {
@@ -285,7 +306,15 @@ mod tests {
         assert_eq!(forks("64").unwrap().0, Some(64));
         assert_eq!(forks("unlimited").unwrap().0, None);
         assert!(forks("lots").is_err());
-        assert!(parsed(&["--max-tokens", "0"]).is_err());
+        assert_eq!(
+            parsed(&["--max-tokens", "16"]).unwrap().max_tokens.0,
+            Some(16)
+        );
+        assert_eq!(
+            parsed(&["--max-tokens", "none"]).unwrap().max_tokens.0,
+            None
+        );
+        assert!(parsed(&["--max-tokens", "15"]).is_err());
         let offered = parsed(&["--models", "claude-haiku-5-5, claude-sonnet-5-5"]).unwrap();
         assert_eq!(offered.models, ["claude-haiku-5-5", "claude-sonnet-5-5"]);
         assert!(parsed(&["--models", "claude-haiku-5-5,,b"]).is_err());

@@ -239,7 +239,7 @@ from then on:
 | Field | Is |
 | --- | --- |
 | `model` | The model it asks: `--model`, or one of `--models`. |
-| `effort` | How hard that model works: for the Messages API `low`, `medium`, `high`, `xhigh` or `max`, and for Chat Completions any the server takes. |
+| `effort` | How hard that model works: for the Messages API `low`, `medium`, `high`, `xhigh` or `max`, and for the others any the server takes. |
 | `system` | Its system prompt, in place of `--system-file`'s. |
 | `from` | `{"mind", "at", "hand"}`: start from the first `at` items of `mind`'s history, keeping its hand `hand`. |
 
@@ -276,14 +276,14 @@ ended one needs a hand that can stand where it starts.
 | Credential | API | Address |
 | --- | --- | --- |
 | `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` | Claude's Messages API | `ANTHROPIC_BASE_URL`, or Anthropic's |
-| `OPENAI_API_KEY` | Chat Completions (OpenAI, OpenRouter and most others) | `OPENAI_BASE_URL`, or OpenAI's |
+| `OPENAI_API_KEY` | Chat Completions (OpenAI, OpenRouter and most others), or with `MENSOR_API=responses` OpenAI's Responses API | `OPENAI_BASE_URL`, or OpenAI's |
 
-With both set it is the Messages API, unless `MENSOR_API=chat`. `--model`
-picks the model (`claude-opus-5-5` by default, so name one for Chat
-Completions), and `--effort` how hard it works. `--models`, a comma list,
-names more a mind may be made with, through the same API and credential. A
-request Claude declines may be answered by a fallback model, unless
-`--no-fallbacks` is set.
+With both set it is the Messages API, unless `MENSOR_API` is `chat` or
+`responses`. `--model` picks the model (`claude-opus-5-5` by default, so
+name another for the others), and `--effort` how hard it works. `--models`,
+a comma list, names more a mind may be made with, through the same API and
+credential. A request Claude declines may be answered by a fallback model,
+unless `--no-fallbacks` is set.
 
 - `ANTHROPIC_AUTH_TOKEN` goes on `Authorization` as a plain bearer, as a
   gateway in front of the API takes it. A Claude.ai OAuth token is not one.
@@ -302,12 +302,20 @@ request Claude declines may be answered by a fallback model, unless
   every block after it. What the history says is written the same for every
   mind that shares it, so a fork's child on its parent's setup starts with
   its parent's last request, reasoning and all, and reads its cache.
-- `--max-tokens` (16,000) caps one reply: the Messages API's `max_tokens`,
-  and Chat Completions' `max_completion_tokens`, which OpenAI and
-  OpenRouter both honour. A reply cut off while it asks for a tool is
-  asked for again, with that tool not run; one cut off in its text ends
-  the turn. Both APIs count reasoning in it, so a model at a high effort
-  can spend it all thinking.
+- The Responses API stores nothing (`store: false`): each request carries
+  the conversation, and a step's output items go back as they came, its
+  reasoning encrypted and its messages with their phase. Items the API
+  refuses, such as another organization's reasoning, are left out once and
+  the request sent again. With an effort it is also asked for a summary of
+  the reasoning, which OpenAI may give only to a verified organization.
+- `--max-tokens` (16,000, at least 16) caps one reply: the Messages API's
+  `max_tokens`, Chat Completions' `max_completion_tokens`, which OpenAI
+  and OpenRouter both honour, and the Responses API's `max_output_tokens`.
+  `none` sends no cap, for a server that refuses one; the Messages API
+  needs one. A reply cut off while it asks for a tool is asked for again,
+  with that tool not run; one cut off in its text ends the turn. Every API
+  counts reasoning in it, so a model at a high effort can spend it all
+  thinking.
 - Replies stream. `/events` carries each one as `writing` events before its
   step is stored.
 - At `--compact-at` tokens (150,000; 0 turns it off) the model sums the
@@ -397,7 +405,7 @@ A mind can also run as one Durable Object that holds its history, one hand
 | `mensor-protocol` | The messages between a mind and a hand, and how a connection is settled. Pure. |
 | `mensor-mind` | The history, the turn loop, the tools and forks, as a state machine, and the store trait with the tests every store passes. Pure. |
 | `mensor-hand` | A hand's memory, the capability trait, and `files` over any byte store. Pure. |
-| `mensor-model` | Requests and answers for the Messages API and Chat Completions, with retries. Pure. |
+| `mensor-model` | Requests and answers for the Messages API, Chat Completions and the Responses API, with retries. Pure. |
 | `mensor-api` | The HTTP API's bodies, which both hosts serve. Pure. |
 | `mensor-object` | A mind and its one hand as one object over a storage trait. Pure. |
 | `mensor-mind-host` | The server: a task per mind, the attach endpoint, the API, the model client. |

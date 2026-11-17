@@ -1,6 +1,8 @@
 //! Chat Completions: `POST /chat/completions`, as `OpenAI`, `OpenRouter` and
 //! most other model servers speak it.
 
+use std::borrow::Cow;
+
 use mensor_mind::{Block, Content, Message, ModelReply, ModelRequest, Role, Stop, Usage};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -34,7 +36,8 @@ struct Body<'a> {
     model: &'a str,
     /// The cap on a reply: the name `OpenAI` asks for, and `OpenRouter`
     /// takes as it takes `max_tokens`.
-    max_completion_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_completion_tokens: Option<u32>,
     stream: bool,
     stream_options: StreamOptions,
     messages: Vec<Said<'a>>,
@@ -146,20 +149,12 @@ fn user<'a>(messages: &mut Vec<Said<'a>>, message: &'a Message) {
                 tool_use,
                 text,
                 error,
-            } => {
-                // This API has no flag for a failed call, so the text says.
-                let told = match (text.is_empty(), error) {
-                    (true, _) => "(no output)".to_owned(),
-                    (false, true) => format!("Error: {text}"),
-                    (false, false) => text.clone(),
-                };
-                messages.push(Said {
-                    role: "tool",
-                    content: Some(told),
-                    tool_call_id: Some(tool_use),
-                    ..Said::default()
-                });
-            }
+            } => messages.push(Said {
+                role: "tool",
+                content: Some(told(text, *error).into_owned()),
+                tool_call_id: Some(tool_use),
+                ..Said::default()
+            }),
             Content::Text(said) if !said.is_empty() => {
                 if !text.is_empty() {
                     text.push_str("\n\n");
@@ -190,6 +185,25 @@ fn user<'a>(messages: &mut Vec<Said<'a>>, message: &'a Message) {
     }
 }
 
+/// A tool's input as JSON in a string, as this API and the Responses API
+/// take it: one that was not JSON goes back as the model wrote it.
+pub(crate) fn arguments(input: &Value) -> String {
+    match input {
+        Value::String(written) => written.clone(),
+        input => input.to_string(),
+    }
+}
+
+/// A tool's result as this API and the Responses API are told it. Neither
+/// has a flag for a failed call, so the text says.
+pub(crate) fn told(text: &str, error: bool) -> Cow<'_, str> {
+    match (text.is_empty(), error) {
+        (true, _) => Cow::Borrowed("(no output)"),
+        (false, true) => Cow::Owned(format!("Error: {text}")),
+        (false, false) => Cow::Borrowed(text),
+    }
+}
+
 fn assistant(message: &Message) -> Option<Said<'_>> {
     let mut said = Said {
         role: "assistant",
@@ -209,7 +223,7 @@ fn assistant(message: &Message) -> Option<Said<'_>> {
                 r#type: "function",
                 function: Called {
                     name,
-                    arguments: input.to_string(),
+                    arguments: arguments(input),
                 },
             }),
             // Reasoning another API wrote means nothing to this one.
@@ -355,7 +369,7 @@ pub(crate) fn reply(body: &str) -> Result<ModelReply, String> {
 /// A tool's input, from the JSON a model wrote in a string. Nothing at all
 /// is an empty object. What is not JSON is kept as the string it is, and
 /// the capability it reaches says what is wrong with it.
-fn input(arguments: String) -> Value {
+pub(crate) fn input(arguments: String) -> Value {
     if arguments.trim().is_empty() {
         return Value::Object(Map::new());
     }
@@ -556,7 +570,7 @@ mod tests {
 
     #[test]
     fn a_request_is_written_as_the_api_reads_it() {
-        let (config, request) = (config(), request());
+        let (mut config, mut request) = (config(), request());
         let post = Exchange::new(&config, &request).post();
         assert_eq!(post.url, "https://api.openai.com/v1/chat/completions");
         assert_eq!(post.header("authorization"), Some("Bearer sk-test"));
@@ -573,6 +587,9 @@ mod tests {
                     {"role": "assistant", "tool_calls": [{
                         "id": "tu_1", "type": "function",
                         "function": {"name": "bash", "arguments": r#"{"command":"ls"}"#},
+                    }, {
+                        "id": "tu_2", "type": "function",
+                        "function": {"name": "bash", "arguments": r#"{"command":"cat x"}"#},
                     }]},
                     {"role": "tool", "tool_call_id": "tu_1", "content": "(no output)"},
                     {"role": "tool", "tool_call_id": "tu_2", "content": "Error: no"},
@@ -582,13 +599,24 @@ mod tests {
                 }}],
             })
         );
+
+        // Arguments that were not JSON go back as the model wrote them, and
+        // a host may send no cap.
+        if let Content::ToolUse { input, .. } = &mut request.messages[1].content[3] {
+            *input = json!("cat x");
+        }
+        config.max_tokens = None;
+        let body = body_of(&Exchange::new(&config, &request).post());
+        let called = &body["messages"][2]["tool_calls"][1]["function"]["arguments"];
+        assert_eq!(called, &json!("cat x"));
+        assert!(body.get("max_completion_tokens").is_none());
     }
 
     #[test]
     fn a_mind_with_a_model_of_its_own_asks_it() {
         let mut config = config();
         config.effort = Some("high".into());
-        config.max_tokens = 24_000;
+        config.max_tokens = Some(24_000);
         let request = ModelRequest {
             model: Some("gpt-mini".into()),
             effort: Some("low".into()),

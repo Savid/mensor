@@ -1,6 +1,6 @@
 [package]
 name = "mensor-model"
-description = "Model APIs as requests to send and answers to read, with no I/O: Claude's Messages API, and Chat Completions"
+description = "Model APIs as requests to send and answers to read, with no I/O: Claude's Messages API, Chat Completions and OpenAI's Responses API"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

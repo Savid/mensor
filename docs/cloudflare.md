@@ -48,8 +48,8 @@ npx wrangler@4.160.1 deploy
 | Variable | Meaning |
 | --- | --- |
 | `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` | The credential of a model behind Claude's Messages API. A secret. |
-| `OPENAI_API_KEY` | The credential of a model behind Chat Completions. A secret. |
-| `MENSOR_API` | `messages` or `chat`, when both credentials are set. |
+| `OPENAI_API_KEY` | The credential of a model behind Chat Completions or the Responses API. A secret. |
+| `MENSOR_API` | `responses` for OpenAI's Responses API; `chat` for Chat Completions when both credentials are set. |
 | `MENSOR_TOKEN` | The bearer token every request must carry. A secret. Without it, only this machine is served. Tokens made from it for one mind, as `mensor token` makes them, are not taken: the worker's one hand is inside it. |
 | `MENSOR_MODEL` | The model every mind asks. `claude-opus-5-5` unless set. |
 | `MENSOR_EFFORT` | How hard the model works, in its API's words: for Claude `low`, `medium`, `high`, `xhigh` or `max`. |

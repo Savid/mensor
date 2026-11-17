@@ -1,11 +1,12 @@
 //! Model APIs, as requests to send and answers to read.
 //!
 //! A host speaks a model's HTTP API itself: one request per model call.
-//! This crate holds everything about that except the sending, for two APIs:
-//! Claude's Messages API, and the Chat Completions API that `OpenAI`,
-//! `OpenRouter` and most other servers speak. An [`Exchange`] is one model
-//! call: it says what to post, is told what came back, and answers with the
-//! reply or with how long to wait before posting again.
+//! This crate holds everything about that except the sending, for three
+//! APIs: Claude's Messages API, the Chat Completions API that `OpenAI`,
+//! `OpenRouter` and most other servers speak, and `OpenAI`'s Responses API.
+//! An [`Exchange`] is one model call: it says what to post, is told what
+//! came back, and answers with the reply or with how long to wait before
+//! posting again.
 //!
 //! Every request asks for its reply as a stream of server-sent events. A
 //! host hands the bytes of one to a [`Reading`] as they arrive, which says
@@ -47,6 +48,7 @@
 
 mod chat;
 mod messages;
+mod responses;
 
 use std::fmt::{self, Write as _};
 use std::time::Duration;
@@ -63,19 +65,21 @@ pub enum Api {
     Messages,
     /// Chat Completions: `POST {base}/chat/completions`.
     Chat,
+    /// `OpenAI`'s Responses API: `POST {base}/responses`.
+    Responses,
 }
 
 /// The efforts Claude's Messages API takes, from least to most.
 pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 impl Api {
-    /// The efforts it takes: Claude's for the Messages API. Chat
-    /// Completions servers differ in theirs, so any that is not empty is
-    /// sent, and one a server does not take fails its request.
+    /// The efforts it takes: Claude's for the Messages API. Other servers
+    /// and models differ in theirs, so any that is not empty is sent, and
+    /// one a server does not take fails its request.
     pub fn efforts(self) -> Option<&'static [&'static str]> {
         match self {
             Self::Messages => Some(&EFFORTS),
-            Self::Chat => None,
+            Self::Chat | Self::Responses => None,
         }
     }
 }
@@ -83,8 +87,8 @@ impl Api {
 /// How to prove who is asking.
 #[derive(Clone)]
 pub enum Credential {
-    /// An API key. The Messages API takes it as `x-api-key`, Chat
-    /// Completions as a bearer token.
+    /// An API key. The Messages API takes it as `x-api-key`, the others as
+    /// a bearer token.
     ApiKey(String),
     /// A token sent as a plain bearer, as a gateway in front of the API takes it.
     Token(String),
@@ -105,7 +109,7 @@ pub struct Config {
     /// The API the model is behind.
     pub api: Api,
     /// The API's address: without a path for the Messages API, and up to
-    /// and including the version, such as `/v1`, for Chat Completions.
+    /// and including the version, such as `/v1`, for the others.
     pub base_url: String,
     /// The credential every request carries.
     pub credential: Credential,
@@ -113,17 +117,19 @@ pub struct Config {
     /// its own.
     pub model: String,
     /// The most tokens one reply may hold: the Messages API's
-    /// `max_tokens`, and Chat Completions' `max_completion_tokens`, which
-    /// `OpenAI` and `OpenRouter` both honour. A reply that reaches it is
-    /// cut off, and the mind asks again.
-    pub max_tokens: u32,
+    /// `max_tokens`, Chat Completions' `max_completion_tokens`, which
+    /// `OpenAI` and `OpenRouter` both honour, and the Responses API's
+    /// `max_output_tokens`. A reply that reaches it is cut off, and the
+    /// mind asks again. `None` sends no cap, for a server that refuses
+    /// one; the Messages API needs it.
+    pub max_tokens: Option<u32>,
     /// How hard the model works, in the API's own words: for Claude `low`,
     /// `medium`, `high`, `xhigh` or `max`, unless a request says. `None`
     /// leaves the model's own default.
     pub effort: Option<String>,
     /// Whether a request Claude declines may be served by the fallback
     /// model the Messages API picks. Turn it off where the API does not
-    /// offer it. Chat Completions has none.
+    /// offer it. The other APIs have none.
     pub fallbacks: bool,
     /// How many times a failed request is sent again.
     pub max_retries: u32,
@@ -139,7 +145,7 @@ impl Config {
             base_url: "https://api.anthropic.com".into(),
             credential,
             model: model.into(),
-            max_tokens: 16_000,
+            max_tokens: Some(16_000),
             effort: None,
             fallbacks: true,
             max_retries: 4,
@@ -156,14 +162,23 @@ impl Config {
         }
     }
 
+    /// The defaults for `model` behind the Responses API.
+    pub fn responses(key: impl Into<String>, model: impl Into<String>) -> Self {
+        Self {
+            api: Api::Responses,
+            ..Self::chat(key, model)
+        }
+    }
+
     /// The defaults for `model`, with the API, credential and address that
     /// `var` gives. A host passes its own source of variables: its
     /// environment, or the bindings a platform gives it.
     ///
     /// `ANTHROPIC_API_KEY` or else `ANTHROPIC_AUTH_TOKEN` is the Messages
     /// API, at `ANTHROPIC_BASE_URL` when that is set. `OPENAI_API_KEY` is
-    /// Chat Completions, at `OPENAI_BASE_URL` when that is set. With both,
-    /// it is the Messages API unless `MENSOR_API` is `chat`.
+    /// Chat Completions, or the Responses API if `MENSOR_API` is
+    /// `responses`, at `OPENAI_BASE_URL` when that is set. With both, it is
+    /// the Messages API unless `MENSOR_API` is `chat` or `responses`.
     pub fn from_vars(
         model: impl Into<String>,
         var: impl Fn(&str) -> Option<String>,
@@ -173,9 +188,10 @@ impl Config {
             None => None,
             Some("messages") => Some(Api::Messages),
             Some("chat") => Some(Api::Chat),
+            Some("responses") => Some(Api::Responses),
             Some(other) => {
                 return Err(ModelError(format!(
-                    "MENSOR_API is messages or chat, not {other}"
+                    "MENSOR_API is messages, chat or responses, not {other}"
                 )));
             }
         };
@@ -189,10 +205,14 @@ impl Config {
                 (Self::messages(credential, model), "ANTHROPIC_BASE_URL")
             }
             (None | Some(Api::Chat), _, Some(key)) => (Self::chat(key, model), "OPENAI_BASE_URL"),
+            (Some(Api::Responses), _, Some(key)) => {
+                (Self::responses(key, model), "OPENAI_BASE_URL")
+            }
             _ => {
                 return Err(ModelError(
                     "set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN to reach a model through the \
-                     Messages API, or OPENAI_API_KEY to reach one through Chat Completions"
+                     Messages API, or OPENAI_API_KEY to reach one through Chat Completions or \
+                     the Responses API"
                         .into(),
                 ));
             }
@@ -294,6 +314,7 @@ impl<'a> Exchange<'a> {
         match self.config.api {
             Api::Messages => messages::post(self.config, self.request, self.drop_reasoning),
             Api::Chat => chat::post(self.config, self.request),
+            Api::Responses => responses::post(self.config, self.request, self.drop_reasoning),
         }
     }
 
@@ -305,6 +326,7 @@ impl<'a> Exchange<'a> {
             parts: match self.config.api {
                 Api::Messages => Parts::Messages(messages::Parts::default()),
                 Api::Chat => Parts::Chat(chat::Parts::default()),
+                Api::Responses => Parts::Responses(responses::Parts::default()),
             },
             written: 0,
         }
@@ -317,13 +339,16 @@ impl<'a> Exchange<'a> {
     /// refuses reasoning the history no longer matches: the mind never
     /// edits its history, but the system prompt or the body's tools can
     /// change between requests, so those blocks are dropped once and the
-    /// request sent again.
+    /// request sent again. The Responses API refuses items it cannot read,
+    /// such as another organization's encrypted reasoning: the request is
+    /// sent again once without them.
     pub fn answered(&mut self, answer: Answer) -> Next {
         let failure = match answer {
             Answer::Response { status, body, .. } if (200..300).contains(&status) => {
                 let read = match self.config.api {
                     Api::Messages => messages::reply(&body),
                     Api::Chat => chat::reply(&body),
+                    Api::Responses => responses::reply(&body),
                 };
                 return Next::Done(read.map_err(|error| {
                     ModelError(format!("the model's reply could not be read: {error}"))
@@ -348,7 +373,11 @@ impl<'a> Exchange<'a> {
             },
         };
 
-        let unbound = self.config.api == Api::Messages && messages::reasoning_is_unbound(&failure);
+        let unbound = match self.config.api {
+            Api::Messages => messages::reasoning_is_unbound(&failure),
+            Api::Responses => responses::items_are_refused(&failure),
+            Api::Chat => false,
+        };
         if unbound && !self.drop_reasoning {
             self.drop_reasoning = true;
             return Next::Again {
@@ -382,10 +411,20 @@ pub struct Reading {
 enum Parts {
     Messages(messages::Parts),
     Chat(chat::Parts),
+    Responses(responses::Parts),
 }
 
 /// What is wrong with a stream that stops before its reply has ended.
 const CUT_OFF: &str = "the reply was cut off before it ended";
+
+/// The types and codes of errors no retry mends, wherever they are told:
+/// an account with nothing left, and a request the API will never take.
+const HOPELESS: [&str; 4] = [
+    "insufficient_quota",
+    "invalid_request_error",
+    "context_length_exceeded",
+    "invalid_prompt",
+];
 
 impl Reading {
     /// Takes the next bytes of the answer, however they are cut. If the
@@ -404,6 +443,7 @@ impl Reading {
                 match &mut self.parts {
                     Parts::Messages(parts) => parts.take(data, &mut text),
                     Parts::Chat(parts) => parts.take(data, &mut text),
+                    Parts::Responses(parts) => parts.take(data, &mut text),
                 }
             }
             read += end + 1;
@@ -422,6 +462,7 @@ impl Reading {
         match self.parts {
             Parts::Messages(parts) => parts.finish(),
             Parts::Chat(parts) => parts.finish(),
+            Parts::Responses(parts) => parts.finish(),
         }
     }
 }
@@ -439,10 +480,12 @@ impl Failure {
     /// is busy or failed.
     ///
     /// An account with nothing left to spend is answered as a busy API is,
-    /// with 429, and no wait fills it: that one is not sent again.
+    /// with 429, and a request the API cannot take may fail inside the
+    /// stream, as a lost reply does: [`HOPELESS`] names those, which no
+    /// retry mends.
     fn is_retryable(&self) -> bool {
-        let spent = self.detail.starts_with("insufficient_quota");
-        !spent
+        let hopeless = HOPELESS.iter().any(|kind| self.detail.contains(kind));
+        !hopeless
             && self
                 .status
                 .is_none_or(|status| matches!(status, 408 | 409 | 429 | 500..=599))
@@ -523,10 +566,16 @@ mod tests {
                         Content::Other(
                             json!({"type": "thinking", "thinking": "", "signature": "s"}),
                         ),
+                        Content::Other(reasoning()),
                         Content::ToolUse {
                             id: "tu_1".into(),
                             name: "bash".into(),
                             input: json!({"command": "ls"}),
+                        },
+                        Content::ToolUse {
+                            id: "tu_2".into(),
+                            name: "bash".into(),
+                            input: json!({"command": "cat x"}),
                         },
                     ],
                 },
@@ -554,6 +603,11 @@ mod tests {
             }],
             text_only: false,
         }
+    }
+
+    /// Reasoning the Responses API wrote, which the others leave out.
+    pub(crate) fn reasoning() -> Value {
+        json!({"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "enc"})
     }
 
     pub(crate) fn body_of(post: &Post) -> Value {
@@ -634,11 +688,17 @@ mod tests {
         let chosen = Config::from_vars("gpt", vars(&both)).unwrap();
         assert_eq!(url(&chosen), "http://127.0.0.1:9/v1/chat/completions");
 
+        let responses = [("OPENAI_API_KEY", "sk-openai"), ("MENSOR_API", "responses")];
+        let chosen = Config::from_vars("gpt", vars(&responses)).unwrap();
+        assert_eq!(url(&chosen), "https://api.openai.com/v1/responses");
+
         assert!(Config::from_vars("claude-opus-5-5", |_| None).is_err());
         let unknown = [("ANTHROPIC_API_KEY", "sk-claude"), ("MENSOR_API", "soap")];
         assert!(Config::from_vars("claude-opus-5-5", vars(&unknown)).is_err());
-        let missing = [("ANTHROPIC_API_KEY", "sk-claude"), ("MENSOR_API", "chat")];
-        assert!(Config::from_vars("gpt", vars(&missing)).is_err());
+        for api in ["chat", "responses"] {
+            let missing = [("ANTHROPIC_API_KEY", "sk-claude"), ("MENSOR_API", api)];
+            assert!(Config::from_vars("gpt", vars(&missing)).is_err());
+        }
     }
 
     #[test]
@@ -727,6 +787,32 @@ mod tests {
             json!("drop_block")
         );
         assert!(matches!(exchange.answered(unbound()), Next::Done(Err(_))));
+
+        // The Responses API refuses an item it cannot read, such as another
+        // organization's reasoning: it is asked once more without them.
+        let config = Config::responses("sk-test", "gpt");
+        let mut exchange = Exchange::new(&config, &request);
+        assert_eq!(body_of(&exchange.post())["input"][1], reasoning());
+        let refused = answer(
+            400,
+            &error(
+                "invalid_request_error",
+                "The encrypted content for item rs_1 could not be verified. Reason: Encrypted \
+                 content organization_id did not match the target organization.",
+            ),
+        );
+        assert!(matches!(
+            exchange.answered(refused),
+            Next::Again { wait, .. } if wait.is_zero()
+        ));
+        let input = body_of(&exchange.post())["input"].clone();
+        assert!(!input.as_array().unwrap().contains(&reasoning()));
+        assert_eq!(input[1]["call_id"], json!("tu_1"));
+        let replied = json!({"status": "completed", "output": []});
+        assert!(matches!(
+            exchange.answered(answer(200, &replied)),
+            Next::Done(Ok(_))
+        ));
     }
 
     #[test]
@@ -775,6 +861,16 @@ mod tests {
             &error("insufficient_quota", "You have no credits remaining."),
         );
         assert!(matches!(exchange.answered(spent), Next::Done(Err(_))));
+
+        // Nor one a stream said it can never take.
+        for said in [
+            "invalid_request_error: Invalid prompt.",
+            "Codex response failed: too long (code=context_length_exceeded, status=failed)",
+        ] {
+            let mut exchange = Exchange::new(&config, &request);
+            let failed = Answer::Unreachable(said.into());
+            assert!(matches!(exchange.answered(failed), Next::Done(Err(_))));
+        }
     }
 
     /// Reads a stream cut into pieces of `size` bytes: what the model
@@ -791,6 +887,11 @@ mod tests {
             reading.read(bytes, &mut |at, text| written.push((at, text.to_owned())));
         }
         (written, reading.finish())
+    }
+
+    /// The Responses API's event for an output item that has ended.
+    fn done(index: u64, item: &Value) -> Value {
+        json!({"type": "response.output_item.done", "output_index": index, "item": item})
     }
 
     /// Server-sent events of these data.
@@ -975,6 +1076,95 @@ mod tests {
     }
 
     #[test]
+    fn a_streamed_response_is_read_as_one_that_was_not() {
+        let said = |id: &str, text: &str| {
+            json!({"type": "message", "id": id, "role": "assistant", "status": "completed",
+                   "phase": "commentary",
+                   "content": [{"type": "output_text", "annotations": [], "text": text}]})
+        };
+        let call = json!({"type": "function_call", "id": "fc_1", "status": "completed",
+                          "call_id": "call_1", "name": "bash", "arguments": "{\"command\":\"ls\"}"});
+        let text = |index: u64, delta: &str| json!({"type": "response.output_text.delta", "output_index": index, "delta": delta});
+        let stream = events(&[
+            json!({"type": "response.created", "response": {"status": "in_progress"}}),
+            json!({"type": "response.reasoning_summary_text.delta", "output_index": 0,
+                   "delta": "Hm."}),
+            done(0, &reasoning()),
+            text(1, "Loo"),
+            text(1, "king."),
+            done(1, &said("msg_1", "Looking.")),
+            text(2, "Listing."),
+            done(2, &said("msg_2", "Listing.")),
+            json!({"type": "response.function_call_arguments.delta", "output_index": 3,
+                   "delta": "{\"command\":"}),
+            done(3, &call),
+            // The items as each ended are the ones to send back, whatever
+            // the response lists, if it lists any.
+            json!({"type": "response.completed", "response": {
+                "model": "gpt-6.1", "status": "completed", "output": [{"type": "reasoning"}],
+                "usage": {"input_tokens": 100, "input_tokens_details": {"cached_tokens": 80},
+                          "output_tokens": 7, "output_tokens_details": {"reasoning_tokens": 5}},
+            }}),
+        ]);
+
+        let config = Config::responses("sk-test", "gpt");
+        let (written, body) = read(&config, &stream, 5);
+        let text: String = written.iter().map(|(_, text)| text.as_str()).collect();
+        assert_eq!(text, "Looking.\n\nListing.");
+
+        let request = request();
+        let mut exchange = Exchange::new(&config, &request);
+        let Next::Done(Ok(reply)) = exchange.answered(answer_of(body.unwrap())) else {
+            panic!("the call should be over");
+        };
+        let kept = |value: Value| Block::Other { value };
+        let text = |text: &str| Block::Text { text: text.into() };
+        assert_eq!(
+            reply.content,
+            vec![
+                kept(reasoning()),
+                kept(said("msg_1", "Looking.")),
+                text("Looking."),
+                kept(said("msg_2", "Listing.")),
+                text("Listing."),
+                kept(call),
+                Block::ToolUse {
+                    id: "call_1".into(),
+                    name: "bash".into(),
+                    input: json!({"command": "ls"}),
+                },
+            ]
+        );
+        assert_eq!(reply.stop, mensor_mind::Stop::ToolUse);
+        assert_eq!(reply.model.as_deref(), Some("gpt-6.1"));
+        assert_eq!(
+            reply.usage,
+            Usage {
+                input: 20,
+                cache_read: 80,
+                cache_written: 0,
+                output: 7
+            }
+        );
+
+        // A reply cut off says so in its event, if not in its response.
+        let cut = events(&[
+            done(0, &said("msg_1", "Par")),
+            json!({"type": "response.incomplete",
+                   "response": {"incomplete_details": {"reason": "max_output_tokens"}}}),
+        ]);
+        let (_, body) = read(&config, &cut, 4096);
+        let mut exchange = Exchange::new(&config, &request);
+        let Next::Done(Ok(reply)) = exchange.answered(answer_of(body.unwrap())) else {
+            panic!("the call should be over");
+        };
+        assert_eq!(
+            (reply.content, reply.stop),
+            (vec![text("Par")], mensor_mind::Stop::MaxTokens)
+        );
+    }
+
+    #[test]
     fn a_stream_that_fails_or_stops_short_is_no_reply() {
         let begun = json!({"type": "message_start", "message": {"content": []}});
         let (_, cut) = read(&config(), &events(std::slice::from_ref(&begun)), 4096);
@@ -996,6 +1186,38 @@ mod tests {
         let (_, failed) = read(&chat, &events(&[said, failed]), 4096);
         assert_eq!(failed, Err("the provider failed".into()));
 
+        let responses = Config::responses("sk-test", "gpt");
+        let said = json!({"type": "response.output_text.delta", "output_index": 0, "delta": "Go"});
+        let (_, cut) = read(&responses, &events(&[said]), 4096);
+        assert_eq!(cut, Err(CUT_OFF.into()));
+        // A Responses stream whose items skip one lost it on the way.
+        let empty = json!({"type": "message", "content": []});
+        let ended = json!({"type": "response.completed", "response": {"status": "completed"}});
+        let gap = events(&[done(0, &empty), done(2, &empty), ended]);
+        let (_, gap) = read(&responses, &gap, 4096);
+        assert_eq!(gap, Err(CUT_OFF.into()));
+        for (event, said) in [
+            (
+                json!({"type": "error", "error": {"type": "invalid_request_error",
+                       "code": "context_length_exceeded", "message": "Too long."}}),
+                "invalid_request_error: Too long.",
+            ),
+            (
+                json!({"type": "response.failed", "response": {"error": null}}),
+                "the response failed and said nothing of why",
+            ),
+            (
+                json!({"type": "response.failed", "response": {
+                       "error": {"code": "server_error", "message": "it broke"}}}),
+                "server_error: it broke",
+            ),
+        ] {
+            let said_before = json!({"type": "response.output_text.delta",
+                                     "output_index": 0, "delta": "Go"});
+            let (_, failed) = read(&responses, &events(&[said_before, event]), 4096);
+            assert_eq!(failed, Err(said.into()));
+        }
+
         // The lost reply is asked for again.
         let (config, request) = (config(), request());
         let mut exchange = Exchange::new(&config, &request);
@@ -1005,7 +1227,11 @@ mod tests {
 
     #[test]
     fn a_reply_that_is_not_json_ends_the_call() {
-        for config in [config(), Config::chat("sk-test", "gpt")] {
+        for config in [
+            config(),
+            Config::chat("sk-test", "gpt"),
+            Config::responses("sk-test", "gpt"),
+        ] {
             let request = request();
             let mut exchange = Exchange::new(&config, &request);
             let garbled = Answer::Response {
