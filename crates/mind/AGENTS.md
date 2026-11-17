@@ -31,4 +31,14 @@ forks, and the `Store` trait (`src/store.rs`).
   then `Branched`, which resets its kin and numbers its calls above every
   one its keeper made.
 - Which of the mind's own tools are offered is `Settings::tools`; when each
-  applies is `Table::new`.
+  applies is `Table::new`. A fork leaves a mind's tools as they were, and
+  its children start with the same.
+- What the window writes for an item depends on that item and those before
+  it, never on later ones or on who reads it: names, not "your parent", and
+  a summary's hands and kin as it stored them. A child sends its parent's
+  last request as the start of its own.
+- A step's `under` is the fingerprint of the request that brought it
+  (`ModelRequest::fingerprint`, taken from the request as sent). Its
+  reasoning (`Block::Other`) goes back only to a request with the same.
+  Anything that changes the model, system prompt or tools changes the
+  fingerprint, and leaves out earlier reasoning.

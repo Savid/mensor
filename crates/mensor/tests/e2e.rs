@@ -382,6 +382,8 @@ async fn a_prompt_runs_a_command_on_the_hand_and_is_answered() {
         .map(|tool| tool.name.as_str())
         .collect();
     assert_eq!(tools, ["bash", "read", "write", "edit", "list"]);
+    // A mind with no model of its own names the host's.
+    assert_eq!(requests[0].model.as_deref(), Some("scripted"));
     let told = &requests[1].messages[2];
     assert_eq!(told.role, Role::User);
     assert!(
@@ -2145,8 +2147,6 @@ async fn made_from_an_ended_mind(store: Arc<dyn Store>) {
     let asked = server.model.requests();
     let last = asked.last().unwrap();
     assert_eq!(last.system.as_deref(), Some("Keep playing."));
-    // It is no kin of the mind it was made from.
-    assert!(last.tools.iter().all(|tool| tool.name != "tell"));
     server.stop().await;
 }
 

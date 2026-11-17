@@ -41,6 +41,11 @@ pub enum Item {
         /// What the step cost.
         #[serde(default)]
         usage: Usage,
+        /// What the model was asked under: a fingerprint of the model, the
+        /// system prompt and the tools. The step's reasoning goes back to
+        /// the model only under the same.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        under: Option<String>,
     },
     /// A call to a hand, stored before it is sent.
     Call {
@@ -355,9 +360,11 @@ mod tests {
                         input: 10,
                         output: 2,
                     },
+                    under: Some("0123456789abcdef".into()),
                 },
                 json!({"type": "step", "seen": 1, "content": [{"type": "text", "text": "ok"}],
-                       "stop": "end_turn", "usage": {"input": 10, "output": 2}}),
+                       "stop": "end_turn", "usage": {"input": 10, "output": 2},
+                       "under": "0123456789abcdef"}),
             ),
         ];
         round_trip(cases);

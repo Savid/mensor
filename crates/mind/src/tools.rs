@@ -7,9 +7,11 @@
 //! survives hands coming and going.
 //!
 //! The mind has tools of its own: `fork`, `clone_hand` and `release_hand`,
-//! shown while a hand can clone itself, `tell`, shown while it has a parent
-//! or children, and `wait`, shown while it has children. A host may offer
-//! only some of them ([`Settings::tools`](crate::Settings::tools)).
+//! shown while a hand can clone itself, and `tell` and `wait`, shown while
+//! a hand can clone itself or the mind has kin. Forking needs the first, so
+//! a fork leaves its tools as they were, and its children start with the
+//! same. A host may offer only some of them
+//! ([`Settings::tools`](crate::Settings::tools)).
 
 use std::str::FromStr;
 
@@ -166,16 +168,6 @@ pub(crate) enum Does {
     Mind(MindTool),
 }
 
-/// Who a mind can talk to: its own tools `tell` and `wait` are shown for
-/// them.
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct Family {
-    /// Whether it was forked from another mind.
-    pub(crate) parent: bool,
-    /// Whether it has forked.
-    pub(crate) children: bool,
-}
-
 /// The tools of a mind's hands, and its own.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Table {
@@ -188,9 +180,14 @@ impl Table {
     /// order of their names, then those of the mind's own that are
     /// `offered`. An operation two hands declare is one tool, defined as the
     /// first of them declares it.
+    ///
+    /// `tell` and `wait` are shown while a hand can be cloned or the mind
+    /// has `kin`, the others while a hand can be cloned: so a fork leaves
+    /// the mind's tools as they were, and its children start with the same,
+    /// and a prompt's cache, and the reasoning bound to it, hold across it.
     pub(crate) fn new<'a>(
         hands: impl IntoIterator<Item = (&'a Name, &'a [CapabilityDecl])>,
-        family: Family,
+        kin: bool,
         offered: &[MindTool],
     ) -> Self {
         let mut operations: Vec<(&str, &OperationDecl, Vec<Name>)> = Vec::new();
@@ -244,8 +241,7 @@ impl Table {
         for tool in MindTool::ALL {
             let shown = match tool {
                 MindTool::Fork | MindTool::CloneHand | MindTool::ReleaseHand => !cloners.is_empty(),
-                MindTool::Tell => family.parent || family.children,
-                MindTool::Wait => family.children,
+                MindTool::Tell | MindTool::Wait => kin || !cloners.is_empty(),
             };
             if !shown || !offered.contains(&tool) {
                 continue;
@@ -418,11 +414,7 @@ mod tests {
             capability("commands", &["bash"]),
             capability("files", &["read"]),
         ];
-        let table = Table::new(
-            [(&name("a1"), a1.as_slice())],
-            Family::default(),
-            &MindTool::ALL,
-        );
+        let table = Table::new([(&name("a1"), a1.as_slice())], false, &[]);
         assert_eq!(names(&table), ["bash", "read"]);
         let read = &table.tools()[1];
         assert!(read.input["properties"]["x"].is_object());
@@ -444,11 +436,7 @@ mod tests {
             capability("files", &["read", "write"]),
             capability("notes", &["read"]),
         ];
-        let table = Table::new(
-            [(&name("a1"), a1.as_slice())],
-            Family::default(),
-            &MindTool::ALL,
-        );
+        let table = Table::new([(&name("a1"), a1.as_slice())], false, &[]);
         assert_eq!(names(&table), ["files_read", "write", "notes_read"]);
     }
 
@@ -461,8 +449,8 @@ mod tests {
         ];
         let table = Table::new(
             [(&name("a1"), a1.as_slice()), (&name("b2"), b2.as_slice())],
-            Family::default(),
-            &MindTool::ALL,
+            false,
+            &[],
         );
         assert_eq!(names(&table), ["bash", "fetch"]);
         assert_eq!(table.find("bash").unwrap().1, [name("a1"), name("b2")]);
@@ -470,14 +458,14 @@ mod tests {
     }
 
     #[test]
-    fn the_minds_own_tools_come_with_a_hand_that_can_clone() {
+    fn the_minds_own_tools_come_with_a_hand_that_can_clone_and_tell_and_wait_with_kin_too() {
         let plain = vec![capability("commands", &["bash"])];
-        let table = Table::new(
-            [(&name("a1"), plain.as_slice())],
-            Family::default(),
-            &MindTool::ALL,
+        let hands = [(&name("a1"), plain.as_slice())];
+        assert_eq!(names(&Table::new(hands, false, &MindTool::ALL)), ["bash"]);
+        assert_eq!(
+            names(&Table::new(hands, true, &MindTool::ALL)),
+            ["bash", "tell", "wait"]
         );
-        assert!(table.find("fork").is_none());
 
         let cloning = vec![
             capability("commands", &["bash"]),
@@ -490,12 +478,20 @@ mod tests {
                 (&name("b2"), plain.as_slice()),
                 (&name("c3"), fork.as_slice()),
             ],
-            Family::default(),
+            false,
             &MindTool::ALL,
         );
         assert_eq!(
             names(&table),
-            ["bash", "tools_fork", "fork", "clone_hand", "release_hand"]
+            [
+                "bash",
+                "tools_fork",
+                "fork",
+                "clone_hand",
+                "release_hand",
+                "tell",
+                "wait"
+            ]
         );
         let (does, cloners) = table.find("fork").unwrap();
         assert_eq!(does, &Does::Mind(MindTool::Fork));
@@ -503,43 +499,15 @@ mod tests {
     }
 
     #[test]
-    fn a_mind_talks_to_the_minds_it_has() {
-        let plain = vec![capability("commands", &["bash"])];
-        let hands = [(&name("a1"), plain.as_slice())];
-        let child = Family {
-            parent: true,
-            children: false,
-        };
-        assert_eq!(
-            names(&Table::new(hands, child, &MindTool::ALL)),
-            ["bash", "tell"]
-        );
-        let parent = Family {
-            parent: false,
-            children: true,
-        };
-        let table = Table::new(hands, parent, &MindTool::ALL);
-        assert_eq!(names(&table), ["bash", "tell", "wait"]);
-        assert_eq!(
-            table.find("wait").unwrap(),
-            (&Does::Mind(MindTool::Wait), &[][..])
-        );
-    }
-
-    #[test]
     fn a_host_offers_only_the_minds_own_tools_it_chooses() {
         let cloning = vec![capability(CLONE, &["clone"])];
         let hands = [(&name("a1"), cloning.as_slice())];
-        let family = Family {
-            parent: true,
-            children: true,
-        };
-        let table = Table::new(hands, family, &[MindTool::Fork, MindTool::Wait]);
+        let table = Table::new(hands, false, &[MindTool::Fork, MindTool::Wait]);
         assert_eq!(names(&table), ["fork", "wait"]);
         assert!(table.find("clone_hand").is_none());
         assert!(table.find("release_hand").is_none());
         assert_eq!(table.find("fork").unwrap().1, [name("a1")]);
-        assert!(Table::new(hands, family, &[]).tools().is_empty());
+        assert!(Table::new(hands, false, &[]).tools().is_empty());
     }
 
     #[test]

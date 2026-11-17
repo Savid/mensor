@@ -81,8 +81,8 @@ It differs from the server in five ways:
 - No `GET /v1/minds`: each object knows only itself.
 - A mind starts with its first prompt, not with a hand attaching.
 
-The hand cannot clone, so the mind has none of its own tools: it neither
-forks nor has kin to talk to.
+The mind is offered none of its own tools: its hand cannot clone, and it
+has no kin to talk to.
 
 ## What the hand can do
 

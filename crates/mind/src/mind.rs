@@ -6,7 +6,7 @@ use mensor_protocol::{
 use serde_json::{Value, json};
 
 use crate::fork::{Fork, child_name, shares};
-use crate::tools::{CLONE, Does, Family, HAND, MAX_CHILDREN, MindTool, Table, split};
+use crate::tools::{CLONE, Does, HAND, MAX_CHILDREN, MindTool, Table, split};
 use crate::window::{to_summarise, window};
 use crate::{
     Block, Content, HandRecord, Item, Latest, MadeFrom, Message, MindSettings, ModelReply,
@@ -322,11 +322,13 @@ struct Hand {
     released: Option<u64>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct Asking {
     seen: u64,
     /// Whether the model was asked for a summary, not a step.
     summary: bool,
+    /// The request's fingerprint, which the step it brings is stored with.
+    under: String,
 }
 
 /// Where a clone is to go.
@@ -837,6 +839,7 @@ impl Mind {
                 content,
                 stop,
                 usage,
+                under: Some(asking.under),
             }
         };
         let mut outputs = Vec::new();
@@ -1253,10 +1256,11 @@ impl Mind {
                     self.append(item, outputs);
                 }
                 Next::Ask if self.asking.is_none() && self.may_ask() => {
-                    let (request, summary) = self.request();
+                    let (request, under) = self.request();
                     self.asking = Some(Asking {
                         seen: request.seen,
-                        summary,
+                        summary: request.text_only,
+                        under,
                     });
                     outputs.push(Output::Ask(request));
                     return;
@@ -1756,6 +1760,9 @@ impl Mind {
             tool_use: id.to_owned(),
             why,
         };
+        if self.kin.parent.is_none() && self.kin.children.is_empty() {
+            return skip("this mind has no parent or children to tell".into());
+        }
         let to = input["mind"].as_str().and_then(|to| Name::new(to).ok());
         let Some(to) = to.filter(|to| self.is_kin(to)) else {
             return skip(format!(
@@ -1825,6 +1832,9 @@ impl Mind {
 
     /// The children a `wait` with `input` is for: those it names, or all.
     fn waited_for(&self, input: &Value) -> Result<Vec<Name>, String> {
+        if self.kin.children.is_empty() {
+            return Err("this mind has no children to wait for".into());
+        }
         let minds = match &input["minds"] {
             Value::Null => self.kin.children.clone(),
             Value::Array(minds) => {
@@ -2031,33 +2041,33 @@ impl Mind {
                 .iter()
                 .filter(|(_, hand)| hand.released.is_none())
                 .map(|(name, hand)| (name, hand.record.capabilities.as_slice())),
-            Family {
-                parent: self.kin.parent.is_some(),
-                children: !self.kin.children.is_empty(),
-            },
+            self.kin.parent.is_some() || !self.kin.children.is_empty(),
             &self.settings.tools,
         )
     }
 
-    /// The next request: for a step, or for a summary when the conversation
-    /// has outgrown what one request may hold.
-    fn request(&self) -> (ModelRequest, bool) {
-        let max = self.settings.max_results;
-        let mut messages = window(&self.items, self.before, max);
-        let summary = self.is_full(&messages);
-        if summary {
-            messages = to_summarise(&self.items, self.before, SUMMARISE, max);
-        }
-        let request = ModelRequest {
+    /// The next request, and its fingerprint: for a step, or for a summary
+    /// when the conversation has outgrown what one request may hold. The
+    /// fingerprint is taken from the request as it is sent, and decides
+    /// whose reasoning its messages carry.
+    fn request(&self) -> (ModelRequest, String) {
+        let mut request = ModelRequest {
             seen: self.length(),
             model: self.settings.own.model.clone(),
             effort: self.settings.own.effort.clone(),
             system: self.settings.own.system.clone(),
-            messages,
+            messages: Vec::new(),
             tools: self.table().tools(),
-            text_only: summary,
+            text_only: false,
         };
-        (request, summary)
+        let under = request.fingerprint();
+        let max = self.settings.max_results;
+        request.messages = window(&self.items, self.before, max, &under);
+        if self.is_full(&request.messages) {
+            request.messages = to_summarise(&self.items, self.before, SUMMARISE, max, &under);
+            request.text_only = true;
+        }
+        (request, under)
     }
 
     /// Whether the request `messages` make would hold `compact_at` tokens

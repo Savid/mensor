@@ -103,6 +103,7 @@ pub fn a_history_is_read_a_page_at_a_time_and_from_its_last_summary(store: &dyn 
         content: Vec::new(),
         stop: Stop::EndTurn,
         usage: Usage::default(),
+        under: None,
     };
     store.append(&name("b7"), &[prompt("6"), step]).unwrap();
     let latest = store.recent(&name("b7")).unwrap();

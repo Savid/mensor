@@ -28,9 +28,10 @@ const SUMMARISED: &str =
 /// `items` are the end of a history, and `before` is how many items of it
 /// come before them: none, or those a summary replaced. The results of one
 /// step are shown in `max_results` bytes at the most, shared equally
-/// between them.
-pub(crate) fn window(items: &[Item], before: u64, max_results: usize) -> Vec<Message> {
-    conversation(items, before, None, max_results)
+/// between them. A step's reasoning is shown only if it was asked `under`
+/// the fingerprint of the request this is for.
+pub(crate) fn window(items: &[Item], before: u64, max_results: usize, under: &str) -> Vec<Message> {
+    conversation(items, before, None, max_results, under)
 }
 
 /// The request for a summary: everything the steps have seen, then `ask`.
@@ -41,8 +42,9 @@ pub(crate) fn to_summarise(
     before: u64,
     ask: &str,
     max_results: usize,
+    under: &str,
 ) -> Vec<Message> {
-    conversation(items, before, Some(ask), max_results)
+    conversation(items, before, Some(ask), max_results, under)
 }
 
 fn conversation(
@@ -50,6 +52,7 @@ fn conversation(
     before: u64,
     ask: Option<&str>,
     max_results: usize,
+    under: &str,
 ) -> Vec<Message> {
     let summary = items
         .iter()
@@ -66,15 +69,6 @@ fn conversation(
             } => Some((at, text, *from, hands, (parent.as_ref(), children))),
             _ => None,
         });
-    // A message from the mind's parent says so; any other is a child's.
-    let parent = items.iter().rev().find_map(|item| match item {
-        Item::Parted { parent, .. }
-        | Item::Summary {
-            parent: Some(parent),
-            ..
-        } => Some(parent),
-        _ => None,
-    });
     // What the next user message holds: results first, then prompts.
     let mut user: Vec<Content> = Vec::new();
     // The hands the model has been told of, with what each can do.
@@ -83,13 +77,6 @@ fn conversation(
     // what the last step before it had seen.
     let (steps_from, prompts_from) = match summary {
         Some((at, text, from, hands, kin)) => {
-            // A summary a child shares with its parent names the parent's
-            // kin: the child's own follow it. So does one a mind made from
-            // another's history shares with it.
-            let parted = items[at..]
-                .iter()
-                .any(|item| matches!(item, Item::Parted { .. } | Item::Branched { .. }));
-            let kin = if parted { (None, &Vec::new()) } else { kin };
             user.extend(summed_up(text, hands, kin));
             told.extend(
                 hands
@@ -102,27 +89,30 @@ fn conversation(
         None => (0, 0),
     };
 
-    let own_from = carried(items);
-
     let mut messages = Vec::new();
     let mut prompts: VecDeque<(u64, Cow<'_, str>)> = VecDeque::new();
     // The tool asked of the last step, each with its outcome once one is read.
     let mut asked: Vec<(&str, Option<&Outcome>)> = Vec::new();
     for (at, (index, item)) in (before..).zip(items).enumerate().skip(prompts_from) {
         let counted = at >= steps_from;
-        if let Some(said) = among_prompts(item, counted, parent, &mut told) {
+        if let Some(said) = among_prompts(item, counted, &mut told) {
             prompts.push_back((index, said));
             continue;
         }
         match item {
-            Item::Step { seen, content, .. } if counted => {
+            Item::Step {
+                seen,
+                content,
+                under: was,
+                ..
+            } if counted => {
                 user.extend(results(&asked, max_results));
                 while let Some((_, text)) = prompts.pop_front_if(|(at, _)| *at < *seen) {
                     user.push(Content::Text(text.into_owned()));
                 }
                 push_user(&mut messages, std::mem::take(&mut user));
 
-                let said = spoken(content, at < own_from);
+                let said = spoken(content, was.as_deref() == Some(under));
                 if !said.is_empty() {
                     messages.push(Message {
                         role: Role::Assistant,
@@ -165,13 +155,16 @@ fn conversation(
 }
 
 /// What an item tells the model among the prompts, if anything: a prompt,
-/// marked as its parent's or a child's when one of them said it; a pause;
-/// a hand joining for the first time, or able to do something other than
-/// `told` records; and, once it `counted`, a hand let go.
+/// marked with the mind that said it when one did; a pause; a hand joining
+/// for the first time, or able to do something other than `told` records;
+/// and, once it `counted`, a hand let go.
+///
+/// What an item says depends on it and the items before it, never on what
+/// came after or who reads it: a child and its parent write the history
+/// they share alike, so the child's request starts as its parent's did.
 fn among_prompts<'a>(
     item: &'a Item,
     counted: bool,
-    parent: Option<&Name>,
     told: &mut BTreeMap<&'a Name, &'a [CapabilityDecl]>,
 ) -> Option<Cow<'a, str>> {
     let note = match item {
@@ -182,14 +175,7 @@ fn among_prompts<'a>(
             text,
             from: Some(from),
             ..
-        } => {
-            let whose = if parent == Some(from) {
-                "parent"
-            } else {
-                "child"
-            };
-            format!("(From your {whose} {from}:)\n\n{text}")
-        }
+        } => format!("(From {from}:)\n\n{text}"),
         Item::Paused { reason } => format!("(The turn before this was stopped: {reason}.)"),
         Item::Attached {
             hand, capabilities, ..
@@ -208,8 +194,9 @@ fn among_prompts<'a>(
     Some(Cow::Owned(note))
 }
 
-/// A summary, the hands the mind has and the minds it is kin to, as the
-/// model is told them.
+/// A summary, with the hands and the kin of the mind that wrote it, as they
+/// were then: by name, so that a child it is shared with reads it as its
+/// writer does.
 fn summed_up(
     text: &str,
     hands: &BTreeMap<Name, HandRecord>,
@@ -222,15 +209,15 @@ fn summed_up(
         .map(|(name, hand)| format!("{name} ({})", can(&hand.capabilities)))
         .collect();
     if !kept.is_empty() {
-        told.push(Content::Text(format!("(Your hands: {}.)", kept.join("; "))));
+        told.push(Content::Text(format!("(Hands then: {}.)", kept.join("; "))));
     }
     if let Some(parent) = parent {
-        told.push(Content::Text(format!("(You were forked from {parent}.)")));
+        told.push(Content::Text(format!("(Parent then: {parent}.)")));
     }
     if !children.is_empty() {
         let children: Vec<&str> = children.iter().map(Name::as_str).collect();
         told.push(Content::Text(format!(
-            "(Your children: {}.)",
+            "(Children then: {}.)",
             children.join(", ")
         )));
     }
@@ -279,24 +266,15 @@ fn push_user(messages: &mut Vec<Message>, content: Vec<Content>) {
     }
 }
 
-/// How many of `items` were carried from the mind this one was forked or
-/// made from: those before its `Parted` or `Branched`, or none.
-fn carried(items: &[Item]) -> usize {
-    items
-        .iter()
-        .rposition(|item| matches!(item, Item::Parted { .. } | Item::Branched { .. }))
-        .unwrap_or(0)
-}
-
-/// What a step said, as the model is shown it again. A step `carried` from
-/// the mind this one was forked or made from is shown without its
-/// reasoning: that is bound to the other mind's prompt and tools, so the
-/// API would refuse it, or drop it and every block after it, this mind's
-/// own included.
-fn spoken(content: &[Block], carried: bool) -> Vec<Content> {
+/// What a step said, as the model is shown it again. A model's reasoning
+/// is bound to the model, system prompt and tools it was made under, so it
+/// is shown only to a request made `alike`. Shown to any other, the API
+/// would refuse it, or drop it and every block after it; left out, a
+/// mind's later reasoning stands on its own.
+fn spoken(content: &[Block], alike: bool) -> Vec<Content> {
     content
         .iter()
-        .filter(|block| !(carried && matches!(block, Block::Other { .. })))
+        .filter(|block| alike || !matches!(block, Block::Other { .. }))
         .map(said)
         .collect()
 }
@@ -365,43 +343,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_child_is_not_told_its_parents_kin_from_a_summary_they_share() {
-        let name = |name: &str| Name::new(name).unwrap();
-        let items = [
-            Item::Summary {
-                text: "So far.".into(),
-                usage: Usage::default(),
-                from: 0,
-                hands: BTreeMap::new(),
-                last_call: 0,
-                forks_left: Some(10),
-                parent: Some(name("g")),
-                children: vec![name("g.aaaaaaaa")],
-            },
-            Item::Parted {
-                parent: name("g.bbbbbbbb"),
-                left: Some(4),
-            },
-            Item::Prompt {
-                key: None,
-                text: "go".into(),
-                from: Some(name("g.bbbbbbbb")),
-            },
-        ];
-        let told: Vec<String> = window(&items, 0, 1000)
-            .iter()
-            .flat_map(|message| &message.content)
-            .filter_map(|content| match content {
-                Content::Text(text) => Some(text.clone()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(told.len(), 2, "{told:?}");
-        assert!(told[0].ends_with("So far."));
-        assert_eq!(told[1], "(From your parent g.bbbbbbbb:)\n\ngo");
-    }
-
     fn step(seen: u64, content: Vec<Block>) -> Item {
         let stop = if content
             .iter()
@@ -416,6 +357,7 @@ mod tests {
             content,
             stop,
             usage: Usage::default(),
+            under: None,
         }
     }
 
@@ -465,7 +407,7 @@ mod tests {
     fn prompts_and_steps_alternate() {
         let items = [prompt("one"), step(1, vec![text("two")]), prompt("three")];
         assert_eq!(
-            window(&items, 0, usize::MAX),
+            window(&items, 0, usize::MAX, ""),
             vec![
                 user(vec![Content::Text("one".into())]),
                 assistant(vec![Content::Text("two".into())]),
@@ -482,7 +424,7 @@ mod tests {
             outcome("b", Outcome::Error("no".into())),
             outcome("a", Outcome::Output(json!({"exit": 0}))),
         ];
-        let messages = window(&items, 0, usize::MAX);
+        let messages = window(&items, 0, usize::MAX, "");
         assert_eq!(
             messages[2],
             user(vec![
@@ -502,7 +444,7 @@ mod tests {
             step(1, vec![text("answer")]),
         ];
         assert_eq!(
-            window(&items, 0, usize::MAX),
+            window(&items, 0, usize::MAX, ""),
             vec![
                 user(vec![Content::Text("first".into())]),
                 assistant(vec![Content::Text("answer".into())]),
@@ -520,7 +462,7 @@ mod tests {
             outcome("a", Outcome::Output(json!("done"))),
         ];
         assert_eq!(
-            window(&items, 0, usize::MAX)[2],
+            window(&items, 0, usize::MAX, "")[2],
             user(vec![
                 told("a", "done", false),
                 Content::Text("also this".into())
@@ -543,7 +485,7 @@ mod tests {
             text: not_run,
             error: true,
             ..
-        } = &window(&items, 0, usize::MAX)[2].content[0]
+        } = &window(&items, 0, usize::MAX, "")[2].content[0]
         else {
             panic!("not an error result");
         };
@@ -555,7 +497,7 @@ mod tests {
             text: unknown,
             error: true,
             ..
-        } = &window(&items, 0, usize::MAX)[2].content[1]
+        } = &window(&items, 0, usize::MAX, "")[2].content[1]
         else {
             panic!("not an error result");
         };
@@ -572,7 +514,7 @@ mod tests {
             prompt("two"),
         ];
         assert_eq!(
-            window(&items, 0, usize::MAX),
+            window(&items, 0, usize::MAX, ""),
             vec![user(vec![
                 Content::Text("one".into()),
                 Content::Text("two".into())

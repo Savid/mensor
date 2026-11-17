@@ -21,7 +21,7 @@ use worker::{
 };
 
 use crate::api::{self, Route};
-use crate::provider::Provider;
+use crate::provider::{self, Provider};
 use crate::sql::{self, SqlFiles, SqlStore};
 use crate::web::Web;
 use crate::{json, problem};
@@ -165,15 +165,19 @@ impl Mind {
         SqlStore::new(self.state.storage().sql())
     }
 
-    /// What the mind is told: `MENSOR_SYSTEM`, and `MENSOR_COMPACT_AT` in
-    /// tokens, where 0 never sums a conversation up.
+    /// What the mind is told: the model it asks, `MENSOR_SYSTEM`, and
+    /// `MENSOR_COMPACT_AT` in tokens, where 0 never sums a conversation up.
+    /// It is offered none of its own tools: its hand cannot clone, and it
+    /// has no kin to talk to.
     fn settings(&self) -> Settings {
         let var = |name: &str| self.env.var(name).ok().map(|value| value.to_string());
         let mut settings = Settings {
             own: MindSettings {
+                model: Some(provider::model(&self.env)),
                 system: var("MENSOR_SYSTEM").filter(|system| !system.is_empty()),
                 ..MindSettings::default()
             },
+            tools: Vec::new(),
             ..Settings::default()
         };
         if let Some(tokens) = var("MENSOR_COMPACT_AT").and_then(|tokens| tokens.parse().ok()) {

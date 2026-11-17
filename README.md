@@ -129,10 +129,13 @@ them:
 | `release_hand` | Lets a hand go. |
 
 `fork`, `clone_hand` and `release_hand` are offered while a hand can clone,
-`tell` while the mind has a parent or children, and `wait` while it has
-children. `--mind-tools`, a comma list, picks which of them a host offers
-at all (`fork,clone_hand,release_hand,tell,wait` by default): `--mind-tools
-fork` lets a mind fork, and neither clone a hand nor let one go, and
+and `tell` and `wait` while a hand can clone or the mind has kin. A `tell`
+with no parent or child, or a `wait` with no children, does not run, and
+says why. Forking needs a hand that can clone, so a fork leaves a mind's
+tools as they were, and its children start with the same. `--mind-tools`,
+a comma list, picks which of them a host offers at all
+(`fork,clone_hand,release_hand,tell,wait` by default): `--mind-tools fork`
+lets a mind fork, and neither clone a hand nor let one go, and
 `--mind-tools ''` offers none.
 
 ## Forks and clones
@@ -167,9 +170,9 @@ fork` lets a mind fork, and neither clone a hand nor let one go, and
 
 ![A parent forks two children, waits at rest while they work, hears what each said, tells one to add a title, and waits for that one alone.](docs/images/talk.svg)
 
-- `tell` reaches the other mind as a prompt marked "(From your parent m:)" or
-  "(From your child m.d3342iuj:)". A message sent again after a restart is
-  stored once.
+- `tell` reaches the other mind as a prompt marked with the sender's name,
+  "(From m:)" or "(From m.d3342iuj:)", the same for every mind that shares
+  it. A message sent again after a restart is stored once.
 - `wait` returns what each child said last, or that it was stopped, its
   model failed, or it ended. Only a parent waits, so two minds never wait
   on each other. An interrupt ends a wait.
@@ -284,10 +287,12 @@ request Claude declines may be answered by a fallback model, unless
 
 - `ANTHROPIC_AUTH_TOKEN` goes on `Authorization` as a plain bearer, as a
   gateway in front of the API takes it. A Claude.ai OAuth token is not one.
-- A fork's child, or a mind made `from` another, leaves out the reasoning in
-  the steps it carries from that mind: it was made under that mind's prompt
-  and tools, so the API would refuse it, or drop it and every block after
-  it. The mind's own reasoning goes back to the model as usual.
+- Each step is stored with a fingerprint of the model, system prompt and
+  tools it was asked under, and its reasoning goes back to the model only
+  under the same: under any other the API would refuse it, or drop it and
+  every block after it. What the history says is written the same for every
+  mind that shares it, so a fork's child on its parent's setup starts with
+  its parent's last request, reasoning and all, and reads its cache.
 - `--max-tokens` (16,000) caps one reply: the Messages API's `max_tokens`,
   and Chat Completions' `max_completion_tokens`, which OpenAI and
   OpenRouter both honour. A reply cut off while it asks for a tool is

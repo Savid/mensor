@@ -128,12 +128,14 @@ impl Host {
             Name::new("a1").unwrap(),
             || format!("boot-{boots}"),
             capabilities.declare(),
+            // As the worker gives it: none of the mind's own tools.
             Settings {
                 own: MindSettings {
                     system: Some("Be brief.".into()),
                     ..MindSettings::default()
                 },
                 compact_at: Some(100),
+                tools: Vec::new(),
                 ..Settings::default()
             },
             storage.clone(),

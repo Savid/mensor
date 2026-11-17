@@ -8,8 +8,8 @@ pub struct ModelRequest {
     /// How many items the history held when this was built. The host hands it
     /// back with the reply.
     pub seen: u64,
-    /// The model to ask, when the mind has one of its own: otherwise the
-    /// host's.
+    /// The model to ask. A host names its own for a mind that has none, so
+    /// that the request says which it is; with none the host's is asked.
     pub model: Option<String>,
     /// How hard the model works, when the mind says: otherwise as the host
     /// says.
@@ -23,6 +23,29 @@ pub struct ModelRequest {
     /// Whether the model must answer in text. It is still shown the tools,
     /// so that the request extends the last one's prefix, but may use none.
     pub text_only: bool,
+}
+
+impl ModelRequest {
+    /// A fingerprint of what a model's reasoning is bound to besides the
+    /// conversation: the model, the system prompt and the tools, as sent.
+    /// It is the same in every process and build, so a step stored with it
+    /// can be compared with a request made long after: the 64-bit FNV-1a
+    /// hash of them as one JSON array, in 16 hex digits.
+    pub(crate) fn fingerprint(&self) -> String {
+        // No system prompt and an empty one are sent alike.
+        let system = self.system.as_deref().filter(|system| !system.is_empty());
+        let tools: Vec<_> = self
+            .tools
+            .iter()
+            .map(|tool| (&tool.name, &tool.description, &tool.input))
+            .collect();
+        let sent = serde_json::to_string(&(&self.model, system, tools))
+            .expect("strings and JSON values are always written");
+        let hash = sent.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+        format!("{hash:016x}")
+    }
 }
 
 /// What a model answers.

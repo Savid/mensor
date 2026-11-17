@@ -222,8 +222,13 @@ impl Host {
     pub async fn open(
         store: Arc<dyn Store>,
         model: Arc<dyn Model>,
-        config: Config,
+        mut config: Config,
     ) -> Result<Self, StoreError> {
+        // A mind with no model of its own asks the host's, and says so, so
+        // that what its reasoning was made under names the model.
+        if config.mind.own.model.is_none() {
+            config.mind.own.model = Some(model.name().to_owned());
+        }
         let listed = Arc::clone(&store);
         let minds: BTreeMap<Name, Slot> = blocking(move || listed.minds())
             .await?

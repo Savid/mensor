@@ -28,12 +28,17 @@ pub(crate) struct Provider<W> {
     wrote: W,
 }
 
+/// The model the object asks: `MENSOR_MODEL`, or Claude Opus 5.5.
+pub(crate) fn model(env: &Env) -> String {
+    env.var("MENSOR_MODEL")
+        .map_or_else(|_| "claude-opus-5-5".into(), |model| model.to_string())
+}
+
 impl<W: Fn(u64, &str)> Provider<W> {
     /// The model the object's variables and secrets describe.
     pub(crate) fn from_env(env: &Env, wrote: W) -> Self {
         let var = |name: &str| env.var(name).ok().map(|value| value.to_string());
-        let model = var("MENSOR_MODEL").unwrap_or_else(|| "claude-opus-5-5".into());
-        let config = Config::from_vars(model, var).map(|mut config| {
+        let config = Config::from_vars(model(env), var).map(|mut config| {
             config.effort = var("MENSOR_EFFORT").filter(|effort| !effort.is_empty());
             config.fallbacks = var("MENSOR_FALLBACKS").as_deref() != Some("off");
             config.timeout = TIMEOUT;

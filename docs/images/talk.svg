@@ -130,7 +130,7 @@
   <text x="240" y="266" class="note">“Add a title as the first line…”</text>
   <rect class="bar k-mind" x="495" y="272" width="10" height="68" rx="3"/>
   <text x="514" y="292" class="lbl">arrives as a prompt:</text>
-  <text x="514" y="308" class="lbl mono">“(From your parent m:) …”</text>
+  <text x="514" y="308" class="lbl mono">“(From m:) …”</text>
   <text x="204" y="308" class="lbl mono mind b" text-anchor="end">wait</text>
   <path class="wire k-mind dash" d="M495,340 L225,340" marker-end="url(#a-mind)"/>
   <text x="240" y="334" class="lbl">said “Silver Threads”</text>

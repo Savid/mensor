@@ -2,8 +2,8 @@
 
 use mensor_mind::{
     Block, CLONE, Conflict, Content, Fork, HandRecord, Item, MadeFrom, MemoryStore, Message, Mind,
-    MindRecord, MindTool, ModelReply, ModelRequest, Outcome, Output, Report, Role, Settings, State,
-    Status, Stop, Store, Unbranched, Untold, Usage, tail_from,
+    MindRecord, MindSettings, MindTool, ModelReply, ModelRequest, Outcome, Output, Report, Role,
+    Settings, State, Status, Stop, Store, Unbranched, Untold, Usage, tail_from,
 };
 use mensor_protocol::{
     Call, CallId, CallResult, CapabilityDecl, FromMind, Hello, Name, OperationDecl, Refusal, Reply,
@@ -808,7 +808,7 @@ fn costing(input: u64, output: u64) -> Usage {
 
 /// What the model is told of its hands after a summary.
 fn hands_line() -> Content {
-    Content::Text("(Your hands: a1 (bash).)".into())
+    Content::Text("(Hands then: a1 (bash).)".into())
 }
 
 fn summary_of(text: &str) -> Content {
@@ -1422,17 +1422,15 @@ fn the_minds_own_tools_are_offered_with_a_hand_that_can_clone() {
     let mut host = Host::new();
     host.attach(&hello("boot-1"));
     host.prompt("hi");
-    assert_eq!(host.asked[0].tools.len(), 1);
+    assert_eq!(shown(&host), ["bash"]);
 
     let mut host = Host::new();
     host.attach(&cloning("a1", "boot-1"));
     host.prompt("hi");
-    let tools: Vec<String> = host.asked[0]
-        .tools
-        .iter()
-        .map(|tool| tool.name.clone())
-        .collect();
-    assert_eq!(tools, ["bash", "fork", "clone_hand", "release_hand"]);
+    assert_eq!(
+        shown(&host),
+        ["bash", "fork", "clone_hand", "release_hand", "tell", "wait"]
+    );
     assert_eq!(
         host.last_message().content[0],
         Content::Text("(Hand a1 joined. It can: bash, and be cloned.)".into())
@@ -1762,7 +1760,7 @@ fn a_child_works_once_its_clone_says_hello() {
             Content::Text(
                 "(Hand b2 was let go: it stayed with m when this mind was forked from it.)".into()
             ),
-            Content::Text("(From your parent m:)\n\nthe first way".into()),
+            Content::Text("(From m:)\n\nthe first way".into()),
         ]
     );
     child.reply(vec![bash("tu_2", "ls")]);
@@ -1926,7 +1924,7 @@ fn a_mind_whose_hands_are_all_let_go_still_talks() {
     host.reply(vec![text("My hand is gone.")]);
     host.prompt("still there?");
     assert_eq!(host.asked(), 3);
-    assert!(host.asked.last().unwrap().tools.is_empty());
+    assert!(shown(&host).is_empty());
 }
 
 #[test]
@@ -2113,7 +2111,7 @@ fn a_message_from_kin_says_whose_it_is() {
     let mut child = first_child(&host);
     assert_eq!(
         shown(&child),
-        ["bash", "fork", "clone_hand", "release_hand", "tell"]
+        ["bash", "fork", "clone_hand", "release_hand", "tell", "wait"]
     );
     child.reply(vec![own(
         "tu_9",
@@ -2133,7 +2131,7 @@ fn a_message_from_kin_says_whose_it_is() {
     assert_eq!(
         host.last_message().content.last(),
         Some(&Content::Text(format!(
-            "(From your child {}:)\n\nWhich way first?",
+            "(From {}:)\n\nWhich way first?",
             children[0]
         )))
     );
@@ -2157,7 +2155,7 @@ fn a_mind_tells_only_its_parent_and_children_and_waits_only_for_children() {
     );
     child.reply(vec![own("tu_10", "wait", json!({}))]);
     assert!(
-        matches!(outcome(&child.stored, "tu_10"), Outcome::NotRun(why) if why.contains("no tool named wait"))
+        matches!(outcome(&child.stored, "tu_10"), Outcome::NotRun(why) if why.contains("no children to wait for"))
     );
     assert!(child.told.is_empty() && child.watched.is_empty());
 }
@@ -2287,7 +2285,7 @@ fn a_summary_carries_a_minds_kin() {
     };
     assert_eq!((parent, children), (&Some(name("m")), &Vec::new()));
     let told = &child.asked.last().unwrap().messages[0].content;
-    assert!(told.contains(&Content::Text("(You were forked from m.)".into())));
+    assert!(told.contains(&Content::Text("(Parent then: m.)".into())));
     assert!(shown(&child).contains(&"tell".to_owned()));
 }
 
@@ -2347,7 +2345,7 @@ fn a_child_of_a_later_fork_takes_no_sibling_for_its_child() {
     let mut third = child_of(&host, 2);
     assert_eq!(
         shown(&third),
-        ["bash", "fork", "clone_hand", "release_hand", "tell"]
+        ["bash", "fork", "clone_hand", "release_hand", "tell", "wait"]
     );
     third.reply(vec![own(
         "tu_9",
@@ -2551,12 +2549,18 @@ fn branch(
 
 /// The mind `r2` made from `stored`'s first `at` items, as its host would
 /// load it, before any hand says hello: its own first items, and it.
-fn loaded_from(stored: &[Item], at: usize, hand: &str, last_call: CallId) -> (Vec<Item>, Host) {
-    let own = branch(stored, at, hand, last_call, &Settings::default()).unwrap();
+fn loaded_from(
+    stored: &[Item],
+    at: usize,
+    hand: &str,
+    last_call: CallId,
+    settings: &Settings,
+) -> (Vec<Item>, Host) {
+    let own = branch(stored, at, hand, last_call, settings).unwrap();
     let mut history = stored[..at].to_vec();
     history.extend(own.clone());
     let mut made = Host::around(
-        Mind::load(name("r2"), 0, history.clone(), Settings::default()),
+        Mind::load(name("r2"), 0, history.clone(), settings.clone()),
         history,
     );
     let outputs = made.mind.start();
@@ -2566,7 +2570,7 @@ fn loaded_from(stored: &[Item], at: usize, hand: &str, last_call: CallId) -> (Ve
 
 /// The same, with `hand` said hello as a new process.
 fn made_from(host: &Host, at: usize, hand: &str) -> (Vec<Item>, Host) {
-    let (own, mut made) = loaded_from(&host.stored, at, hand, 0);
+    let (own, mut made) = loaded_from(&host.stored, at, hand, 0, &Settings::default());
     made.attach(&Hello {
         mind: name("r2"),
         ..self::hand(hand, "boot-restored")
@@ -2604,35 +2608,124 @@ fn reasons(host: &Host) -> Vec<String> {
         .collect()
 }
 
-#[test]
-fn a_mind_leaves_out_the_reasoning_it_carries_from_another_and_keeps_its_own() {
-    // m reasons as it forks, and is shown its reasoning again.
-    let mut host = Host::new();
-    host.attach(&cloning("a1", "boot-a"));
-    host.prompt("try two ways");
+/// That `child`'s first request starts as `parent`'s last: the same model,
+/// system prompt and tools, and the same messages, reasoning and all, up to
+/// the step that forked. A prompt's cache, and the reasoning bound to it,
+/// hold across the fork only so.
+fn starts_as(child: &Host, parent: &Host) {
+    let (first, last) = (child.asked.last().unwrap(), parent.asked.last().unwrap());
+    assert_eq!(
+        (&first.model, &first.system, &first.tools),
+        (&last.model, &last.system, &last.tools)
+    );
+    let shared = last.messages.len() - 1;
+    assert_eq!(first.messages[..shared], last.messages[..shared]);
+}
+
+/// Has `host` fork once, with one prompt per child, on the hand `a1`.
+fn fork(host: &mut Host, tool_use: &str, prompts: &[&str]) {
     host.reply(vec![
         reasoning("why fork"),
-        own(
-            "tu_1",
-            "fork",
-            json!({"hand": "a1", "prompts": ["one", "two"]}),
-        ),
+        own(tool_use, "fork", json!({"hand": "a1", "prompts": prompts})),
     ]);
-    let (id, _) = clone_call(&mut host, "a1");
+    let (id, _) = clone_call(host, "a1");
     host.result_from("a1", id, Reply::Output(json!({})));
-    assert_eq!(reasons(&host), ["why fork"]);
+}
 
-    // Its child carries that step, but not reasoning made under m's tools,
-    // and keeps its own.
-    let mut child = first_child(&host);
-    assert!(reasons(&child).is_empty());
-    child.reply(vec![reasoning("why ls"), bash("tu_2", "ls")]);
-    child.result(id + 1, json!("a.txt"));
-    assert_eq!(reasons(&child), ["why ls"]);
+#[test]
+fn a_child_starts_as_its_parent_last_asked_however_deep_and_after_a_summary() {
+    let mut m = Host::new();
+    m.attach(&cloning("a1", "boot-a"));
+    m.prompt("try two ways");
+    let before = m.asked.last().unwrap().tools.clone();
+    fork(&mut m, "tu_1", &["one", "two"]);
+    assert_eq!(
+        m.asked.last().unwrap().tools,
+        before,
+        "forking changed m's tools"
+    );
+    let mut child = first_child(&m);
+    starts_as(&child, &m);
+    assert_eq!(reasons(&child), ["why fork"]);
 
-    // So does a mind made from m's history.
-    let (_, made) = made_from(&host, host.stored.len(), "a1");
-    assert!(reasons(&made).is_empty());
+    // A grandchild, which shares m's message to its parent.
+    fork(&mut child, "tu_2", &["deeper"]);
+    starts_as(&first_child(&child), &child);
+
+    // A child forked after its parent, with kin, summed up.
+    let mut m = compacting_with_a_clone();
+    m.prompt("try");
+    fork(&mut m, "tu_1", &["one"]);
+    m.reply_costing(vec![bash("tu_2", "ls")], costing(90, 20));
+    let id = match m.sent().last() {
+        Some(FromMind::Call(call)) => call.id,
+        other => panic!("no call: {other:?}"),
+    };
+    m.result(id, json!("a.txt"));
+    assert!(m.asked.last().unwrap().text_only);
+    m.reply(vec![text("Forked once, and listed a.txt.")]);
+    fork(&mut m, "tu_3", &["two"]);
+    starts_as(&child_of(&m, 1), &m);
+}
+
+fn compacting_with_a_clone() -> Host {
+    let mut host = Host::with(compact_at_100());
+    host.attach(&cloning("a1", "boot-a"));
+    host
+}
+
+#[test]
+fn a_mind_made_from_another_keeps_its_reasoning_only_on_the_same_model_and_system_prompt() {
+    let mut host = Host::new();
+    host.attach(&hello("boot-1"));
+    host.prompt("list the files");
+    host.reply(vec![reasoning("why ls"), bash("tu_1", "ls")]);
+    host.result(1, json!("a.txt"));
+    let at = host.stored.len();
+    let made = |own: MindSettings| {
+        let settings = Settings {
+            own,
+            ..Settings::default()
+        };
+        let (_, mut made) = loaded_from(&host.stored, at, "a1", 1, &settings);
+        made.attach(&Hello {
+            mind: name("r2"),
+            ..hello("boot-restored")
+        });
+        reasons(&made)
+    };
+    assert_eq!(made(MindSettings::default()), ["why ls"]);
+    let upgraded = MindSettings {
+        model: Some("claude-fable-5-2".into()),
+        ..MindSettings::default()
+    };
+    assert!(made(upgraded).is_empty());
+    let prompted = MindSettings {
+        system: Some("Keep playing.".into()),
+        ..MindSettings::default()
+    };
+    assert!(made(prompted).is_empty());
+}
+
+#[test]
+fn a_mind_whose_tools_change_leaves_out_the_reasoning_made_before_and_keeps_what_follows() {
+    let mut host = Host::new();
+    host.attach(&hello("boot-1"));
+    host.prompt("list the files");
+    host.reply(vec![reasoning("before"), bash("tu_1", "ls")]);
+    host.result(1, json!("a.txt"));
+    assert_eq!(reasons(&host), ["before"]);
+    host.reply(vec![text("Done.")]);
+
+    // A hand that can fetch joins, and with it a tool.
+    let mut fetching = hand("w1", "boot-w");
+    fetching.capabilities = vec![capability("fetch", "fetch")];
+    host.attach(&fetching);
+    host.prompt("and the time?");
+    assert!(reasons(&host).is_empty());
+    host.reply(vec![reasoning("after"), bash("tu_2", "date")]);
+    host.result(2, json!("noon"));
+    assert_eq!(reasons(&host), ["after"]);
 }
 
 #[test]
@@ -2695,7 +2788,7 @@ fn a_mind_made_from_another_numbers_its_calls_above_every_one_the_other_made() {
     host.result(3, json!("today"));
     // Made from before call 1's result, once m had made calls 1 to 3. Its
     // hand is restored from after call 3, so it has read all three.
-    let (_, mut made) = loaded_from(&host.stored, at, "a1", 3);
+    let (_, mut made) = loaded_from(&host.stored, at, "a1", 3, &Settings::default());
     made.attach(&Hello {
         mind: name("r2"),
         last_id: 3,
@@ -2716,7 +2809,7 @@ fn a_hand_that_says_hello_to_a_mind_made_from_another_as_the_same_process_is_set
     let at = host.stored.len();
 
     // The same process, which never read it: it is sent again.
-    let (_, mut made) = loaded_from(&host.stored, at, "a1", 1);
+    let (_, mut made) = loaded_from(&host.stored, at, "a1", 1, &Settings::default());
     made.attach(&Hello {
         mind: name("r2"),
         ..hello("boot-1")
@@ -2724,7 +2817,7 @@ fn a_hand_that_says_hello_to_a_mind_made_from_another_as_the_same_process_is_set
     assert_eq!(made.sent(), [call(1, "ls")]);
 
     // The same process, still running it: it is waited for.
-    let (_, mut made) = loaded_from(&host.stored, at, "a1", 1);
+    let (_, mut made) = loaded_from(&host.stored, at, "a1", 1, &Settings::default());
     made.attach(&Hello {
         mind: name("r2"),
         last_id: 1,
@@ -2745,7 +2838,7 @@ fn a_clone_in_flight_when_a_mind_is_made_from_another_is_the_others() {
     // m forks onto a1, and the clone is out.
     let (host, id) = forking();
     let at = host.stored.len();
-    let (first, mut made) = loaded_from(&host.stored, at, "a1", id);
+    let (first, mut made) = loaded_from(&host.stored, at, "a1", id, &Settings::default());
     assert_eq!(
         first[0],
         Item::Outcome {
@@ -2768,7 +2861,10 @@ fn a_clone_in_flight_when_a_mind_is_made_from_another_is_the_others() {
     made.result_from("a1", id, Reply::Output(json!({})));
     assert!(made.forks.is_empty());
     made.prompt("go on");
-    assert!(!shown(&made).contains(&"wait".to_owned()));
+    made.reply(vec![own("tu_w", "wait", json!({}))]);
+    assert!(
+        matches!(outcome(&made.stored, "tu_w"), Outcome::NotRun(why) if why.contains("no children"))
+    );
 
     // A clone_hand in flight is m's too: r2 has no clone of a1.
     let mut host = Host::new();
@@ -2777,7 +2873,7 @@ fn a_clone_in_flight_when_a_mind_is_made_from_another_is_the_others() {
     host.reply(vec![own("tu_1", "clone_hand", json!({}))]);
     let (id, _) = clone_call(&mut host, "a1");
     let at = host.stored.len();
-    let (first, mut made) = loaded_from(&host.stored, at, "a1", id);
+    let (first, mut made) = loaded_from(&host.stored, at, "a1", id, &Settings::default());
     assert!(matches!(
         &first[0],
         Item::Outcome {
@@ -2856,9 +2952,9 @@ fn a_mind_made_from_a_child_is_no_kin_of_anyone() {
         max_forks: None,
         ..Settings::default()
     };
-    let own = Mind::branch(&from, (0, child.stored.clone()), 1, &unlimited).unwrap();
+    let first = Mind::branch(&from, (0, child.stored.clone()), 1, &unlimited).unwrap();
     let mut stored = child.stored.clone();
-    stored.extend(own);
+    stored.extend(first);
     let mut made = Host::around(
         Mind::load(name("r2"), 0, stored.clone(), Settings::default()),
         stored,
@@ -2868,7 +2964,15 @@ fn a_mind_made_from_a_child_is_no_kin_of_anyone() {
         ..cloning("a1", "boot-restored")
     });
     made.prompt("go on");
-    assert_eq!(shown(&made), ["bash", "fork", "clone_hand", "release_hand"]);
+    made.reply(vec![own(
+        "tu_t",
+        "tell",
+        json!({"mind": child.mind.name().as_str(), "text": "hi"}),
+    )]);
+    assert!(
+        matches!(outcome(&made.stored, "tu_t"), Outcome::NotRun(why) if why.contains("no parent or children"))
+    );
+    assert!(made.told.is_empty());
 }
 
 #[test]
@@ -2978,7 +3082,10 @@ fn a_hand_that_says_hello_again_able_to_clone_brings_the_fork_tools() {
         })
     );
     host.prompt("now fork");
-    assert_eq!(shown(&host), ["bash", "fork", "clone_hand", "release_hand"]);
+    assert_eq!(
+        shown(&host),
+        ["bash", "fork", "clone_hand", "release_hand", "tell", "wait"]
+    );
     assert!(
         host.last_message().content.contains(&Content::Text(
             "(Hand a1 can now: bash, and be cloned.)".into()
