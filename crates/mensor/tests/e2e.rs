@@ -373,26 +373,6 @@ async fn two_hands_of_one_mind_run_their_calls_at_once() {
 }
 
 #[tokio::test]
-async fn a_mind_has_as_many_hands_as_it_may() {
-    let server = Server::start(Config {
-        mind: Settings {
-            max_hands: 2,
-            ..Settings::default()
-        },
-        ..Config::default()
-    })
-    .await;
-    let dir = tempfile::tempdir().unwrap();
-    let (_a1, _a1_task) = server.hand(fresh("m", "a1"), dir.path());
-    let (_b2, _b2_task) = server.hand(fresh("m", "b2"), dir.path());
-    server.settled_with("m", &["a1", "b2"]).await;
-
-    let (_c3, refused) = server.hand(fresh("m", "c3"), dir.path());
-    let error = ended(refused).await.unwrap_err();
-    assert!(matches!(error, Error::Refused(Refusal::Limit)), "{error}");
-}
-
-#[tokio::test]
 async fn a_hand_that_dies_mid_call_is_let_go_from_outside_and_the_turn_goes_on() {
     let server = Server::start(Config::default()).await;
     let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
@@ -613,7 +593,7 @@ async fn only_a_parent_makes_a_mind_with_a_child_name() {
     // A hand that dials a child its parent has not made yet dials again,
     // starts no mind of that name, and gives up in the end.
     let started = Instant::now();
-    let (_early, waiting) = server.hand(fresh("m.k3x9q2ab", "a1"), dir.path());
+    let (_early, waiting) = server.hand(fresh("m.d3342iuj", "a1"), dir.path());
     let error = ended(waiting).await.unwrap_err();
     assert!(
         matches!(error, Error::Refused(Refusal::UnknownMind)),

@@ -166,6 +166,9 @@ pub struct HandRecord {
     /// Whether the mind released it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub released: bool,
+    /// Whether the mind made it with `clone_hand`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cloned: bool,
 }
 
 impl Item {
@@ -352,16 +355,17 @@ mod tests {
                             boot: "9f3c".into(),
                             capabilities: Vec::new(),
                             released: false,
+                            cloned: false,
                         },
                     )]),
                     last_call: 3,
                     forks_left: 20,
                     parent: Some(Name::new("m").unwrap()),
-                    children: vec![Name::new("m.k3x9q2ab").unwrap()],
+                    children: vec![Name::new("m.d3342iuj").unwrap()],
                 },
                 json!({"type": "summary", "text": "So far.", "usage": {"input": 10, "output": 2},
                        "from": 4, "hands": {"a1": {"boot": "9f3c"}}, "lastCall": 3, "forksLeft": 20,
-                       "parent": "m", "children": ["m.k3x9q2ab"]}),
+                       "parent": "m", "children": ["m.d3342iuj"]}),
             ),
             (
                 Item::Released {
@@ -372,10 +376,10 @@ mod tests {
             ),
             (
                 Item::Forked {
-                    children: vec![Name::new("m.k3x9q2ab").unwrap()],
+                    children: vec![Name::new("m.d3342iuj").unwrap()],
                     left: 31,
                 },
-                json!({"type": "forked", "children": ["m.k3x9q2ab"], "left": 31}),
+                json!({"type": "forked", "children": ["m.d3342iuj"], "left": 31}),
             ),
             (
                 Item::Parted {

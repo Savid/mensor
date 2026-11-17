@@ -492,12 +492,12 @@ mod tests {
                 parent: name("m"),
                 inherited: 2,
             };
-            store.create(&record("m.k3x9q2ab", origin), &[prompt("c")])
+            store.create(&record("m.d3342iuj", origin), &[prompt("c")])
         };
         child().unwrap();
         child().unwrap();
         assert_eq!(
-            texts(&store.read(&name("m.k3x9q2ab"), 0, usize::MAX).unwrap()),
+            texts(&store.read(&name("m.d3342iuj"), 0, usize::MAX).unwrap()),
             ["0", "1", "c"]
         );
     }

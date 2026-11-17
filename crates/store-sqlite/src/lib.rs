@@ -952,16 +952,16 @@ mod tests {
                 parent: name("m"),
                 inherited: 2,
             };
-            store.create(&record("m.k3x9q2ab", origin), &[prompt("c2"), prompt("c3")])
+            store.create(&record("m.d3342iuj", origin), &[prompt("c2"), prompt("c3")])
         };
         child().unwrap();
         child().unwrap();
         assert_eq!(
-            texts(&store.read(&name("m.k3x9q2ab"), 0, usize::MAX).unwrap()),
+            texts(&store.read(&name("m.d3342iuj"), 0, usize::MAX).unwrap()),
             ["0", "1", "c2", "c3"]
         );
-        store.append(&name("m.k3x9q2ab"), &[prompt("c4")]).unwrap();
-        assert_eq!(store.read(&name("m.k3x9q2ab"), 4, 9).unwrap().len(), 1);
+        store.append(&name("m.d3342iuj"), &[prompt("c4")]).unwrap();
+        assert_eq!(store.read(&name("m.d3342iuj"), 4, 9).unwrap().len(), 1);
     }
 
     #[test]

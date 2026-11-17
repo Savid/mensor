@@ -1,25 +1,13 @@
 # mensor
 
 mensor runs AI agents as a **mind** with **hands**. The mind holds the
-history and calls the model. A hand runs commands and edits files on a
-machine. One mind drives up to four hands at once, and the model names the
-hand for each call.
+history and calls the model. A hand does the work: it connects to a mind,
+says what it can do, and runs what the mind asks. A hand can run on a
+machine or a VM, inside the host's own process, or in a Durable Object. A
+mind can drive several hands at once, and the model names the hand for each
+call.
 
-![You prompt a mind over HTTP. The mind holds the history and calls the model. Its hand tools run on hands, which dial in from their machines. Of its own tools, tell and wait reach its parent or children and need no hand, fork and clone_hand have a hand clone itself, and release_hand lets one go.](docs/images/overview.svg)
-
-The mind also has tools of its own:
-
-| Tool | Does |
-| --- | --- |
-| `fork` | Clones a hand once per prompt. Each clone starts a child mind that shares the history so far and works on its own prompt. |
-| `wait` | Waits until children end their turns, and returns what each said last. |
-| `tell` | Sends a message to the mind's parent or one of its children. |
-| `clone_hand` | Clones a hand into the same mind, as another hand. |
-| `release_hand` | Lets a hand go. |
-
-`fork`, `clone_hand` and `release_hand` are offered while a hand can clone,
-`tell` while the mind has a parent or children, and `wait` while it has
-children.
+![You prompt a mind over HTTP. The mind holds the history and calls the model. Its hand tools are whatever its hands say they can do, and run on those hands, which dial in from where they run. Of its own tools, tell and wait reach its parent or children and need no hand, fork and clone_hand have a hand clone itself, and release_hand lets one go.](docs/images/overview.svg)
 
 ## Quick start
 
@@ -57,6 +45,111 @@ curl -s -X POST $api/m/prompt -H 'content-type: application/json' \
 curl -s $api             # m and its children
 ```
 
+## Hands
+
+A hand belongs to one mind and has a name in it. When it connects, it
+declares its capabilities, and each of their operations, but `clone`,
+becomes a tool the model can call. The mind drives every hand the same way:
+only what it can do, where it runs and how it reaches the mind differ.
+
+![A hand runs wherever its work is: on its own machine, dialling the host over a WebSocket; inside mensor run, in memory; or in a Durable Object with its mind. Each says what it can do, and the messages are the same in every place.](docs/images/hands.svg)
+
+| Hand | Runs in | Reaches its mind | Can do | Started by |
+| --- | --- | --- | --- | --- |
+| `mensor hand` | its own process, on any machine | a WebSocket | `commands`, `files`, `clone` | you |
+| `local` in `mensor run` | the host's process | memory | `commands`, `files`, `clone` | `mensor run` |
+| a clone | its original's process | as its original does | what its original can | its original, for `fork` or `clone_hand` |
+| `local` on Cloudflare | the mind's Durable Object | memory | `files`, `fetch` | the object |
+
+### Capabilities
+
+| Capability | Operations | Does |
+| --- | --- | --- |
+| `commands` | `bash` | Runs a command with a timeout. Cancelling it kills everything it started. |
+| `files` | `read`, `write`, `edit`, `list` | Reads and changes files. A relative path starts at the hand's directory. |
+| `fetch` | `fetch` | Makes an HTTP request, and returns its status and the start of its body. Cloudflare's hand only. |
+| `clone` | `clone` | Copies the hand's directory. Used by `fork` and `clone_hand`; never shown as a tool. |
+
+`--capabilities` picks what the hand of `mensor hand` or `mensor run` can do
+(`commands,files,clone` by default). A capability is a Rust trait, `mensor_hand::Capability`:
+implement it, and run it in a hand built on `mensor-hand-host`, to give a
+hand something new, or to back the same names with something else. Any
+program that speaks [the protocol](docs/protocol.md) can be a hand too, in
+any language.
+
+Commands start without the host's token or the model's credentials in their
+environment. A hand is not a sandbox: a command can reach whatever the
+hand's process can, so confining it is up to whoever runs it.
+
+### How calls run
+
+- Calls to different hands run at once. Calls to one hand run in order.
+- Every hand tool takes a `hand` argument, which may be left out while the
+  mind has one hand.
+- A call waits, unsent, while its hand is away. An interrupt ends it.
+- The mind asks its model only while a hand is connected, or once it has let
+  every hand go.
+- No call runs twice. A call that may have run without a result, because
+  its hand restarted, is recorded as unknown, and the model is told to check.
+- A hand that dies mid-call can be let go with `POST .../release`. Its calls
+  are recorded as unknown, and the turn goes on. The mind refuses that hand
+  from then on.
+
+## The mind's own tools
+
+These act on the mind itself, its hands and its family, so no hand declares
+them:
+
+| Tool | Does |
+| --- | --- |
+| `fork` | Clones a hand once per prompt. Each clone starts a child mind that shares the history so far and works on its own prompt. |
+| `wait` | Waits until children end their turns, and returns what each said last. |
+| `tell` | Sends a message to the mind's parent or one of its children. |
+| `clone_hand` | Clones a hand into the same mind, as another hand. |
+| `release_hand` | Lets a hand go. |
+
+`fork`, `clone_hand` and `release_hand` are offered while a hand can clone,
+`tell` while the mind has a parent or children, and `wait` while it has
+children.
+
+## Forks and clones
+
+![fork branches the history into a child mind per prompt, each with a hand on a copy of the directory. clone_hand gives the same mind a second hand on a copy, until release_hand lets it go and deletes the copy.](docs/images/fork.svg)
+
+- The mind's own tools run after the hand tools of their step, one at a
+  time. A fork runs alone: no other tool of the mind's runs in its step.
+- `fork` and `clone_hand` use a hand's `clone` capability, which copies the
+  hand's directory and starts a hand on each copy. One fork takes 1 to 8
+  prompts.
+- A child is made before the fork is recorded, so a host that stops in
+  between completes the fork once when it is back.
+- A child is named `<root>.<code>`, such as `m.d3342iuj`. Only a fork makes
+  a name with a `.`.
+- `--max-forks` (64) caps how many minds a root and its descendants may
+  fork. Each fork splits what remains between the parent and its children.
+- `--max-clones` (4) caps the clones a mind has made with `clone_hand` and
+  not released. Hands that join by themselves, and the hand a child was
+  forked onto, are not counted.
+- Copies are kept in `--clones` (`<dir>.clones` by default) as
+  `<mind>/<hand>.<code>`. A clone runs in its original's process and stops
+  with it; starting the process again starts a hand on every copy of its
+  mind and that mind's descendants. A copy is deleted when its mind releases
+  its clone, and kept otherwise. The original directory is never deleted.
+  Run one process per directory and clones directory.
+
+## Parents and children
+
+![A parent forks two children, waits at rest while they work, hears what each said, tells one to add a title, and waits for that one alone.](docs/images/talk.svg)
+
+- `tell` reaches the other mind as a prompt marked "(From your parent m:)" or
+  "(From your child m.d3342iuj:)". A message sent again after a restart is
+  stored once.
+- `wait` returns what each child said last, or that it was stopped or its
+  model failed. Only a parent waits, so two minds never wait on each other.
+  An interrupt ends a wait.
+- A waiting parent needs no hand. It may rest, or its host may restart: it
+  watches its children again when it wakes.
+
 ## API
 
 | Request | Does |
@@ -77,56 +170,6 @@ refuses to listen anywhere but loopback.
 `--listen` sets where the host listens (`127.0.0.1:7878`), and a hand's
 `--url` where it dials. The host speaks plain HTTP: off loopback, put TLS in
 front of it and have hands dial `wss://`.
-
-## Hands
-
-- Calls to different hands run at once. Calls to one hand run in order.
-- Every hand tool takes a `hand` argument, which may be left out while the
-  mind has one hand.
-- A call waits, unsent, while its hand is away. An interrupt ends it.
-- The mind asks its model only while a hand is connected, or once it has let
-  every hand go.
-- No call runs twice. A call that may have run without a result, because
-  its hand restarted, is recorded as unknown, and the model is told to check.
-- A hand that dies mid-call can be let go with `POST .../release`. Its calls
-  are recorded as unknown, and the turn goes on. The mind refuses that hand
-  from then on.
-- A mind takes up to `--max-hands` hands (4).
-
-## Forks and clones
-
-![fork branches the history into a child mind per prompt, each with a hand on a copy of the directory. clone_hand gives the same mind a second hand on a copy, until release_hand lets it go and deletes the copy.](docs/images/fork.svg)
-
-- The mind's own tools run after the hand tools of their step, one at a
-  time. A fork runs alone: no other tool of the mind's runs in its step.
-- `fork` and `clone_hand` use a hand's `clone` capability, which copies the
-  hand's directory and starts a hand on each copy. One fork takes 1 to 8
-  prompts.
-- A child is made before the fork is recorded, so a host that stops in
-  between completes the fork once when it is back.
-- A child is named `<root>.<code>`, such as `m.d3342iuj`. Only a fork makes
-  a name with a `.`.
-- `--max-forks` (64) caps how many minds a root and its descendants may
-  fork. Each fork splits what remains between the parent and its children.
-- Copies are kept in `--clones` (`<dir>.clones` by default) as
-  `<mind>/<hand>.<code>`. A clone runs in its original's process and stops
-  with it; starting the process again starts a hand on every copy of its
-  mind and that mind's descendants. A copy is deleted when its mind releases
-  its clone, and kept otherwise. The original directory is never deleted.
-  Run one process per directory and clones directory.
-
-## Parents and children
-
-![A parent forks two children, waits at rest while they work, hears what each said, tells one to add a title, and waits for that one alone.](docs/images/talk.svg)
-
-- `tell` reaches the other mind as a prompt marked "(From your parent m:)" or
-  "(From your child m.d3342iuj:)". A message sent again after a restart is
-  stored once.
-- `wait` returns what each child said last, or that it was stopped or its
-  model failed. Only a parent waits, so two minds never wait on each other.
-  An interrupt ends a wait.
-- A waiting parent needs no hand. It may rest, or its host may restart: it
-  watches its children again when it wakes.
 
 ## Models
 
@@ -178,25 +221,6 @@ A mind can also run as one Durable Object that holds its history, one hand
 (`local`) and the hand's files, behind the same API. It cannot fork. See
 [docs/cloudflare.md](docs/cloudflare.md).
 
-## Capabilities
-
-A hand is a small core plus capabilities, which it declares when it
-connects.
-
-| Capability | Operations | Does |
-| --- | --- | --- |
-| `commands` | `bash` | Runs a command with a timeout. Cancelling it kills everything it started. |
-| `files` | `read`, `write`, `edit`, `list` | Reads and changes files. A relative path starts at the hand's directory. |
-| `clone` | `clone` | Copies the hand's directory. Used by `fork` and `clone_hand`; never shown as a tool. |
-
-`--capabilities` picks a hand's (`commands,files,clone` by default). A
-capability is a Rust trait, so another hand can back the same names with
-something else.
-
-Commands start without the host's token or the model's credentials in their
-environment. A hand is not a sandbox: a command can reach whatever the
-hand's process can, so confining it is up to whoever runs it.
-
 ## Layout
 
 ![What each runtime is built from: the hosts on top, and under them the pure crates, the same ones wherever they are needed.](docs/images/crates.svg)
@@ -224,7 +248,8 @@ directly, and the Cloudflare worker reuses them unchanged.
 - The Responses API.
 - Deleting a mind.
 - Clones made outside the hand, such as VM snapshots.
-- More capabilities, such as `fetch` on a machine, or ones the host provides.
+- Hands a host gives every mind, such as one that searches the web.
+- `fetch` for `mensor hand`.
 - On Cloudflare: forks, remote hands, and listing minds.
 
 MCP is not planned.

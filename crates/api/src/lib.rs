@@ -172,13 +172,13 @@ mod tests {
             state: State::Working,
             hands: vec![Name::new("a1").unwrap()],
             waiting: vec![Name::new("b2").unwrap()],
-            watching: vec![Name::new("m.k3x9q2ab").unwrap()],
+            watching: vec![Name::new("m.d3342iuj").unwrap()],
             length: 3,
         };
         assert_eq!(
             serde_json::to_value(status).unwrap(),
             json!({"name": "m", "origin": "root", "state": "working", "hands": ["a1"],
-                   "waiting": ["b2"], "watching": ["m.k3x9q2ab"], "length": 3})
+                   "waiting": ["b2"], "watching": ["m.d3342iuj"], "length": 3})
         );
         let reply = PromptReply {
             status: Prompted::Accepted,

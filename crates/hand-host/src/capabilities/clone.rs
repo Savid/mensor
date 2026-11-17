@@ -583,7 +583,7 @@ mod tests {
         let reply = cloning
             .call(
                 "clone",
-                into(&[("m", "a1-2"), ("m.k3x9q2ab", "a1"), ("n.zzzzzzzz", "a1")]),
+                into(&[("m", "a1-2"), ("m.d3342iuj", "a1"), ("n.zzzzzzzz", "a1")]),
             )
             .await;
         assert!(matches!(reply, Reply::Output(_)), "{reply:?}");
@@ -597,7 +597,7 @@ mod tests {
             .iter()
             .map(|copy| (copy.mind.as_str(), copy.hand.as_str()))
             .collect();
-        assert_eq!(named, [("m", "a1-2"), ("m.k3x9q2ab", "a1")]);
+        assert_eq!(named, [("m", "a1-2"), ("m.d3342iuj", "a1")]);
         assert!(found[0].dir.join("notes.txt").exists());
         assert!(!cut.exists());
         assert!(copies(&root.path().join("none"), "m").unwrap().is_empty());

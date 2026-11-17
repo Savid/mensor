@@ -145,7 +145,7 @@ mod tests {
                 .unwrap()
                 .is_root()
         );
-        let child = Name::new("m.k3x9q2ab").unwrap();
+        let child = Name::new("m.d3342iuj").unwrap();
         assert!(!child.is_root());
         assert_eq!(child.root(), "m");
     }

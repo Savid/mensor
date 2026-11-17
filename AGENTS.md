@@ -1,10 +1,11 @@
 # mensor
 
 An agent as a mind with hands. A mind holds the history, calls the model and
-drives its hands (`--max-hands`, four by default), which run commands and
-change files. The mind has tools of its own: `tell` and `wait` need no hand,
-`fork` and `clone_hand` have a hand clone itself, and `release_hand` lets
-one go.
+drives its hands. A hand runs anywhere (its own machine, the host's process,
+a Durable Object) and declares capabilities, whose operations become the
+model's tools. The mind has tools of its own: `tell` and `wait` need no
+hand, `fork` and `clone_hand` have a hand clone itself, and `release_hand`
+lets one go. `--max-clones` caps the unreleased clones `clone_hand` made.
 `mensor serve` hosts minds, `mensor hand` runs a hand that dials them, and
 `mensor run` does both in one process. `crates/cloudflare` runs a mind and
 its one hand as a Durable Object. The protocol is `docs/protocol.md`.

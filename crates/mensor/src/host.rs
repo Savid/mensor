@@ -23,9 +23,10 @@ pub struct Hosting {
     /// outlives this process.
     #[arg(long)]
     store: Option<PathBuf>,
-    /// How many hands a mind may have that it has not let go.
+    /// How many clones a mind may have made with `clone_hand` and not let
+    /// go. Hands that join by themselves are not counted.
     #[arg(long, default_value_t = 4)]
-    max_hands: usize,
+    max_clones: usize,
     /// How many minds a mind that starts from nothing may fork, its
     /// children's forks included. Zero turns forking off.
     #[arg(long, default_value_t = 64)]
@@ -84,7 +85,7 @@ pub async fn open(hosting: Hosting) -> Result<(Host, TcpListener), String> {
         mind: Settings {
             system,
             compact_at: (hosting.compact_at > 0).then_some(hosting.compact_at),
-            max_hands: hosting.max_hands,
+            max_clones: hosting.max_clones,
             max_forks: hosting.max_forks,
             ..Settings::default()
         },

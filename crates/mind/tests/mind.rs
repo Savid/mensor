@@ -852,6 +852,7 @@ fn a_conversation_that_grew_too_long_is_summed_up_mid_turn() {
                     boot: "boot-1".into(),
                     capabilities: hello("boot-1").capabilities,
                     released: false,
+                    cloned: false,
                 }
             )]
             .into(),
@@ -1346,20 +1347,23 @@ fn releasing_a_dead_hand_settles_its_calls_and_frees_the_turn() {
 }
 
 #[test]
-fn a_mind_has_as_many_hands_as_it_may() {
+fn a_mind_takes_every_hand_that_joins_by_itself() {
     let mut host = Host::with(Settings {
-        max_hands: 2,
+        max_clones: 0,
         ..Settings::default()
     });
-    host.attach(&hand("a1", "boot-a"));
-    host.attach(&hand("b2", "boot-b"));
-    assert_eq!(
-        host.mind.attach(&hand("c3", "boot-c")).unwrap_err(),
-        Refusal::Limit
-    );
+    for (hand_name, boot) in [
+        ("a1", "a"),
+        ("b2", "b"),
+        ("c3", "c"),
+        ("d4", "d"),
+        ("e5", "e"),
+    ] {
+        host.attach(&hand(hand_name, boot));
+    }
     // One it has may come back.
     host.mind.detach(&name("a1"));
-    host.attach(&hand("a1", "boot-a"));
+    host.attach(&hand("a1", "a"));
 }
 
 #[test]
@@ -1496,18 +1500,92 @@ fn a_hand_is_cloned_into_the_mind_once_its_step_has_run() {
 }
 
 #[test]
-fn a_clone_is_not_made_for_a_mind_with_all_its_hands() {
+fn a_clone_is_not_made_for_a_mind_with_all_its_clones() {
     let mut host = Host::with(Settings {
-        max_hands: 1,
+        max_clones: 1,
         ..Settings::default()
     });
     host.attach(&cloning("a1", "boot-a"));
-    host.prompt("clone");
+    host.attach(&hand("b2", "boot-b"));
+    host.prompt("clone twice");
     host.reply(vec![own("tu_1", "clone_hand", json!({}))]);
+    let (id, _) = clone_call(&mut host, "a1");
+    host.result_from("a1", id, Reply::Output(json!({"clones": 1})));
+    assert_eq!(
+        outcome(&host.stored, "tu_1"),
+        &Outcome::Output(json!({"hand": "a1-2"}))
+    );
+    host.sent();
+
+    // b2 joined by itself and is not counted. The clone is.
+    host.reply(vec![own("tu_2", "clone_hand", json!({"hand": "a1"}))]);
     assert!(host.sent().is_empty());
     assert!(
-        matches!(outcome(&host.stored, "tu_1"), Outcome::NotRun(why) if why.contains("all the hands"))
+        matches!(outcome(&host.stored, "tu_2"), Outcome::NotRun(why) if why.contains("all the clones it may: 1"))
     );
+
+    // Released, it no longer counts.
+    host.reply(vec![own("tu_3", "release_hand", json!({"hand": "a1-2"}))]);
+    host.reply(vec![own("tu_4", "clone_hand", json!({"hand": "a1"}))]);
+    clone_call(&mut host, "a1");
+}
+
+#[test]
+fn a_clone_that_says_hello_before_its_result_still_counts() {
+    let mut host = Host::with(Settings {
+        max_clones: 1,
+        ..Settings::default()
+    });
+    host.attach(&cloning("a1", "boot-a"));
+    host.prompt("clone twice");
+    host.reply(vec![own("tu_1", "clone_hand", json!({}))]);
+    let (id, _) = clone_call(&mut host, "a1");
+    host.attach(&cloning("a1-2", "boot-c"));
+    host.result_from("a1", id, Reply::Output(json!({"clones": 1})));
+    host.sent();
+
+    host.reply(vec![own("tu_2", "clone_hand", json!({"hand": "a1"}))]);
+    assert!(host.sent().is_empty());
+    assert!(
+        matches!(outcome(&host.stored, "tu_2"), Outcome::NotRun(why) if why.contains("all the clones it may: 1"))
+    );
+}
+
+#[test]
+fn a_child_does_not_count_the_clone_it_was_forked_onto() {
+    let settings = || Settings {
+        max_clones: 1,
+        ..Settings::default()
+    };
+    let mut host = Host::with(settings());
+    host.attach(&cloning("a1", "boot-a"));
+    host.prompt("clone, then fork the clone");
+    host.reply(vec![own("tu_1", "clone_hand", json!({}))]);
+    let (id, _) = clone_call(&mut host, "a1");
+    host.result_from("a1", id, Reply::Output(json!({"clones": 1})));
+    host.attach(&cloning("a1-2", "boot-c"));
+    host.sent();
+    host.reply(vec![own(
+        "tu_2",
+        "fork",
+        json!({"hand": "a1-2", "prompts": ["go"]}),
+    )]);
+    let (id, _) = clone_call(&mut host, "a1-2");
+    host.result_from("a1-2", id, Reply::Output(json!({})));
+
+    let fork = host.forks[0].clone();
+    let mut stored = host.stored[..usize::try_from(fork.inherited).unwrap()].to_vec();
+    stored.extend(fork.items.clone());
+    let mut child = Host::around(
+        Mind::load(fork.name.clone(), 0, stored.clone(), settings()),
+        stored,
+    );
+    child.attach(&Hello {
+        mind: fork.name.clone(),
+        ..cloning("a1-2", "boot-d")
+    });
+    child.reply(vec![own("tu_3", "clone_hand", json!({}))]);
+    clone_call(&mut child, "a1-2");
 }
 
 #[test]

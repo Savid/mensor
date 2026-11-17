@@ -9,6 +9,8 @@ mind its history, the hand the ids it has read and the results it holds.
 
 ## Transport
 
+![A hand runs wherever its work is: on its own machine, dialling the host over a WebSocket; inside mensor run, in memory; or in a Durable Object with its mind. Each says what it can do, and the messages are the same in every place.](images/hands.svg)
+
 - The protocol names no transport. Over a network the binding is a
   WebSocket: the hand dials `GET /v1/attach` on the mind's host, and each
   message is one text frame. A hand in its mind's own process, or in one
@@ -134,8 +136,7 @@ A host decides what a hello means from its `mind`:
 | new, with no `.` in its name and at most 55 bytes | starts it, with an empty history |
 | new, with a `.` in its name | refuses for now: it is a fork's child, not made yet |
 
-A mind refuses a hand it has released, and a new one once it has all the
-hands it may.
+A mind refuses a hand it has released. Any other hand may join.
 
 A mind makes its children itself, when its model forks. It asks one of its
 hands to clone itself with a `call` to the hand's `clone` capability:
@@ -165,7 +166,6 @@ A hand dials again only after one that is not final.
 | Code | Meaning | Final |
 | --- | --- | --- |
 | 4000 | The hand broke the protocol: no hello within 10 s, a second hello, a `refused`, an `input` with a `hand` property, or a message the protocol does not define | yes |
-| 4001 | The mind has all the hands it may | yes |
 | 4002 | The mind is a fork's child that is not made yet | no: the hand dials again, and gives up after 2 minutes |
 | 4003 | A newer connection has this mind and hand | yes |
 | 4004 | The mind released this hand | yes: the hand ends |

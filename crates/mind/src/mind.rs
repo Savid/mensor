@@ -169,8 +169,9 @@ pub struct Settings {
     /// equally between the tools that step used. A result longer than its
     /// share is shown with its middle left out. The history keeps it whole.
     pub max_results: usize,
-    /// How many hands the mind may have that it has not released.
-    pub max_hands: usize,
+    /// How many clones the mind may have made with `clone_hand` and not
+    /// released. Hands that join by themselves are not counted.
+    pub max_clones: usize,
     /// How many minds a mind that starts from nothing may fork, its
     /// children's included: each fork shares what remains of it between the
     /// mind and its children.
@@ -180,14 +181,14 @@ pub struct Settings {
 impl Default for Settings {
     /// No system prompt, a summary once a request would pass 150,000
     /// tokens, 96 KB of results a step (40,000 tokens at the most), four
-    /// hands and 64 forks. The summary is asked for with the last step's
+    /// clones and 64 forks. The summary is asked for with the last step's
     /// results, so a model that reads 200,000 has room for it.
     fn default() -> Self {
         Self {
             system: None,
             compact_at: Some(150_000),
             max_results: 96 * 1024,
-            max_hands: 4,
+            max_clones: 4,
             max_forks: 64,
         }
     }
@@ -557,8 +558,7 @@ impl Mind {
     /// A turn interrupted while the hand was away is stopped now: a call the
     /// hand never read does not run, and one it still runs is cancelled.
     ///
-    /// A hand the mind released is refused, and so is a new one once the
-    /// mind has all the hands it may.
+    /// A hand the mind released is refused.
     pub fn attach(&mut self, hello: &Hello) -> Result<Vec<Output>, Refusal> {
         let hand = hello.hand.clone();
         // Every tool's `hand` names the hand that runs it, so an operation
@@ -573,10 +573,12 @@ impl Mind {
         {
             return Err(Refusal::Protocol);
         }
-        match self.hands.get(&hand) {
-            Some(known) if known.released.is_some() => return Err(Refusal::Released),
-            None if self.unreleased() >= self.settings.max_hands => return Err(Refusal::Limit),
-            _ => {}
+        if self
+            .hands
+            .get(&hand)
+            .is_some_and(|known| known.released.is_some())
+        {
+            return Err(Refusal::Released);
         }
         let pending: Vec<(CallId, String)> = self
             .pending()
@@ -1468,10 +1470,10 @@ impl Mind {
             }
             Target::Children(count)
         } else {
-            if self.unreleased() >= self.settings.max_hands {
+            if self.clones() >= self.settings.max_clones {
                 return skip(format!(
-                    "this mind has all the hands it may: {}",
-                    self.settings.max_hands
+                    "this mind has all the clones it may: {}",
+                    self.settings.max_clones
                 ));
             }
             let clone = match &rest["name"] {
@@ -1756,6 +1758,14 @@ impl Mind {
             .count()
     }
 
+    /// The clones it made with `clone_hand` and has not released.
+    fn clones(&self) -> usize {
+        self.hands
+            .values()
+            .filter(|hand| hand.record.cloned && hand.released.is_none())
+            .count()
+    }
+
     fn table(&self) -> Table {
         Table::new(
             self.hands
@@ -1981,6 +1991,7 @@ fn note(hands: &mut BTreeMap<Name, Hand>, kin: &mut Kin, item: &Item, at: u64) {
                     boot: String::new(),
                     capabilities: Vec::new(),
                     released: false,
+                    cloned: false,
                 },
                 attached: false,
                 joined: at,
@@ -1994,17 +2005,20 @@ fn note(hands: &mut BTreeMap<Name, Hand>, kin: &mut Kin, item: &Item, at: u64) {
                 .get(from)
                 .map(|from| from.record.capabilities.clone())
                 .unwrap_or_default();
-            hands.entry(hand.clone()).or_insert_with(|| Hand {
+            let known = hands.entry(hand.clone()).or_insert_with(|| Hand {
                 // No process of it has said hello: its first will be new.
                 record: HandRecord {
                     boot: String::new(),
                     capabilities,
                     released: false,
+                    cloned: true,
                 },
                 attached: false,
                 joined: at,
                 released: None,
             });
+            // It may have said hello before its original's result was stored.
+            known.record.cloned = true;
         }
         Item::Released { hand, .. } => {
             if let Some(known) = hands.get_mut(hand) {
@@ -2024,6 +2038,10 @@ fn note(hands: &mut BTreeMap<Name, Hand>, kin: &mut Kin, item: &Item, at: u64) {
         // A child's history holds its parent's: the parent's children are
         // its siblings.
         Item::Parted { parent, left } => {
+            // The hand it was forked onto is its own, not a clone it made.
+            for known in hands.values_mut() {
+                known.record.cloned = false;
+            }
             *kin = Kin {
                 parent: Some(parent.clone()),
                 children: Vec::new(),

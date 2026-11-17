@@ -7,8 +7,6 @@
 pub enum Refusal {
     /// The hand sent something the protocol does not define.
     Protocol,
-    /// The mind has all the hands it may.
-    Limit,
     /// The hand names a fork child that is not made yet.
     UnknownMind,
     /// A newer connection for the same mind and hand took this one's place.
@@ -23,20 +21,18 @@ pub enum Refusal {
 
 impl Refusal {
     /// Every refusal.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 5] = [
         Self::Protocol,
-        Self::Limit,
         Self::UnknownMind,
         Self::Replaced,
         Self::Released,
         Self::Name,
     ];
 
-    /// The WebSocket close code.
+    /// The WebSocket close code. 4001 is not used.
     pub const fn code(self) -> u16 {
         match self {
             Self::Protocol => 4000,
-            Self::Limit => 4001,
             Self::UnknownMind => 4002,
             Self::Replaced => 4003,
             Self::Released => 4004,
@@ -48,7 +44,6 @@ impl Refusal {
     pub const fn reason(self) -> &'static str {
         match self {
             Self::Protocol => "not a message of the protocol",
-            Self::Limit => "the mind has all the hands it may",
             Self::UnknownMind => "no mind of that name yet",
             Self::Replaced => "a newer connection has this mind and hand",
             Self::Released => "the mind released this hand",
