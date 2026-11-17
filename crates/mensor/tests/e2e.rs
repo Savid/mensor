@@ -276,6 +276,7 @@ fn reply(content: Vec<Block>) -> ModelReply {
         .iter()
         .any(|block| matches!(block, Block::ToolUse { .. }));
     ModelReply {
+        model: None,
         content,
         stop: if tools { Stop::ToolUse } else { Stop::EndTurn },
         usage: Usage::default(),
@@ -1324,11 +1325,13 @@ async fn a_mind_with_nothing_to_do_rests_in_the_store_and_wakes_when_needed() {
     let (hand, _task) = server.hand(fresh("m", "a1"), dir.path());
     server.settled("m").await;
     server.model.then_with(|_| ModelReply {
+        model: None,
         content: vec![text("hi")],
         stop: Stop::EndTurn,
         usage: Usage {
             input: 95,
             output: 5,
+            ..Usage::default()
         },
     });
     let keyed = |text: &str| server.host.prompt(&m, Some("k1".into()), text.into());
@@ -1352,14 +1355,17 @@ async fn a_mind_with_nothing_to_do_rests_in_the_store_and_wakes_when_needed() {
     assert_eq!(server.host.awake().await, 0);
 
     // A prompt wakes it for as long as it takes to store. With no hand the
-    // mind asks nobody, and rests again mid-turn.
+    // mind asks nobody, and rests again mid-turn, waiting for its hand.
     server.prompt("m", "What is the capital of France?").await;
     eventually("the mind rests again", || async {
         server.host.awake().await == 0
     })
     .await;
     let status = server.host.mind(&m).await.unwrap();
-    assert_eq!((status.state, status.length), (State::Thinking, 4));
+    assert_eq!(
+        (status.state, status.waiting, status.length),
+        (State::Waiting, vec![name("a1")], 4)
+    );
     assert_eq!(server.model.requests().len(), 1);
 
     // A hand wakes it, and the turn carries on: here by summing up.
@@ -1882,7 +1888,7 @@ async fn waits_through_a_restart(open: impl Fn() -> Arc<dyn Store>, root: &Path)
         &Outcome::Output(json!({child.as_str(): {"said": "Here."}}))
     );
     let status = second.status("m").await.unwrap();
-    assert_eq!((status.state, status.hands.len()), (State::Thinking, 0));
+    assert_eq!((status.state, status.hands.len()), (State::Waiting, 0));
 
     // Its hand back, it answers.
     let (_hand, _task) = second.hand(fresh("m", "a1"), &dir);

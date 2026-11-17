@@ -10,6 +10,9 @@ use mensor_protocol::{
 };
 use serde_json::{Value, json};
 
+/// The model the test host says answered: a fallback, not the one asked.
+const ANSWERED: &str = "claude-haiku-5-5";
+
 /// A host that performs outputs by writing them down.
 struct Host {
     mind: Mind,
@@ -92,7 +95,8 @@ impl Host {
         self.reply_costing(content, Usage::default());
     }
 
-    /// Answers the request the mind last made, at this cost.
+    /// Answers the request the mind last made, at this cost, as
+    /// [`ANSWERED`].
     fn reply_costing(&mut self, content: Vec<Block>, usage: Usage) {
         let seen = self.asked.last().expect("the mind asked nothing").seen;
         let stop = if content
@@ -106,6 +110,7 @@ impl Host {
         let outputs = self.mind.replied(
             seen,
             ModelReply {
+                model: Some(ANSWERED.into()),
                 content,
                 stop,
                 usage,
@@ -429,7 +434,7 @@ fn a_mind_without_a_hand_only_listens() {
     let mut host = Host::new();
     host.prompt("anyone there?");
     assert_eq!(host.asked(), 0);
-    assert_eq!(host.mind.state(), State::Thinking);
+    assert_eq!(host.mind.state(), State::Waiting);
 
     host.attach(&hello("boot-1"));
     assert_eq!(host.asked(), 1);
@@ -441,7 +446,16 @@ fn a_dropped_connection_stops_new_calls_until_the_hand_returns() {
     host.attach(&hello("boot-1"));
     host.prompt("list the files");
     host.mind.detach(&name("a1"));
+    // The model, asked already, still answers.
+    assert_eq!(
+        (host.mind.state(), host.mind.waiting()),
+        (State::Thinking, Vec::new())
+    );
     host.reply(vec![bash("tu_1", "ls")]);
+    assert_eq!(
+        (host.mind.state(), host.mind.waiting()),
+        (State::Waiting, vec![name("a1")])
+    );
     assert!(
         host.sent().is_empty(),
         "nothing is sent to a hand that is gone"
@@ -531,7 +545,7 @@ fn a_mind_loaded_from_its_history_carries_on() {
         Mind::load(name("m"), 0, before.stored.clone(), Settings::default()),
         before.stored,
     );
-    assert_eq!(host.mind.state(), State::Working);
+    assert_eq!(host.mind.state(), State::Waiting);
     assert!(host.mind.connected().is_empty());
 
     host.attach(&Hello {
@@ -609,6 +623,7 @@ fn a_reply_nobody_asked_for_is_dropped() {
     let mut host = Host::new();
     host.attach(&hello("boot-1"));
     let reply = ModelReply {
+        model: None,
         content: vec![text("?")],
         stop: Stop::EndTurn,
         usage: Usage::default(),
@@ -623,6 +638,7 @@ fn a_tool_use_in_a_reply_that_was_cut_off_does_not_run() {
     host.attach(&hello("boot-1"));
     host.prompt("write a long file");
     let reply = ModelReply {
+        model: None,
         content: vec![bash("tu_1", "cat > file <<EOF")],
         stop: Stop::MaxTokens,
         usage: Usage::default(),
@@ -802,8 +818,14 @@ fn compact_at_100() -> Settings {
     }
 }
 
-fn costing(input: u64, output: u64) -> Usage {
-    Usage { input, output }
+/// A step that read `read` tokens, all but one from the cache.
+fn costing(read: u64, output: u64) -> Usage {
+    Usage {
+        input: 1,
+        cache_read: read - 1,
+        cache_written: 0,
+        output,
+    }
 }
 
 /// What the model is told of its hands after a summary.
@@ -822,6 +844,7 @@ fn a_conversation_that_grew_too_long_is_summed_up_mid_turn() {
     let mut host = compacting();
     host.prompt("list the files");
     host.reply_costing(vec![bash("tu_1", "ls")], costing(90, 20));
+    assert!(matches!(&host.stored[2], Item::Step { model: Some(model), .. } if model == ANSWERED));
     host.result(1, json!("a.txt"));
 
     // In place of the next step, the model is asked for a summary of all
@@ -843,6 +866,7 @@ fn a_conversation_that_grew_too_long_is_summed_up_mid_turn() {
         Some(&Item::Summary {
             text: "Listed the files: a.txt.".into(),
             usage: costing(120, 10),
+            model: Some(ANSWERED.into()),
             // The step it follows was asked for when the history held two
             // items, and made the hand's first call.
             from: 2,
@@ -1028,7 +1052,7 @@ fn a_mind_given_only_the_end_of_its_history_carries_on_as_one_given_it_all() {
     let mind = Mind::load(name("m"), from, tail, compact_at_100());
     let mut host = Host::around(mind, before.stored);
     assert_eq!((host.mind.starts_at(), host.mind.length()), (2, 6));
-    assert_eq!(host.mind.state(), State::Thinking);
+    assert_eq!(host.mind.state(), State::Waiting);
 
     // The summary says which hand the history knew, so the same one is
     // not recorded again, and which call was the last, so the next is new.
@@ -1084,7 +1108,7 @@ fn what_a_mind_is_doing_is_told_from_the_latest_of_its_history_alone() {
         states,
         [
             State::Idle,
-            State::Thinking,
+            State::Waiting,
             State::Thinking,
             State::Working,
             State::Working,
@@ -1092,17 +1116,21 @@ fn what_a_mind_is_doing_is_told_from_the_latest_of_its_history_alone() {
         ]
     );
     for host in hosts {
-        // Told from a store, no hand is connected: a call still out waits
-        // for its hand.
+        // Told from a store, no hand is connected, as for the whole
+        // history loaded with none.
         let told = told_from_store(&host.stored);
+        let whole = Mind::load(name("m"), 0, host.stored.clone(), Settings::default());
         assert_eq!(
-            (told.state, told.length),
-            (host.mind.state(), host.mind.length())
+            (told.state, told.length, &told.waiting),
+            (whole.state(), whole.length(), &whole.waiting())
         );
-        if told.state == State::Working {
-            assert_eq!(told.waiting, [name("a1")]);
-        }
     }
+    // A call still out waits for its hand.
+    let told = told_from_store(&waiting_on_a_call().stored);
+    assert_eq!(
+        (told.state, told.waiting),
+        (State::Waiting, vec![name("a1")])
+    );
 }
 
 #[test]
@@ -1266,10 +1294,14 @@ fn a_hand_that_is_away_holds_up_only_its_own_tool_uses() {
         .filter(|item| matches!(item, Item::Call { .. }))
         .count();
     assert_eq!(calls, 1);
-    assert_eq!(host.mind.waiting(), [name("b2")]);
+    assert_eq!(
+        (host.mind.state(), host.mind.waiting()),
+        (State::Working, vec![name("b2")])
+    );
 
+    // With nothing running, it waits for b2 alone.
     host.result(1, json!("a"));
-    assert_eq!(host.asked(), 1);
+    assert_eq!((host.asked(), host.mind.state()), (1, State::Waiting));
     host.sent();
     host.attach(&hand("b2", "boot-b"));
     assert_eq!(host.sent_to(), vec![("b2".into(), call(2, "ls"))]);
@@ -1471,9 +1503,15 @@ fn a_hand_is_cloned_into_the_mind_once_its_step_has_run() {
         own("tu_1", "clone_hand", json!({"hand": "a1"})),
         on("tu_2", "b2", "ls"),
     ]);
-    // The mind's own tool waits for the rest of its step.
+    // The mind's own tool waits for the rest of its step, and for its hand.
     assert_eq!(host.sent_to(), vec![("b2".into(), call(1, "ls"))]);
+    host.mind.detach(&name("a1"));
     host.result_from("b2", 1, Reply::Output(json!("b")));
+    assert_eq!(
+        (host.mind.state(), host.mind.waiting()),
+        (State::Waiting, vec![name("a1")])
+    );
+    host.attach(&cloning("a1", "boot-a"));
     let (id, input) = clone_call(&mut host, "a1");
     assert_eq!(
         (id, input),
@@ -1735,7 +1773,7 @@ fn a_child_works_once_its_clone_says_hello() {
         Mind::load(fork.name.clone(), 0, stored.clone(), Settings::default()),
         stored,
     );
-    assert_eq!(child.mind.state(), State::Thinking);
+    assert_eq!(child.mind.state(), State::Waiting);
     assert_eq!(child.asked(), 0);
 
     // The clone is a new process in the child: its boot is new.
@@ -1910,7 +1948,7 @@ fn a_resting_mind_says_which_hand_its_turn_waits_for() {
     let status = told_from_store(&host.stored);
     assert_eq!(
         (status.state, status.waiting),
-        (State::Working, vec![name("b2")])
+        (State::Waiting, vec![name("b2")])
     );
 }
 
@@ -1934,7 +1972,7 @@ fn a_mind_whose_hands_are_away_waits_for_any_of_them() {
     host.mind.detach(&name("b2"));
     host.prompt("anyone?");
     assert_eq!(host.asked(), 0);
-    assert_eq!(host.mind.state(), State::Thinking);
+    assert_eq!(host.mind.state(), State::Waiting);
     assert_eq!(host.mind.waiting(), [name("a1"), name("b2")]);
 }
 

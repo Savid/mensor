@@ -39,6 +39,7 @@ impl Script {
             .iter()
             .any(|block| matches!(block, Block::ToolUse { .. }));
         self.replies.borrow_mut().push_back(ModelReply {
+            model: None,
             content,
             stop: if uses_tools {
                 Stop::ToolUse
@@ -443,6 +444,7 @@ fn an_interrupt_ends_the_turn_whatever_the_host_was_doing() {
     assert_eq!(kinds(&host.items()), ["attached", "prompt", "paused"]);
     // The answer comes anyway, and changes nothing.
     let late = ModelReply {
+        model: None,
         content: vec![says("Once upon a time")],
         stop: Stop::EndTurn,
         usage: Usage::default(),
@@ -497,11 +499,13 @@ fn an_interrupt_ends_the_turn_whatever_the_host_was_doing() {
 fn a_conversation_that_grew_too_long_carries_on_from_a_summary() {
     let host = Host::new();
     host.model.replies.borrow_mut().push_back(ModelReply {
+        model: None,
         content: vec![says("hi")],
         stop: Stop::EndTurn,
         usage: Usage {
             input: 95,
             output: 5,
+            ..Usage::default()
         },
     });
     host.model

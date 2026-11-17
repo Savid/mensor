@@ -91,10 +91,14 @@ const ALONE: &str = "a step that forks runs none of the mind's other tools; ask 
 pub enum State {
     /// Nothing, until it is prompted.
     Idle,
-    /// It has a model to ask, or is asking it.
+    /// It is asking its model, or is about to.
     Thinking,
-    /// It has a call for a hand, or waits on one.
+    /// It has a call for a hand, or waits on one that is connected, a
+    /// message or its children.
     Working,
+    /// It can go on only when a hand connects: one that is away, or its
+    /// first.
+    Waiting,
     /// Nothing, ever again: it has ended.
     Ended,
 }
@@ -375,7 +379,10 @@ enum Next {
         tool_use: String,
         reports: BTreeMap<Name, Report>,
     },
+    /// Nothing, until a call that runs, a message or a child is done.
     Await,
+    /// Nothing, until a hand that is away connects.
+    Away,
     Ask,
     Idle,
 }
@@ -460,7 +467,8 @@ impl Mind {
         }
         match self.next() {
             Next::Idle => State::Idle,
-            Next::Ask => State::Thinking,
+            Next::Ask if self.asking.is_some() || self.may_ask() => State::Thinking,
+            Next::Ask | Next::Away => State::Waiting,
             Next::Skip { .. }
             | Next::Issue { .. }
             | Next::Clone { .. }
@@ -509,7 +517,7 @@ impl Mind {
     pub fn report(&self) -> Option<Report> {
         match self.state() {
             State::Ended => return Some(Report::Ended),
-            State::Thinking | State::Working => return None,
+            State::Thinking | State::Working | State::Waiting => return None,
             State::Idle => {}
         }
         let last = self.items.iter().rev().find_map(|item| match item {
@@ -566,8 +574,13 @@ impl Mind {
                 }
             }
         }
-        // A mind with its model to ask and every hand away waits for any.
-        if waiting.is_empty() && matches!(self.next(), Next::Ask) && !self.may_ask() {
+        // A mind with its model to ask, not yet asked, and every hand away
+        // waits for any.
+        if waiting.is_empty()
+            && self.asking.is_none()
+            && matches!(self.next(), Next::Ask)
+            && !self.may_ask()
+        {
             let hands = self
                 .hands
                 .iter()
@@ -794,6 +807,7 @@ impl Mind {
             return Vec::new();
         };
         let ModelReply {
+            model,
             content,
             stop,
             usage,
@@ -821,6 +835,7 @@ impl Mind {
                 Item::Summary {
                     text,
                     usage,
+                    model,
                     from,
                     hands: self
                         .hands
@@ -839,6 +854,7 @@ impl Mind {
                 content,
                 stop,
                 usage,
+                model,
                 under: Some(asking.under),
             }
         };
@@ -1265,7 +1281,7 @@ impl Mind {
                     outputs.push(Output::Ask(request));
                     return;
                 }
-                Next::Await | Next::Ask | Next::Idle => return,
+                Next::Await | Next::Away | Next::Ask | Next::Idle => return,
             }
         }
     }
@@ -1649,7 +1665,8 @@ impl Mind {
         // ended, so nothing runs on any hand while one is cloned, and one at
         // a time.
         match own {
-            _ if waiting => Some(Next::Await),
+            _ if busy.iter().any(|hand| self.is_attached(hand)) => Some(Next::Await),
+            _ if waiting => Some(Next::Away),
             Some((id, tool, input)) => Some(self.own(id, tool, input, at, &table)),
             None => None,
         }
@@ -1744,7 +1761,7 @@ impl Mind {
             }
         };
         if !self.is_attached(&hand) {
-            return Next::Await;
+            return Next::Away;
         }
         Next::Clone {
             tool_use: id.to_owned(),
@@ -2101,13 +2118,13 @@ impl Mind {
             Content::ToolUse { input, .. } => input.to_string().len(),
             Content::Other(value) => value.to_string().len(),
         };
-        let counted = if usage.input == 0 {
+        let counted = if usage.read() == 0 {
             let said = messages.iter().flat_map(|message| &message.content);
             index(said.map(everything).sum::<usize>() / 2)
         } else {
             let last = messages.last().into_iter();
             let added: usize = last.flat_map(|message| &message.content).map(results).sum();
-            usage.input + usage.output + index(added / 2)
+            usage.read() + usage.output + index(added / 2)
         };
         counted >= limit
     }

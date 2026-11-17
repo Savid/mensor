@@ -41,6 +41,10 @@ pub enum Item {
         /// What the step cost.
         #[serde(default)]
         usage: Usage,
+        /// The model that answered, when the API named it: a request one
+        /// model declined may be answered by another.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
         /// What the model was asked under: a fingerprint of the model, the
         /// system prompt and the tools. The step's reasoning goes back to
         /// the model only under the same.
@@ -162,6 +166,9 @@ pub enum Item {
         /// What writing it cost.
         #[serde(default)]
         usage: Usage,
+        /// The model that wrote it, when the API named it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
         /// The index a mind starts from: that of the first item the steps
         /// before the summary had not seen.
         from: u64,
@@ -294,15 +301,37 @@ impl From<Reply> for Outcome {
     }
 }
 
-/// What one step cost, in tokens.
+/// What one step cost, in tokens, each kind priced on its own.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Usage {
-    /// Tokens read.
+    /// Tokens neither read from nor written to the cache.
     #[serde(default)]
     pub input: u64,
+    /// Tokens read from the cache.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cache_read: u64,
+    /// Tokens read and stored in the cache for later.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cache_written: u64,
     /// Tokens written.
     #[serde(default)]
     pub output: u64,
+}
+
+impl Usage {
+    /// Every token the step read, cached or not.
+    pub fn read(&self) -> u64 {
+        self.input + self.cache_read + self.cache_written
+    }
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde passes a reference"
+)]
+fn is_zero(tokens: &u64) -> bool {
+    *tokens == 0
 }
 
 #[cfg(test)]
@@ -358,13 +387,17 @@ mod tests {
                     stop: Stop::EndTurn,
                     usage: Usage {
                         input: 10,
+                        cache_read: 90,
+                        cache_written: 5,
                         output: 2,
                     },
+                    model: Some("claude-sonnet-5-5".into()),
                     under: Some("0123456789abcdef".into()),
                 },
                 json!({"type": "step", "seen": 1, "content": [{"type": "text", "text": "ok"}],
-                       "stop": "end_turn", "usage": {"input": 10, "output": 2},
-                       "under": "0123456789abcdef"}),
+                       "stop": "end_turn",
+                       "usage": {"input": 10, "cacheRead": 90, "cacheWritten": 5, "output": 2},
+                       "model": "claude-sonnet-5-5", "under": "0123456789abcdef"}),
             ),
         ];
         round_trip(cases);
@@ -379,7 +412,9 @@ mod tests {
                     usage: Usage {
                         input: 10,
                         output: 2,
+                        ..Usage::default()
                     },
+                    model: None,
                     from: 4,
                     hands: BTreeMap::from([(
                         Name::new("a1").unwrap(),
@@ -432,6 +467,7 @@ mod tests {
                 Item::Summary {
                     text: "So far.".into(),
                     usage: Usage::default(),
+                    model: None,
                     from: 0,
                     hands: BTreeMap::new(),
                     last_call: 0,

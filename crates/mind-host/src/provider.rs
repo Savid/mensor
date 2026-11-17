@@ -228,7 +228,10 @@ mod tests {
         assert_eq!(headers["x-api-key"], "sk-test");
         assert_eq!(headers["anthropic-version"], VERSION);
         assert_eq!(headers["anthropic-beta"], FALLBACK_BETA);
-        assert!(body.get("thinking").is_none());
+        assert_eq!(
+            body["thinking"],
+            json!({"type": "adaptive", "display": "summarized"})
+        );
 
         let (headers, body) = &seen[2];
         assert_eq!(

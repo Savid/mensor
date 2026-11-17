@@ -103,6 +103,7 @@ pub fn a_history_is_read_a_page_at_a_time_and_from_its_last_summary(store: &dyn 
         content: Vec::new(),
         stop: Stop::EndTurn,
         usage: Usage::default(),
+        model: None,
         under: None,
     };
     store.append(&name("b7"), &[prompt("6"), step]).unwrap();
@@ -614,6 +615,7 @@ fn summary(from: u64) -> Item {
     Item::Summary {
         text: "So far.".into(),
         usage: Usage::default(),
+        model: None,
         from,
         hands: BTreeMap::new(),
         last_call: 0,

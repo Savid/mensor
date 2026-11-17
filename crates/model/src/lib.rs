@@ -501,7 +501,7 @@ fn said(body: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use mensor_mind::{Block, Content, Message, Role, Tool};
+    use mensor_mind::{Block, Content, Message, Role, Tool, Usage};
     use serde_json::{Value, json};
 
     use super::*;
@@ -708,7 +708,10 @@ mod tests {
                 ),
             )
         };
-        assert!(body_of(&exchange.post()).get("thinking").is_none());
+        assert_eq!(
+            body_of(&exchange.post())["thinking"],
+            json!({"type": "adaptive", "display": "summarized"})
+        );
         assert!(matches!(
             exchange.answered(unbound()),
             Next::Again { wait, .. } if wait.is_zero()
@@ -803,7 +806,8 @@ mod tests {
         let stream = events(&[
             json!({"type": "message_start", "message": {
                 "role": "assistant", "content": [], "stop_reason": null,
-                "usage": {"input_tokens": 10, "cache_read_input_tokens": 90, "output_tokens": 1},
+                "usage": {"input_tokens": 10, "cache_creation_input_tokens": 5,
+                          "cache_read_input_tokens": 90, "output_tokens": 1},
             }}),
             json!({"type": "ping"}),
             json!({"type": "content_block_start", "index": 0,
@@ -827,8 +831,10 @@ mod tests {
             json!({"type": "content_block_delta", "index": 2,
                    "delta": {"type": "input_json_delta", "partial_json": "and\":\"ls\"}"}}),
             json!({"type": "content_block_stop", "index": 2}),
+            // Counts so far, each replacing the last, but for a null.
             json!({"type": "message_delta", "delta": {"stop_reason": "tool_use"},
-                   "usage": {"output_tokens": 7}}),
+                   "usage": {"input_tokens": 12, "cache_creation_input_tokens": null,
+                             "cache_read_input_tokens": 90, "output_tokens": 7}}),
             json!({"type": "message_stop"}),
         ]);
         let whole = json!({
@@ -839,7 +845,8 @@ mod tests {
                 {"type": "tool_use", "id": "tu_1", "name": "bash", "input": {"command": "ls"}},
             ],
             "stop_reason": "tool_use",
-            "usage": {"input_tokens": 10, "cache_read_input_tokens": 90, "output_tokens": 7},
+            "usage": {"input_tokens": 12, "cache_creation_input_tokens": 5,
+                      "cache_read_input_tokens": 90, "output_tokens": 7},
         });
 
         // However the bytes are cut, even through a character.
@@ -865,7 +872,15 @@ mod tests {
             panic!("the call should be over");
         };
         assert_eq!(reply.content.len(), 3);
-        assert_eq!(reply.usage.input, 100);
+        assert_eq!(
+            reply.usage,
+            Usage {
+                input: 12,
+                cache_read: 90,
+                cache_written: 5,
+                output: 7
+            }
+        );
     }
 
     fn answer_of(body: String) -> Answer {

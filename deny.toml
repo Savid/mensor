@@ -7,6 +7,11 @@ targets = ["x86_64-unknown-linux-gnu", "wasm32-unknown-unknown"]
 
 [advisories]
 yanked = "deny"
+# Advisories with no fix to take. Each entry goes when the crate named in
+# its reason moves on.
+ignore = [
+  { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained; worker 0.9, the latest, is on it" },
+]
 
 [licenses]
 # Every licence a dependency may be used under. All are permissive.

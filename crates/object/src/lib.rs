@@ -24,7 +24,7 @@
 //! impl Model for Echo {
 //!     async fn ask(&self, _request: &ModelRequest) -> Result<ModelReply, ModelError> {
 //!         let content = vec![Block::Text { text: "hello".into() }];
-//!         Ok(ModelReply { content, stop: Stop::EndTurn, usage: Usage::default() })
+//!         Ok(ModelReply { model: None, content, stop: Stop::EndTurn, usage: Usage::default() })
 //!     }
 //! }
 //!

@@ -51,6 +51,8 @@ impl ModelRequest {
 /// What a model answers.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelReply {
+    /// The model that answered, when the API names it.
+    pub model: Option<String>,
     /// What it said and asked for.
     pub content: Vec<Block>,
     /// Why it stopped.

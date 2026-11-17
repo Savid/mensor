@@ -357,6 +357,7 @@ mod tests {
             content,
             stop,
             usage: Usage::default(),
+            model: None,
             under: None,
         }
     }

@@ -186,7 +186,7 @@ lets a mind fork, and neither clone a hand nor let one go, and
 | Request | Does |
 | --- | --- |
 | `GET /v1/minds` | Lists every mind, each without its system prompt. |
-| `GET /v1/minds/{m}` | `{name, origin, state, hands, waiting, watching, length}`, and the settings it was made with: what it is doing, its connected hands, and the hands and children its turn waits for. `origin` is `root`, `fork` with `parent` and `inherited`, or `from` with `from`. |
+| `GET /v1/minds/{m}` | `{name, origin, state, hands, waiting, watching, length}`, and the settings it was made with: what it is doing, its connected hands, and the hands and children its turn waits for. `state` is `idle`, `thinking`, `working`, `waiting` (it can go on only when a hand connects: one named in `waiting`, or its first if it has none) or `ended`. `origin` is `root`, `fork` with `parent` and `inherited`, or `from` with `from`. |
 | `PUT /v1/minds/{m}` | Makes `m` with settings of its own, and maybe from another mind's history. See [Making a mind](#making-a-mind). |
 | `POST /v1/minds/{m}/prompt` | Stores `{"text", "key"?}`. 202 if new, 200 if the key is already stored, 409 if the key holds other text or the mind has ended. |
 | `POST /v1/minds/{m}/interrupt` | Stops the turn. |
@@ -287,6 +287,15 @@ request Claude declines may be answered by a fallback model, unless
 
 - `ANTHROPIC_AUTH_TOKEN` goes on `Authorization` as a plain bearer, as a
   gateway in front of the API takes it. A Claude.ai OAuth token is not one.
+- The Messages API is asked to think on every request, as hard as the
+  effort says, and to summarise its reasoning, which otherwise streams as
+  empty text. Its models must be Claude 4.6 or later: older ones refuse
+  adaptive thinking.
+- A step's `usage` counts its tokens by price: `input` (neither read from
+  nor written to the cache), `cacheRead`, `cacheWritten` and `output`. It
+  counts only the attempt that answered, whose `model` the step names: with
+  fallbacks, an attempt the first model declined is billed but not
+  counted.
 - Each step is stored with a fingerprint of the model, system prompt and
   tools it was asked under, and its reasoning goes back to the model only
   under the same: under any other the API would refuse it, or drop it and
@@ -297,8 +306,8 @@ request Claude declines may be answered by a fallback model, unless
   and Chat Completions' `max_completion_tokens`, which OpenAI and
   OpenRouter both honour. A reply cut off while it asks for a tool is
   asked for again, with that tool not run; one cut off in its text ends
-  the turn. Chat Completions counts reasoning in it too, so a reasoning
-  model at a high effort can spend it all thinking.
+  the turn. Both APIs count reasoning in it, so a model at a high effort
+  can spend it all thinking.
 - Replies stream. `/events` carries each one as `writing` events before its
   step is stored.
 - At `--compact-at` tokens (150,000; 0 turns it off) the model sums the

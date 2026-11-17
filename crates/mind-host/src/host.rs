@@ -8,7 +8,7 @@ use std::time::Duration;
 use mensor_api::{Made, MindStatus, PAGE, Prompted, Token};
 use mensor_mind::{
     Conflict, Item, MadeFrom, Mind, MindRecord, MindSettings, NoHand, Origin, Report, Settings,
-    Store, StoreError, Unbranched,
+    State, Store, StoreError, Unbranched,
 };
 use mensor_protocol::{FromHand, Hello, InvalidName, Name, Refusal};
 use tokio::net::TcpListener;
@@ -270,7 +270,7 @@ impl Host {
                 let working = names.into_iter().filter(|name| match store.recent(name) {
                     Ok(latest) => {
                         let status = Mind::status(name.clone(), latest);
-                        !status.state.rests() && status.waiting.is_empty()
+                        matches!(status.state, State::Thinking | State::Working)
                     }
                     Err(error) => {
                         tracing::warn!(mind = %name, %error, "a mind's history could not be read");

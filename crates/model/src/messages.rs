@@ -56,8 +56,7 @@ struct Body<'a> {
     output_config: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     fallbacks: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    thinking: Option<Value>,
+    thinking: Value,
 }
 
 #[derive(Serialize)]
@@ -126,13 +125,18 @@ fn body<'a>(config: &'a Config, request: &'a ModelRequest, drop_reasoning: bool)
             .or(config.effort.as_ref())
             .map(|effort| json!({"effort": effort})),
         fallbacks: config.fallbacks.then_some("default"),
-        thinking: drop_reasoning.then(|| {
-            json!({
-                "type": "adaptive",
-                "block_binding": {"prefix_mismatch_behavior": "drop_block"},
-            })
-        }),
+        thinking: thinking(drop_reasoning),
     }
+}
+
+/// The model reasons as hard as its effort says. Without a summary its
+/// reasoning streams as empty text.
+fn thinking(drop_reasoning: bool) -> Value {
+    let mut thinking = json!({"type": "adaptive", "display": "summarized"});
+    if drop_reasoning {
+        thinking["block_binding"] = json!({"prefix_mismatch_behavior": "drop_block"});
+    }
+    thinking
 }
 
 fn said(message: &Message) -> Option<Said<'_>> {
@@ -167,22 +171,25 @@ fn part(content: &Content) -> Option<Part<'_>> {
 
 #[derive(Deserialize)]
 struct Reply {
+    #[serde(default)]
+    model: Option<String>,
     content: Vec<Value>,
     stop_reason: Option<String>,
     #[serde(default)]
     usage: ReplyUsage,
 }
 
+/// The API may write a count as null.
 #[derive(Default, Deserialize)]
 struct ReplyUsage {
     #[serde(default, rename = "input_tokens")]
-    input: u64,
+    input: Option<u64>,
     #[serde(default, rename = "cache_creation_input_tokens")]
-    cache_written: u64,
+    cache_written: Option<u64>,
     #[serde(default, rename = "cache_read_input_tokens")]
-    cache_read: u64,
+    cache_read: Option<u64>,
     #[serde(default, rename = "output_tokens")]
-    output: u64,
+    output: Option<u64>,
 }
 
 /// Reads one response.
@@ -196,10 +203,13 @@ pub(crate) fn reply(body: &str) -> Result<ModelReply, String> {
         _ => Stop::Other,
     };
     let usage = Usage {
-        input: reply.usage.input + reply.usage.cache_written + reply.usage.cache_read,
-        output: reply.usage.output,
+        input: reply.usage.input.unwrap_or(0),
+        cache_read: reply.usage.cache_read.unwrap_or(0),
+        cache_written: reply.usage.cache_written.unwrap_or(0),
+        output: reply.usage.output.unwrap_or(0),
     };
     Ok(ModelReply {
+        model: reply.model,
         content: reply.content.into_iter().map(block).collect(),
         stop,
         usage,
@@ -341,10 +351,14 @@ impl Parts {
             }
             Event::MessageDelta { delta, usage } => {
                 self.message.extend(delta);
+                // Each count is the reply's so far: a later one replaces an
+                // earlier, unless it is null.
+                let usage = usage.into_iter().filter(|(_, count)| !count.is_null());
                 match self.message.get_mut("usage") {
                     Some(Value::Object(counted)) => counted.extend(usage),
                     _ => {
-                        self.message.insert("usage".into(), Value::Object(usage));
+                        self.message
+                            .insert("usage".into(), Value::Object(usage.collect()));
                     }
                 }
             }
@@ -418,6 +432,7 @@ mod tests {
                 ],
                 "cache_control": {"type": "ephemeral"},
                 "fallbacks": "default",
+                "thinking": {"type": "adaptive", "display": "summarized"},
             })
         );
     }
@@ -456,8 +471,9 @@ mod tests {
         let body = written(&config, &request, true);
         assert_eq!(body["output_config"], json!({"effort": "high"}));
         assert_eq!(
-            body["thinking"]["block_binding"]["prefix_mismatch_behavior"],
-            json!("drop_block")
+            body["thinking"],
+            json!({"type": "adaptive", "display": "summarized",
+                   "block_binding": {"prefix_mismatch_behavior": "drop_block"}})
         );
         for absent in ["system", "tools", "fallbacks", "temperature", "tool_choice"] {
             assert!(body.get(absent).is_none(), "{absent}");
@@ -468,13 +484,15 @@ mod tests {
     fn a_reply_keeps_what_the_mind_does_not_read() {
         let reasoning = json!({"type": "thinking", "thinking": "", "signature": "sig"});
         let body = json!({
+            "model": "claude-sonnet-5-5",
             "content": [
                 reasoning,
                 {"type": "text", "text": "Looking."},
                 {"type": "tool_use", "id": "tu_1", "name": "bash", "input": {"command": "ls"}},
             ],
             "stop_reason": "tool_use",
-            "usage": {"input_tokens": 10, "cache_read_input_tokens": 90, "output_tokens": 7},
+            "usage": {"input_tokens": 10, "cache_read_input_tokens": 90,
+                      "cache_creation_input_tokens": 5, "output_tokens": 7},
         });
         let reply = reply(&body.to_string()).unwrap();
         assert_eq!(
@@ -492,10 +510,13 @@ mod tests {
             ]
         );
         assert_eq!(reply.stop, Stop::ToolUse);
+        assert_eq!(reply.model.as_deref(), Some("claude-sonnet-5-5"));
         assert_eq!(
             reply.usage,
             Usage {
-                input: 100,
+                input: 10,
+                cache_read: 90,
+                cache_written: 5,
                 output: 7
             }
         );

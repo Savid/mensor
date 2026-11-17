@@ -58,6 +58,7 @@ impl Scripted {
                 .iter()
                 .any(|block| matches!(block, Block::ToolUse { .. }));
             ModelReply {
+                model: None,
                 content,
                 stop: if uses_tools {
                     Stop::ToolUse

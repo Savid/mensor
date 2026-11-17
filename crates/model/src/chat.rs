@@ -228,6 +228,9 @@ fn assistant(message: &Message) -> Option<Said<'_>> {
 
 #[derive(Deserialize)]
 struct Reply {
+    /// The model that answered: behind a router, the one that served it.
+    #[serde(default)]
+    model: Option<String>,
     #[serde(default)]
     choices: Vec<Choice>,
     #[serde(default)]
@@ -263,10 +266,23 @@ struct AskedFunction {
 
 #[derive(Deserialize)]
 struct ReplyUsage {
+    /// Every token read, those of the cache included, as most servers count.
     #[serde(default)]
     prompt_tokens: u64,
     #[serde(default)]
+    prompt_tokens_details: Option<PromptDetails>,
+    #[serde(default)]
     completion_tokens: u64,
+}
+
+/// Some servers write a count they do not keep as null.
+#[derive(Default, Deserialize)]
+struct PromptDetails {
+    #[serde(default)]
+    cached_tokens: Option<u64>,
+    /// Written by a server that charges for writing the cache.
+    #[serde(default)]
+    cache_write_tokens: Option<u64>,
 }
 
 /// Reads one response.
@@ -313,11 +329,23 @@ pub(crate) fn reply(body: &str) -> Result<ModelReply, String> {
         Some("stop") => Stop::EndTurn,
         _ => Stop::Other,
     };
-    let usage = reply.usage.map_or_else(Usage::default, |usage| Usage {
-        input: usage.prompt_tokens,
-        output: usage.completion_tokens,
+    let usage = reply.usage.map_or_else(Usage::default, |usage| {
+        let cache = usage.prompt_tokens_details.unwrap_or_default();
+        let read = cache.cached_tokens.unwrap_or(0);
+        let written = cache.cache_write_tokens.unwrap_or(0);
+        Usage {
+            // A server whose prompt count leaves the cache out has it all.
+            input: usage
+                .prompt_tokens
+                .checked_sub(read + written)
+                .unwrap_or(usage.prompt_tokens),
+            cache_read: read,
+            cache_written: written,
+            output: usage.completion_tokens,
+        }
     });
     Ok(ModelReply {
+        model: reply.model,
         content,
         stop,
         usage,
@@ -615,6 +643,7 @@ mod tests {
     fn a_reply_is_read_with_its_calls_and_its_reasoning() {
         let details = json!([{"type": "reasoning.encrypted", "data": "sig"}]);
         let body = json!({
+            "model": "anthropic/claude-sonnet-5.5",
             "choices": [{
                 "message": {
                     "role": "assistant",
@@ -631,7 +660,8 @@ mod tests {
                 },
                 "finish_reason": "tool_calls",
             }],
-            "usage": {"prompt_tokens": 100, "completion_tokens": 7},
+            "usage": {"prompt_tokens": 100, "completion_tokens": 7,
+                      "prompt_tokens_details": {"cached_tokens": 80, "cache_write_tokens": 15}},
         });
         let read = reply(&body.to_string()).unwrap();
         let reasoning = json!({"type": "reasoning_details", "details": details});
@@ -662,13 +692,29 @@ mod tests {
             ]
         );
         assert_eq!(read.stop, Stop::ToolUse);
+        assert_eq!(read.model.as_deref(), Some("anthropic/claude-sonnet-5.5"));
         assert_eq!(
             read.usage,
             Usage {
-                input: 100,
+                input: 5,
+                cache_read: 80,
+                cache_written: 15,
                 output: 7
             }
         );
+        // A server whose prompt count leaves the cache out, or that writes
+        // a count it does not keep as null.
+        let usage = |usage: Value| {
+            let body = json!({"choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}],
+                              "usage": usage});
+            reply(&body.to_string()).unwrap().usage
+        };
+        let uncounted = usage(json!({"prompt_tokens": 10, "completion_tokens": 1,
+                                     "prompt_tokens_details": {"cached_tokens": 80}}));
+        assert_eq!((uncounted.input, uncounted.cache_read), (10, 80));
+        let unkept = usage(json!({"prompt_tokens": 10, "completion_tokens": 1,
+                                  "prompt_tokens_details": {"cached_tokens": null}}));
+        assert_eq!((unkept.input, unkept.cache_read), (10, 0));
 
         // The reasoning goes back with the step it came with.
         let request = ModelRequest {
