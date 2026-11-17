@@ -33,6 +33,24 @@ skip = [
   { crate = "getrandom@0.2", reason = "ring 0.17 is on 0.2; tungstenite 0.29 (through rand 0.9) is on 0.3, as this workspace is" },
   { crate = "matchit@0.7", reason = "worker 0.9 is on 0.7; axum 0.8 is on 0.8" },
   { crate = "syn@2", reason = "pin-project-internal, strum_macros and tracing-attributes are on syn 2" },
+  # Only with mensor's `postgres` feature: postgres-protocol 0.6.12 is on
+  # RustCrypto's digest 0.11 and rand 0.10, where tungstenite 0.29 (through
+  # sha1), axum 0.8 and the host's tokens are on digest 0.10 and rand 0.9.
+  # The postgres client before it is open to advisories it fixed. A skip is
+  # global, as cargo-deny cannot keep one to a feature: so a duplicate these
+  # would hide in the default build is found with
+  # `cargo tree --duplicates -e normal -p mensor`, which leaves the feature
+  # out.
+  { crate = "block-buffer@0.10", reason = "digest 0.10 for tungstenite, axum and mensor-api; postgres-protocol is on 0.11" },
+  { crate = "cpufeatures@0.2", reason = "digest 0.10 for tungstenite, axum and mensor-api; postgres-protocol is on 0.11" },
+  { crate = "crypto-common@0.1", reason = "digest 0.10 for tungstenite, axum and mensor-api; postgres-protocol is on 0.11" },
+  { crate = "digest@0.10", reason = "tungstenite, axum and mensor-api are on 0.10; postgres-protocol is on 0.11" },
+  { crate = "hmac@0.12", reason = "mensor-api is on 0.12, on digest 0.10 as tungstenite is; postgres-protocol is on 0.13" },
+  { crate = "sha2@0.10", reason = "mensor-api is on 0.10, on digest 0.10 as tungstenite is; postgres-protocol is on 0.11" },
+  { crate = "rand@0.9", reason = "tungstenite 0.29 is on 0.9; postgres-protocol 0.6.12 is on 0.10" },
+  { crate = "rand_core@0.9", reason = "tungstenite 0.29 is on rand 0.9; postgres-protocol 0.6.12 is on 0.10" },
+  { crate = "getrandom@0.3", reason = "rand 0.9, for tungstenite 0.29, is on 0.3; rand 0.10, for postgres-protocol, is on 0.4" },
+  { crate = "fallible-iterator@0.2", reason = "postgres-protocol and tokio-postgres are on 0.2; rusqlite 0.42 is on 0.3" },
 ]
 
 [sources]

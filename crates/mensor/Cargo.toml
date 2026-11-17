@@ -19,6 +19,11 @@ doc = false
 name = "mensor-hand"
 doc = false
 
+[features]
+# A host that keeps its histories in Postgres, named by MENSOR_POSTGRES. Off,
+# the binaries hold no Postgres client.
+postgres = ["dep:mensor-store-postgres"]
+
 [dependencies]
 clap.workspace = true
 mensor-hand.workspace = true
@@ -27,6 +32,7 @@ mensor-mind.workspace = true
 mensor-mind-host.workspace = true
 mensor-model.workspace = true
 mensor-protocol.workspace = true
+mensor-store-postgres = { workspace = true, optional = true }
 mensor-store-sqlite.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "process", "rt-multi-thread", "signal", "time"] }
 tracing.workspace = true

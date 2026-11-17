@@ -37,6 +37,8 @@ mod item;
 mod mind;
 mod model;
 mod store;
+#[cfg(any(test, feature = "suite"))]
+pub mod suite;
 mod tools;
 mod window;
 

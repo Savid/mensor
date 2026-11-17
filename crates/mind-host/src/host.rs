@@ -11,7 +11,7 @@ use mensor_mind::{
 };
 use mensor_protocol::{FromHand, Hello, InvalidName, Name, Refusal};
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
+use tokio::sync::{Mutex, broadcast, mpsc, oneshot, watch};
 
 use crate::model::Model;
 use crate::task::{self, Command, Link, Outgoing, Told, blocking};
@@ -74,6 +74,9 @@ pub(crate) struct Inner {
     /// The minds a `wait` waits for, each with the minds that wait for it.
     /// Kept in memory alone: a mind that waits watches again when it wakes.
     watchers: std::sync::Mutex<BTreeMap<Name, BTreeSet<Name>>>,
+    /// Whether the host has stopped: every mind's task and hand's
+    /// connection ends once it has.
+    pub(crate) stopped: watch::Sender<bool>,
 }
 
 /// One mind, as its host knows it.
@@ -196,6 +199,7 @@ impl Host {
             minds: Mutex::new(minds),
             links: AtomicU64::new(1),
             watchers: std::sync::Mutex::default(),
+            stopped: watch::Sender::new(false),
         };
         let host = Self {
             inner: Arc::new(inner),
@@ -251,6 +255,19 @@ impl Host {
         axum::serve(listener, self.router())
             .with_graceful_shutdown(shutdown)
             .await
+    }
+
+    /// Stops the host, as a process that exits would: every mind's task
+    /// ends between what it does, and every hand's connection is closed
+    /// with 1001, so the hand dials again. What they hold, the store among
+    /// it, is let go as each ends. A mind woken after this ends at once.
+    pub fn stop(&self) {
+        self.inner.stopped.send_replace(true);
+    }
+
+    /// Whether the host has stopped, to wait on.
+    pub(crate) fn stopping(&self) -> watch::Receiver<bool> {
+        self.inner.stopped.subscribe()
     }
 
     /// How many minds are awake: in memory, each with a task. Every other

@@ -8,7 +8,7 @@ use mensor_mind::{
     Report, State, Store, StoreError,
 };
 use mensor_protocol::{FromHand, FromMind, Hello, Name, Refusal};
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::AbortHandle;
 use tokio::time::timeout;
 
@@ -128,6 +128,13 @@ struct Task {
     /// way to give it up.
     asking: Option<(u64, AbortHandle)>,
     told: broadcast::Sender<Told>,
+    /// Whether the host has stopped.
+    stopped: watch::Receiver<bool>,
+}
+
+/// Returns once the host has stopped, or has gone.
+pub(crate) async fn stopped(stopped: &mut watch::Receiver<bool>) {
+    let _ = stopped.wait_for(|stopped| *stopped).await;
 }
 
 /// Runs one call to a store off the runtime's own threads, because a store
@@ -161,6 +168,7 @@ pub(crate) fn spawn(name: &Name, host: &Arc<Inner>) -> mpsc::UnboundedSender<Com
         links: BTreeMap::new(),
         asking: None,
         told: broadcast::Sender::new(TOLD),
+        stopped: host.stopped.subscribe(),
     };
     tokio::spawn(task.run());
     sender
@@ -168,7 +176,12 @@ pub(crate) fn spawn(name: &Name, host: &Arc<Inner>) -> mpsc::UnboundedSender<Com
 
 impl Task {
     async fn run(mut self) {
-        if let Err(error) = self.serve().await {
+        let served = self.serve().await;
+        // A model still answering answers nobody.
+        if let Some((_, asking)) = self.asking.take() {
+            asking.abort();
+        }
+        if let Err(error) = served {
             tracing::error!(mind = %self.name, %error, "the mind stopped: its history could not be read or stored");
             // Whoever asks next wakes the mind from what is stored.
             if let Some(host) = self.host.upgrade()
@@ -190,13 +203,19 @@ impl Task {
             let resting =
                 self.links.is_empty() && self.asking.is_none() && self.told.receiver_count() == 0;
             let command = if resting {
-                match timeout(self.rest_after, self.commands.recv()).await {
-                    Ok(command) => command,
-                    Err(_) if self.rest().await => return Ok(()),
-                    Err(_) => continue,
+                tokio::select! {
+                    received = timeout(self.rest_after, self.commands.recv()) => match received {
+                        Ok(command) => command,
+                        Err(_) if self.rest().await => return Ok(()),
+                        Err(_) => continue,
+                    },
+                    () = stopped(&mut self.stopped) => return Ok(()),
                 }
             } else {
-                self.commands.recv().await
+                tokio::select! {
+                    command = self.commands.recv() => command,
+                    () = stopped(&mut self.stopped) => return Ok(()),
+                }
             };
             let Some(command) = command else {
                 return Ok(());

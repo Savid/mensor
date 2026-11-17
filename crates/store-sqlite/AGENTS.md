@@ -8,3 +8,5 @@ The SQLite `Store` (`crates/mind/src/store.rs`).
 - `create` writes a mind and its first items in one transaction, and a mind
   that exists with the same origin counts as made.
 - A child shares its parent's rows without copying them.
+- It passes `mensor_mind::store_suite!`. Its own tests are of its file and
+  rows.

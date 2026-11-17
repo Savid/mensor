@@ -23,3 +23,7 @@ client.
   `mensor_api::Access`. A route that names a mind takes the name through
   `Reached`, never a bare `Path`, and attach checks the hello's mind before
   `Host::connect`.
+- `Host::stop` ends the host as an exiting process would: each mind's task
+  between commands, each hand's WebSocket with 1001. A task that lives as
+  long as a mind or a connection selects on `stopped` (`src/task.rs`), so
+  that what it holds, the store among it, is let go.

@@ -14,5 +14,10 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
+[features]
+# The tests every store runs over itself, `mensor_mind::store_suite!`: for a
+# store's crate to turn on in its dev-dependencies.
+suite = []
+
 [lints]
 workspace = true

@@ -24,7 +24,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::time::timeout;
 
 use crate::host::{Host, HostError, Rejected};
-use crate::task::{Outgoing, Told};
+use crate::task::{Outgoing, Told, stopped};
 
 impl Host {
     /// The attach endpoint and the API as an [`axum`] router.
@@ -281,9 +281,15 @@ async fn serve(host: Host, mut socket: WebSocket, access: Access) {
     };
 
     let idle = host.config().idle_timeout;
+    let mut stopping = host.stopping();
     let (mut sink, mut frames) = socket.split();
     loop {
         tokio::select! {
+            () = stopped(&mut stopping) => {
+                let frame = CloseFrame { code: 1001, reason: "the host stopped".into() };
+                let _ = sink.send(Message::Close(Some(frame))).await;
+                break;
+            }
             out = connection.next() => match out {
                 Some(Outgoing::Message(message)) => {
                     if sink.send(Message::Text(message.encode().into())).await.is_err() {

@@ -602,86 +602,14 @@ mod tests {
         store.append(&name(mind), &items).unwrap();
     }
 
+    mensor_mind::store_suite!(SqliteStore::in_memory().unwrap());
+
     fn fork(store: &SqliteStore, mind: &str, parent: &str, inherited: u64) {
         let origin = Origin::Fork {
             parent: name(parent),
             inherited,
         };
         store.create(&record(mind, origin), &[]).unwrap();
-    }
-
-    #[test]
-    fn a_history_reads_back_from_any_index() {
-        let store = SqliteStore::in_memory().unwrap();
-        root(&store, "a1", &["0", "1", "2"]);
-        store.append(&name("a1"), &[prompt("3")]).unwrap();
-        assert_eq!(
-            texts(&store.read(&name("a1"), 0, usize::MAX).unwrap()),
-            ["0", "1", "2", "3"]
-        );
-        assert_eq!(
-            texts(&store.read(&name("a1"), 2, usize::MAX).unwrap()),
-            ["2", "3"]
-        );
-        assert!(store.read(&name("a1"), 9, usize::MAX).unwrap().is_empty());
-    }
-
-    #[test]
-    fn a_history_is_read_a_page_at_a_time_and_from_its_last_summary() {
-        let store = SqliteStore::in_memory().unwrap();
-        root(&store, "a1", &["0", "1", "2"]);
-        assert_eq!(texts(&store.read(&name("a1"), 1, 1).unwrap()), ["1"]);
-        assert_eq!(store.tail(&name("a1")).unwrap().0, 0);
-
-        let keyed = Item::Prompt {
-            key: Some("k".into()),
-            text: "3".into(),
-            from: None,
-        };
-        let summary = |from| Item::Summary {
-            text: "So far.".into(),
-            usage: mensor_mind::Usage::default(),
-            from,
-            hands: std::collections::BTreeMap::new(),
-            last_call: 0,
-            forks_left: 64,
-            parent: None,
-            children: Vec::new(),
-        };
-        store.append(&name("a1"), &[keyed, summary(2)]).unwrap();
-        fork(&store, "b7", "a1", 5);
-        store.append(&name("b7"), &[prompt("5")]).unwrap();
-        store.append(&name("a1"), &[summary(5)]).unwrap();
-
-        // A fork's history may start in its parent's, and holds nothing its
-        // parent stored after the two parted.
-        let (from, items) = store.tail(&name("b7")).unwrap();
-        assert_eq!((from, items.len()), (2, 4));
-        assert_eq!(store.tail(&name("a1")).unwrap().0, 5);
-        assert_eq!(
-            store.prompt(&name("b7"), "k").unwrap().as_deref(),
-            Some("3")
-        );
-        assert_eq!(store.prompt(&name("b7"), "other").unwrap(), None);
-        // A page may span the two.
-        assert_eq!(store.read(&name("b7"), 3, 2).unwrap().len(), 2);
-        assert_eq!(store.read(&name("b7"), 4, 9).unwrap().len(), 2);
-
-        // The latest of a history starts at what its last step had seen.
-        let step = Item::Step {
-            seen: 6,
-            content: Vec::new(),
-            stop: mensor_mind::Stop::EndTurn,
-            usage: mensor_mind::Usage::default(),
-        };
-        store.append(&name("b7"), &[prompt("6"), step]).unwrap();
-        let latest = store.recent(&name("b7")).unwrap();
-        assert_eq!((latest.from, latest.items.len()), (6, 2));
-        assert_eq!(store.last(&name("b7"), "no such kind").unwrap(), None);
-        assert!(matches!(
-            store.last(&name("b7"), "summary").unwrap(),
-            Some(Item::Summary { from: 2, .. })
-        ));
     }
 
     #[test]
@@ -697,52 +625,6 @@ mod tests {
         // After 2025, in milliseconds.
         assert!(time > 1_735_689_600_000, "{time}");
         assert_eq!(kind, "prompt");
-    }
-
-    #[test]
-    fn appends_that_arrive_together_are_each_stored_whole_and_in_order() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = SqliteStore::open(dir.path().join("mensor.sqlite")).unwrap();
-        root(&store, "all", &[]);
-        let threads: Vec<String> = (0..16).map(|thread| format!("t{thread}")).collect();
-        for thread in &threads {
-            root(&store, thread, &[]);
-        }
-        std::thread::scope(|scope| {
-            for thread in &threads {
-                let store = &store;
-                scope.spawn(move || {
-                    for index in 0..40 {
-                        let said = [prompt(&format!("{thread} {index}")), prompt("and")];
-                        store.append(&name(thread), &said).unwrap();
-                        store.append(&name("all"), &said[..1]).unwrap();
-                        // One the store refuses fails alone.
-                        let refused = store.append(&name("nobody"), &said);
-                        assert!(matches!(refused, Err(StoreError::Missing(_))));
-                    }
-                });
-            }
-        });
-
-        for thread in &threads {
-            let own = store.read(&name(thread), 0, usize::MAX).unwrap();
-            let expected: Vec<String> = (0..40)
-                .flat_map(|index| [format!("{thread} {index}"), "and".into()])
-                .collect();
-            assert_eq!(texts(&own), expected);
-        }
-        // Every thread's appends to the mind they share are in its order.
-        let shared = store.read(&name("all"), 0, usize::MAX).unwrap();
-        assert_eq!(shared.len(), 16 * 40);
-        for thread in &threads {
-            let prefix = format!("{thread} ");
-            let own: Vec<&str> = texts(&shared)
-                .into_iter()
-                .filter(|text| text.starts_with(&prefix))
-                .collect();
-            let expected: Vec<String> = (0..40).map(|index| format!("{thread} {index}")).collect();
-            assert_eq!(own, expected);
-        }
     }
 
     #[test]
@@ -785,183 +667,22 @@ mod tests {
     }
 
     #[test]
-    fn what_a_mind_knows_is_read_through_its_parent_from_its_last_summary() {
-        let sqlite = SqliteStore::in_memory().unwrap();
-        let memory = mensor_mind::MemoryStore::new();
-        let released = Item::Released {
-            hand: name("b2"),
-            reason: "gone".into(),
-        };
-        let summary = Item::Summary {
-            text: "So far.".into(),
-            usage: mensor_mind::Usage::default(),
-            from: 2,
-            hands: std::collections::BTreeMap::new(),
-            last_call: 0,
-            forks_left: 64,
-            parent: None,
-            children: Vec::new(),
-        };
-        let parted = Item::Parted {
-            parent: name("a1"),
-            left: 31,
-        };
-        for store in [&sqlite as &dyn Store, &memory] {
-            store.create(&record("a1", Origin::Root), &[]).unwrap();
-            store
-                .append(&name("a1"), &[prompt("0"), released.clone(), prompt("2")])
-                .unwrap();
-            let child = record(
-                "b7",
-                Origin::Fork {
-                    parent: name("a1"),
-                    inherited: 3,
-                },
-            );
-            store
-                .create(&child, &[parted.clone(), prompt("4")])
-                .unwrap();
-            assert_eq!(
-                store.known(&name("b7")).unwrap(),
-                [(1, released.clone()), (3, parted.clone())]
-            );
-            // A summary that starts from 2 leaves out what came before it.
-            store
-                .append(&name("b7"), std::slice::from_ref(&summary))
-                .unwrap();
-            assert_eq!(
-                store.known(&name("b7")).unwrap(),
-                [(3, parted.clone()), (5, summary.clone())]
-            );
-            let latest = store.recent(&name("b7")).unwrap();
-            assert_eq!((latest.from, latest.items.len()), (0, 6));
-        }
-    }
-
-    #[test]
-    fn forks_share_their_parents_rows() {
+    fn a_fork_stores_only_its_own_rows() {
         let store = SqliteStore::in_memory().unwrap();
         root(&store, "a1", &["0", "1", "2"]);
         fork(&store, "b7", "a1", 2);
-        store
-            .append(&name("b7"), &[prompt("b2"), prompt("b3")])
-            .unwrap();
-        store.append(&name("a1"), &[prompt("3")]).unwrap();
-        fork(&store, "c9", "b7", 3);
-        store.append(&name("c9"), &[prompt("c3")]).unwrap();
-        fork(&store, "d4", "b7", 1);
-        fork(&store, "e5", "b7", 4);
-
-        assert_eq!(
-            texts(&store.read(&name("a1"), 0, usize::MAX).unwrap()),
-            ["0", "1", "2", "3"]
-        );
-        assert_eq!(
-            texts(&store.read(&name("b7"), 0, usize::MAX).unwrap()),
-            ["0", "1", "b2", "b3"]
-        );
-        assert_eq!(
-            texts(&store.read(&name("b7"), 1, usize::MAX).unwrap()),
-            ["1", "b2", "b3"]
-        );
-        assert_eq!(
-            texts(&store.read(&name("c9"), 0, usize::MAX).unwrap()),
-            ["0", "1", "b2", "c3"]
-        );
-        assert_eq!(
-            texts(&store.read(&name("c9"), 3, usize::MAX).unwrap()),
-            ["c3"]
-        );
-        assert_eq!(
-            texts(&store.read(&name("d4"), 0, usize::MAX).unwrap()),
-            ["0"]
-        );
-        assert_eq!(
-            texts(&store.read(&name("e5"), 0, usize::MAX).unwrap()),
-            ["0", "1", "b2", "b3"]
-        );
-
+        store.append(&name("b7"), &[prompt("b2")]).unwrap();
         let own: i64 = store
             .lock()
-            .query_row("SELECT COUNT(*) FROM items WHERE mind = 'c9'", [], |row| {
+            .query_row("SELECT COUNT(*) FROM items WHERE mind = 'b7'", [], |row| {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(own, 1, "a fork stores only its own items");
-    }
-
-    #[test]
-    fn minds_are_listed_in_the_order_they_were_made() {
-        let store = SqliteStore::in_memory().unwrap();
-        root(&store, "z9", &["0"]);
-        fork(&store, "a1", "z9", 1);
+        assert_eq!(own, 1);
         assert_eq!(
-            store.minds().unwrap(),
-            vec![
-                record("z9", Origin::Root),
-                record(
-                    "a1",
-                    Origin::Fork {
-                        parent: name("z9"),
-                        inherited: 1
-                    }
-                ),
-            ]
+            texts(&store.read(&name("b7"), 0, usize::MAX).unwrap()),
+            ["0", "1", "b2"]
         );
-    }
-
-    #[test]
-    fn a_store_refuses_what_it_cannot_do() {
-        let store = SqliteStore::in_memory().unwrap();
-        root(&store, "a1", &["0"]);
-        let elsewhere = Origin::Fork {
-            parent: name("a1"),
-            inherited: 0,
-        };
-        let again = store.create(&record("a1", elsewhere), &[]);
-        assert!(matches!(again, Err(StoreError::Exists(_))));
-        assert!(matches!(
-            store.append(&name("x"), &[prompt("0")]),
-            Err(StoreError::Missing(_))
-        ));
-        assert!(matches!(
-            store.read(&name("x"), 0, usize::MAX),
-            Err(StoreError::Missing(_))
-        ));
-
-        let orphan = Origin::Fork {
-            parent: name("x"),
-            inherited: 0,
-        };
-        let orphan = store.create(&record("b7", orphan), &[]);
-        assert!(matches!(orphan, Err(StoreError::Missing(_))));
-        let long = Origin::Fork {
-            parent: name("a1"),
-            inherited: 2,
-        };
-        let long = store.create(&record("b7", long), &[]);
-        assert!(matches!(long, Err(StoreError::Short { .. })));
-    }
-
-    #[test]
-    fn a_child_is_made_with_its_first_items_once() {
-        let store = SqliteStore::in_memory().unwrap();
-        root(&store, "m", &["0", "1"]);
-        let child = || {
-            let origin = Origin::Fork {
-                parent: name("m"),
-                inherited: 2,
-            };
-            store.create(&record("m.d3342iuj", origin), &[prompt("c2"), prompt("c3")])
-        };
-        child().unwrap();
-        child().unwrap();
-        assert_eq!(
-            texts(&store.read(&name("m.d3342iuj"), 0, usize::MAX).unwrap()),
-            ["0", "1", "c2", "c3"]
-        );
-        store.append(&name("m.d3342iuj"), &[prompt("c4")]).unwrap();
-        assert_eq!(store.read(&name("m.d3342iuj"), 4, 9).unwrap().len(), 1);
     }
 
     #[test]

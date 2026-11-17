@@ -1,7 +1,7 @@
 //! Hosting minds: the flags, and the host they describe.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,7 +11,7 @@ use mensor_mind_host::{Config, Host, Provider, Token};
 use mensor_store_sqlite::SqliteStore;
 use tokio::net::TcpListener;
 
-use crate::{TOKEN, stopped, token};
+use crate::{POSTGRES, TOKEN, stopped, token};
 
 /// How minds are hosted.
 #[derive(Args)]
@@ -19,8 +19,9 @@ pub struct Hosting {
     /// The address to listen on. Anything but loopback needs `MENSOR_TOKEN`.
     #[arg(long, default_value = "127.0.0.1:7878")]
     listen: SocketAddr,
-    /// The database file that keeps every history. Without one, nothing
-    /// outlives this process.
+    /// The `SQLite` file that keeps every history. `MENSOR_POSTGRES` names a
+    /// Postgres database instead. Without either, nothing outlives this
+    /// process.
     #[arg(long)]
     store: Option<PathBuf>,
     /// How many clones a mind may have made with `clone_hand` and not let
@@ -67,12 +68,7 @@ pub async fn open(hosting: Hosting) -> Result<(Host, TcpListener), String> {
         ),
         None => None,
     };
-    let store: Arc<dyn Store> = if let Some(path) = &hosting.store {
-        Arc::new(SqliteStore::open(path).map_err(|error| error.to_string())?)
-    } else {
-        tracing::warn!("no --store: histories are kept in memory and end with this process");
-        Arc::new(MemoryStore::new())
-    };
+    let store = store(hosting.store.as_deref()).await?;
     let mut model =
         mensor_model::Config::from_vars(&hosting.model, |name| std::env::var(name).ok())
             .map_err(|error| error.to_string())?;
@@ -106,6 +102,47 @@ pub async fn open(hosting: Hosting) -> Result<(Host, TcpListener), String> {
         }
     });
     Ok((host, listener))
+}
+
+/// Where every history is kept: the `SQLite` file `path`, the Postgres
+/// database `MENSOR_POSTGRES` names, or memory. One place, never two.
+async fn store(path: Option<&Path>) -> Result<Arc<dyn Store>, String> {
+    let postgres = std::env::var(POSTGRES).ok().filter(|url| !url.is_empty());
+    match (path, postgres) {
+        (Some(_), Some(_)) => Err(format!(
+            "--store and {POSTGRES} are both set: keep every history in one place"
+        )),
+        (Some(path), None) => Ok(Arc::new(
+            SqliteStore::open(path).map_err(|error| error.to_string())?,
+        )),
+        (None, Some(url)) => postgres_store(url).await,
+        (None, None) => {
+            tracing::warn!(
+                "no --store and no {POSTGRES}: histories are kept in memory and end with this process"
+            );
+            Ok(Arc::new(MemoryStore::new()))
+        }
+    }
+}
+
+/// The Postgres database `url` names. Connecting blocks, so it is done off
+/// the runtime's threads.
+#[cfg(feature = "postgres")]
+async fn postgres_store(url: String) -> Result<Arc<dyn Store>, String> {
+    let opened =
+        tokio::task::spawn_blocking(move || mensor_store_postgres::PostgresStore::open(&url))
+            .await
+            .map_err(|error| format!("the store could not be opened: {error}"))?;
+    Ok(Arc::new(opened.map_err(|error| error.to_string())?))
+}
+
+/// No Postgres in this build.
+#[cfg(not(feature = "postgres"))]
+async fn postgres_store(_: String) -> Result<Arc<dyn Store>, String> {
+    Err(format!(
+        "{POSTGRES} is set, but this mensor was built without Postgres: build it with \
+         --features postgres"
+    ))
 }
 
 /// How often the memory the host has freed is given back to the system.

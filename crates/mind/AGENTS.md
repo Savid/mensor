@@ -19,3 +19,6 @@ forks, and the `Store` trait (`src/store.rs`).
 - What a mind looks up (a call, an outcome, the last step) is in the round
   in progress. Only a prompt's key and the last call's id are looked for
   further back.
+- `src/suite.rs` is what every store does, as functions over a new, empty
+  store, behind the `suite` feature. `store_suite!` writes a test for each:
+  a new function joins its list there.

@@ -44,6 +44,18 @@ jobs:
       - run: make tools
       - run: make test-cloudflare
 
+  # The Postgres store, and the end-to-end tests over it, against Postgres in
+  # Docker with TLS from a root made for the run. No secret is read.
+  postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+      - run: make test-postgres
+
   # The runner's image has the shellcheck that actionlint checks each run:
   # script with.
   tooling:

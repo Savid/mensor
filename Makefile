@@ -16,9 +16,9 @@ fmt-check: ## Fail if anything is not formatted
 	cargo fmt --all --check
 
 .PHONY: lint
-lint: ## Clippy on every target and the docs, warnings refused
-	cargo clippy --workspace --all-targets --locked -- -D warnings
-	RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --quiet
+lint: ## Clippy on every target and feature, and the docs, warnings refused
+	cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+	RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked --quiet
 
 .PHONY: test
 test: ## Every test, the end-to-end ones included
@@ -35,6 +35,10 @@ tools: ## Install the pinned cargo-deny and worker-build
 .PHONY: build
 build: ## The release binaries, at target/release: mensor, mensor-mind and mensor-hand
 	cargo build --release --locked -p mensor
+
+.PHONY: test-postgres
+test-postgres: ## The Postgres store, and the end-to-end tests over it, against Postgres in Docker (needs Docker)
+	crates/store-postgres/tests/postgres.sh
 
 .PHONY: build-cloudflare
 build-cloudflare: ## The Cloudflare worker, at crates/cloudflare/build (needs worker-build)

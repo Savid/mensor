@@ -33,6 +33,8 @@ struct Server {
     model: Arc<Scripted>,
     address: std::net::SocketAddr,
     task: JoinHandle<()>,
+    /// The host's store, which it holds until it has stopped.
+    store: std::sync::Weak<dyn Store>,
 }
 
 impl Server {
@@ -41,6 +43,7 @@ impl Server {
     }
 
     async fn over(store: Arc<dyn Store>, config: Config, address: &str) -> Self {
+        let held = Arc::downgrade(&store);
         let model = Arc::new(Scripted::new());
         let host = Host::open(store, model.clone(), config).await.unwrap();
         let listener = TcpListener::bind(address).await.unwrap();
@@ -57,6 +60,7 @@ impl Server {
             model,
             address,
             task,
+            store: held,
         }
     }
 
@@ -134,10 +138,19 @@ impl Server {
         self.host.history(&name(mind), 0).unwrap()
     }
 
-    /// Stops listening, and waits until the address is free again.
+    /// Stops the host, as its process exiting would, and waits until the
+    /// address is free again and the host has let go of its store, which
+    /// another host may then open.
     async fn stop(mut self) {
         self.task.abort();
         let _ = (&mut self.task).await;
+        self.host.stop();
+        let store = self.store.clone();
+        drop(self);
+        eventually("the stopped host lets go of its store", || async {
+            store.strong_count() == 0
+        })
+        .await;
     }
 }
 
@@ -655,13 +668,35 @@ async fn a_host_that_restarts_carries_every_mind_on() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("mensor.sqlite");
     let open = || -> Arc<dyn Store> { Arc::new(SqliteStore::open(&path).unwrap()) };
+    restarts_carry_every_mind_on(open, dir.path()).await;
+}
 
+#[cfg(feature = "postgres")]
+#[tokio::test]
+#[ignore = "needs Postgres: make test-postgres"]
+async fn a_host_that_restarts_over_postgres_carries_every_mind_on() {
+    let dir = tempfile::tempdir().unwrap();
+    restarts_carry_every_mind_on(|| postgres("e2e_restart"), dir.path()).await;
+}
+
+/// A store over the database `make test-postgres` made for one test.
+#[cfg(feature = "postgres")]
+fn postgres(database: &str) -> Arc<dyn Store> {
+    let server = std::env::var("MENSOR_TEST_POSTGRES")
+        .expect("make test-postgres names a Postgres in MENSOR_TEST_POSTGRES");
+    let url = format!("{server}/{database}?sslmode=disable");
+    Arc::new(mensor_store_postgres::PostgresStore::open(&url).unwrap())
+}
+
+/// A host that stops, and one over the same store after it, which carries
+/// every mind on from where the first left it.
+async fn restarts_carry_every_mind_on(open: impl Fn() -> Arc<dyn Store>, dir: &Path) {
     let first = Server::over(open(), Config::default(), "127.0.0.1:0").await;
     first
         .model
         .then(vec![bash("tu_1", "echo one")])
         .then(vec![text("One.")]);
-    let (hand, _task) = first.hand(fresh("m", "a1"), dir.path());
+    let (hand, _task) = first.hand(fresh("m", "a1"), dir);
     first.settled("m").await;
     first.prompt("m", "count").await;
     first.settled("m").await;
@@ -669,7 +704,7 @@ async fn a_host_that_restarts_carries_every_mind_on() {
     let before = first.history("m");
     first.stop().await;
 
-    // A new host over the same file, on the same address. The hand drops
+    // A new host over the same store, on the same address. The hand drops
     // its old connection and finds the new host.
     let second = Server::over(open(), Config::default(), &address).await;
     assert_eq!(second.history("m"), before);
@@ -1773,11 +1808,25 @@ async fn a_parent_that_waits_through_a_host_restart_hears_from_its_child() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("mensor.sqlite");
     let open = || -> Arc<dyn Store> { Arc::new(SqliteStore::open(&path).unwrap()) };
+    waits_through_a_restart(open, root.path()).await;
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+#[ignore = "needs Postgres: make test-postgres"]
+async fn a_parent_that_waits_through_a_host_restart_over_postgres_hears_from_its_child() {
+    let root = tempfile::tempdir().unwrap();
+    waits_through_a_restart(|| postgres("e2e_wait"), root.path()).await;
+}
+
+/// A parent that forks and waits, through a restart of its host over the
+/// same store, hears from its child once its child's hand comes back.
+async fn waits_through_a_restart(open: impl Fn() -> Arc<dyn Store>, root: &Path) {
     let first = Server::over(open(), Config::default(), "127.0.0.1:0").await;
     for _ in 0..3 {
         first.model.then_with(waiting_through);
     }
-    let (dir, clones) = (root.path().join("work"), root.path().join("clones"));
+    let (dir, clones) = (root.join("work"), root.join("clones"));
     std::fs::create_dir(&dir).unwrap();
     let hands = first.cloning_hand("m", "a1", &dir, &clones);
     first.settled("m").await;
@@ -1802,8 +1851,10 @@ async fn a_parent_that_waits_through_a_host_restart_hears_from_its_child() {
     )
     .await;
     let child = child.into_inner().unwrap();
+    // The hands ran in the first host's process, and go with it.
     hands.stop();
     hands.ended().await.unwrap();
+    drop(hands);
     first.stop().await;
 
     // A new host wakes the parent, which waits with no hand. Only the

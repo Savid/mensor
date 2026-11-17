@@ -13,16 +13,20 @@ what they say to each other.
 ```bash
 make check    # fmt-check, lint, test and deny: a change is done when this exits 0
 make fmt      # rustfmt
-make lint     # clippy on every target, pedantic, and the docs: warnings refused
+make lint     # clippy on every target and feature, pedantic, and the docs: warnings refused
 make test     # every native test, the end-to-end ones included
 make deny     # cargo-deny: advisories, licences, duplicate versions, sources
 make tools    # installs the pinned cargo-deny and worker-build
 make build    # target/release/mensor, mensor-mind and mensor-hand
 make test-cloudflare    # builds the worker and runs it on workerd under wrangler (needs Node)
+make test-postgres      # the Postgres store, and the end-to-end tests over it, in Docker (needs Docker)
 ```
 
 `make test-cloudflare` is not part of `make check`: run it after changing
 `crates/cloudflare` or any pure crate, all of which the worker builds on.
+Nor is `make test-postgres`: run it after changing `crates/store-postgres`,
+the `Store` trait or its suite (`crates/mind/src/suite.rs`), or how
+`crates/mensor` picks its store.
 While iterating, test the crate you touched: `cargo test -p mensor-mind`.
 
 ## Layout
@@ -43,9 +47,12 @@ While iterating, test the crate you touched: `cargo test -p mensor-mind`.
   hosts and `examples/`.
 - `make check` does not run `examples/`. A change to a message, flag or
   endpoint an example uses updates it, and runs it as its README says.
-- `crates/mind`, `mind-host`, `hand-host`, `model`, `store-sqlite`, `mensor`
-  and `cloudflare` each have an `AGENTS.md` with their own rules. Read it
-  before changing that crate.
+- What every store does is a test in `crates/mind/src/suite.rs`, which
+  `mensor_mind::store_suite!` runs over each store. A test of one store's
+  own rows stays in its crate.
+- `crates/mind`, `mind-host`, `hand-host`, `model`, `store-sqlite`,
+  `store-postgres`, `mensor` and `cloudflare` each have an `AGENTS.md` with
+  their own rules. Read it before changing that crate.
 
 ## Dependencies and CI
 
@@ -54,8 +61,9 @@ While iterating, test the crate you touched: `cargo test -p mensor-mind`.
 - `deny.toml` is what `make deny` holds dependencies to. A new licence must
   be permissive. A second version of a crate fails until it is fixed or its
   older version joins `skip` with the reason.
-- `.github/workflows/ci.yml` runs `make check`, `make test-cloudflare`, and
-  actionlint and zizmor. Actions are pinned by commit, tools by version.
+- `.github/workflows/ci.yml` runs `make check`, `make test-cloudflare`,
+  `make test-postgres`, and actionlint and zizmor. Actions are pinned by
+  commit, tools and images by version.
 - MCP is not wanted here, in any form. A capability is a Rust trait.
 
 ## Rust
@@ -94,7 +102,9 @@ While iterating, test the crate you touched: `cargo test -p mensor-mind`.
   prints one, because that is what it is asked for: keep what it prints in
   a variable, never a file. A type that holds one shows it as `..` in its
   `Debug`; the host's is a `mensor_api::Token`, which is never empty.
-- The host's token comes from `MENSOR_TOKEN`, never a flag.
+- The host's token comes from `MENSOR_TOKEN`, never a flag, and a Postgres
+  URL, which holds its password, from `MENSOR_POSTGRES`. Tests use
+  throwaway databases with made-up passwords.
 - `log` is built with `max_level_off`, so nothing a dependency logs through
   it reaches a logger: tungstenite logs each handshake there, the
   `Authorization` header included. Keep it so.

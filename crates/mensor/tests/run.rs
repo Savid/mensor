@@ -248,3 +248,52 @@ fn mensor_token_prints_a_token_for_one_mind_made_from_the_hosts() {
     assert!(!child.status.success());
     assert!(child.stdout.is_empty());
 }
+
+/// What `mensor serve` says as it refuses to start, given only `vars` and
+/// `args`: its error, and its exit.
+fn refused(args: &[&str], vars: &[(&str, &str)]) -> String {
+    let ran = Command::new(env!("CARGO_BIN_EXE_mensor"))
+        .arg("serve")
+        .args(args)
+        .env_clear()
+        .envs(vars.iter().copied())
+        .output()
+        .unwrap();
+    assert!(!ran.status.success(), "it started");
+    String::from_utf8(ran.stderr).unwrap()
+}
+
+/// A Postgres URL nothing answers at, with a password it must never show.
+const UNREACHED: &str = "postgres://mensor:not-a-secret@127.0.0.1:1/m?sslmode=disable";
+
+#[test]
+fn a_host_keeps_its_histories_in_one_store_and_is_refused_two() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("mensor.sqlite");
+    let said = refused(
+        &["--store", file.to_str().unwrap()],
+        &[("MENSOR_POSTGRES", UNREACHED)],
+    );
+    assert!(
+        said.contains("--store and MENSOR_POSTGRES are both set"),
+        "{said}"
+    );
+    assert!(!said.contains("not-a-secret"), "{said}");
+    assert!(!file.exists(), "it made the file");
+}
+
+#[cfg(not(feature = "postgres"))]
+#[test]
+fn a_mensor_built_without_postgres_refuses_a_postgres_url() {
+    let said = refused(&[], &[("MENSOR_POSTGRES", UNREACHED)]);
+    assert!(said.contains("built without Postgres"), "{said}");
+    assert!(!said.contains("not-a-secret"), "{said}");
+}
+
+#[cfg(feature = "postgres")]
+#[test]
+fn a_host_that_cannot_reach_its_postgres_says_so_without_its_password() {
+    let said = refused(&[], &[("MENSOR_POSTGRES", UNREACHED)]);
+    assert!(said.contains("error connecting to server"), "{said}");
+    assert!(!said.contains("not-a-secret"), "{said}");
+}

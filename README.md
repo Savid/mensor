@@ -79,12 +79,12 @@ program that speaks [the protocol](docs/protocol.md) can be a hand too, in
 any language: [examples/own-hand](examples/own-hand) is one in Python, and
 [examples/opencode](examples/opencode) makes opencode one.
 
-Commands start without the host's token or the model's credentials in their
-environment, and on Linux every mensor process closes its environment and
-memory to its user's other processes as it starts. What a command leaves
-running outlives its call but not its hand: when the hand ends, or a signal
-it handles stops it, its commands' process groups are killed. That leaves
-open:
+Commands start without the host's token, the model's credentials or the
+store's URL in their environment, and on Linux every mensor process closes
+its environment and memory to its user's other processes as it starts.
+What a command leaves running outlives its call but not its hand: when the
+hand ends, or a signal it handles stops it, its commands' process groups
+are killed. That leaves open:
 
 - a process of the same user already running, which can catch a binary as
   it starts;
@@ -241,12 +241,54 @@ may be answered by a fallback model, unless `--no-fallbacks` is set.
 
 ## Storage and memory
 
-- The store is one SQLite file (`--store`), for one host at a time. Without
-  it, histories live in memory and end with the process. A child shares its
-  parent's rows instead of copying them.
+- A host keeps every history in one store: a SQLite file (`--store`), a
+  Postgres database (`MENSOR_POSTGRES`), or, with neither, memory that ends
+  with the process. Both set is an error. A child shares its parent's rows
+  instead of copying them.
+- A store serves one host at a time. Postgres enforces it: a second host is
+  refused while the first holds the database.
 - A mind is loaded when something concerns it, and unloaded a minute after
   it has no hand, no follower and no model call. A host that starts wakes
   only the minds with work that needs no hand.
+
+### Postgres
+
+`mensor` and `mensor-mind` reach Postgres when built with the `postgres`
+feature, which makes each 0.9 MB larger. `MENSOR_POSTGRES` names the
+database by a URL, and only it does, never a flag: the URL holds the
+password.
+
+```bash
+cargo build --release --locked -p mensor --features postgres
+export MENSOR_POSTGRES="postgres://mensor:$(cat path/to/db.password)@db.example/mensor"
+target/release/mensor serve
+```
+
+- `sslmode=disable` is plain. Every other `sslmode`, `prefer` and `require`
+  included, is TLS 1.3 checked as libpq's `verify-full` checks it: the
+  server's certificate against the system's roots, or those in the file
+  `sslrootcert` names (`system` names the system's), and its name against
+  the host's. A Unix socket is reached plain, as libpq reaches it.
+  `channel_binding=require` is refused: the checked certificate already
+  proves the server.
+- The host holds its schema with an advisory lock, so a second host is
+  refused. A host whose machine vanishes keeps the lock for about a minute,
+  until the server gives up on its connection. A host that reconnects takes
+  the lock again before it writes; if another host took the schema
+  meanwhile, it writes nothing more and must start again.
+- The URL must reach Postgres itself, or a pooler in session mode: in
+  transaction mode the lock holds nothing.
+- The database is UTF8, or it is refused. The tables go in an empty schema,
+  and one that holds other tables is refused. To share a database, give
+  mensor a schema of its own: `CREATE SCHEMA mensor`, and
+  `?options=-c%20search_path%3Dmensor` in the URL.
+- A commit waits for the disk (`synchronous_commit = on`), whatever the
+  database's default.
+- An item is kept as the JSON it was written as, in a `json` column, so SQL
+  reads it: `SELECT item ->> 'text' FROM items WHERE kind = 'prompt'`.
+- A connection gives up on a server gone quiet within about a minute, and
+  is made again. What found it lost runs again, unless it may already have
+  been stored.
 
 ## Binaries
 
@@ -258,8 +300,8 @@ may be answered by a fallback model, unless `--no-fallbacks` is set.
 | `mensor-mind` | what `serve` does, with its flags | 4.8 MB |
 | `mensor-hand` | what `hand` does, with its flags | 2.5 MB |
 
-Sizes are for x86-64 Linux, stripped. Each logs to standard error at
-`info`, or at the level `MENSOR_LOG` names.
+Sizes are for x86-64 Linux, stripped, without the `postgres` feature. Each
+logs to standard error at `info`, or at the level `MENSOR_LOG` names.
 
 ## Cloudflare
 
@@ -274,7 +316,7 @@ A mind can also run as one Durable Object that holds its history, one hand
 | Crate | Holds |
 | --- | --- |
 | `mensor-protocol` | The messages between a mind and a hand, and how a connection is settled. Pure. |
-| `mensor-mind` | The history, the turn loop, the tools and forks, as a state machine, and the store trait. Pure. |
+| `mensor-mind` | The history, the turn loop, the tools and forks, as a state machine, and the store trait with the tests every store passes. Pure. |
 | `mensor-hand` | A hand's memory, the capability trait, and `files` over any byte store. Pure. |
 | `mensor-model` | Requests and answers for the Messages API and Chat Completions, with retries. Pure. |
 | `mensor-api` | The HTTP API's bodies, which both hosts serve. Pure. |
@@ -283,6 +325,7 @@ A mind can also run as one Durable Object that holds its history, one hand
 | `mensor-hand-host` | A hand on a machine: the driver, the WebSocket dial, `commands`, `files` on disk, `clone`. |
 | `mensor-cloudflare` | The Cloudflare worker. |
 | `mensor-store-sqlite` | The SQLite store. |
+| `mensor-store-postgres` | The Postgres store, behind `mensor`'s `postgres` feature. |
 | `mensor` | The three binaries, the in-memory dial, and the end-to-end tests. |
 
 The pure crates do no I/O and read no clock, so their tests drive them
@@ -297,6 +340,7 @@ directly, and the Cloudflare worker reuses them unchanged.
 - Hands a host gives every mind, such as one that searches the web.
 - `fetch` for `mensor hand`.
 - Tokens that expire, or that can be taken back one at a time.
+- Several hosts over one Postgres database, each with minds of its own.
 - On Cloudflare: forks, remote hands, tokens for one mind, and listing
   minds.
 

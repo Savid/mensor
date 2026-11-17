@@ -17,10 +17,16 @@ use tokio::signal::unix::{SignalKind, signal};
 /// never taken from a flag, where every user of the machine could read it.
 pub const TOKEN: &str = "MENSOR_TOKEN";
 
+/// The environment variable that names a Postgres database to keep every
+/// history in. Its URL holds the database's password, so it is never a flag.
+pub const POSTGRES: &str = "MENSOR_POSTGRES";
+
 /// The variables no command a hand runs is given: the host's token, and the
-/// model's credentials when the hand shares a process with its mind.
-pub const CREDENTIALS: [&str; 4] = [
+/// model's credentials and the store's URL when the hand shares a process
+/// with its mind.
+pub const CREDENTIALS: [&str; 5] = [
     TOKEN,
+    POSTGRES,
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "OPENAI_API_KEY",
