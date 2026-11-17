@@ -2,9 +2,11 @@
 # rust-toolchain.toml names with clippy, rustfmt and wasm32 beside it.
 FROM rust:1.97.1-slim-trixie AS build
 ENV RUSTUP_TOOLCHAIN=1.97.1
+# `postgres` to reach a Postgres store, as compose.postgres.yaml asks.
+ARG FEATURES=""
 WORKDIR /src
 COPY . .
-RUN cargo build --release --locked -p mensor --bin mensor
+RUN cargo build --release --locked -p mensor --bin mensor --features "$FEATURES"
 
 # The host and the hands share this image. The tools are for the model's
 # commands: add what your work needs.

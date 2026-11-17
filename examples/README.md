@@ -3,7 +3,7 @@
 | Example | Shows |
 | --- | --- |
 | [own-hand](own-hand) | A hand of your own in Python, with a capability `mensor hand` lacks. |
-| [docker](docker) | A host and two hands, each in a container, with tools in the image. |
+| [docker](docker) | A host and hands for two minds in containers, each mind's hands with a token for it alone. Postgres if you like. |
 | [opencode](opencode) | opencode as a hand, taking the mind for its model. A demo. |
 
 The Python ones run with [uv](https://docs.astral.sh/uv/), which installs

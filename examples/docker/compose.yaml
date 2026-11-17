@@ -1,7 +1,8 @@
-# A host and two hands, each in a container of its own. Only the host holds
-# the model's credential and the host's token, and only the hands run the
-# model's commands. The hands hold a token made for the mind `m`, which
-# reaches `m` and its children alone.
+# A host, and hands for two minds: `a1` and `b2` for `m`, `c3` for `n`, each
+# in a container of its own. Only the host holds the model's credential and
+# the host's token, and only the hands run the model's commands. Each mind's
+# hands hold a token made for that mind, which reaches it and its children
+# alone.
 name: mensor
 
 x-mensor: &mensor
@@ -26,13 +27,19 @@ services:
     <<: *mensor
     command: hand --url ws://host:7878/v1/attach --mind m --hand a1 --dir work
     environment:
-      MENSOR_TOKEN: ${MENSOR_HAND_TOKEN:?set MENSOR_HAND_TOKEN to a token for m}
+      MENSOR_TOKEN: ${MENSOR_M_TOKEN:?set MENSOR_M_TOKEN to a token for m}
 
   b2:
     <<: *mensor
     command: hand --url ws://host:7878/v1/attach --mind m --hand b2 --dir work
     environment:
-      MENSOR_TOKEN: ${MENSOR_HAND_TOKEN:?set MENSOR_HAND_TOKEN to a token for m}
+      MENSOR_TOKEN: ${MENSOR_M_TOKEN:?set MENSOR_M_TOKEN to a token for m}
+
+  c3:
+    <<: *mensor
+    command: hand --url ws://host:7878/v1/attach --mind n --hand c3 --dir work
+    environment:
+      MENSOR_TOKEN: ${MENSOR_N_TOKEN:?set MENSOR_N_TOKEN to a token for n}
 
 volumes:
   store:

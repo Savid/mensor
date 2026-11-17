@@ -1,0 +1,29 @@
+# Keeps the histories in Postgres in place of SQLite. Use it on top of
+# compose.yaml: COMPOSE_FILE=compose.yaml:compose.postgres.yaml.
+services:
+  host:
+    build:
+      args: { FEATURES: postgres }
+    image: mensor-example-postgres
+    command: serve --listen 0.0.0.0:7878 --model ${MENSOR_MODEL:-claude-opus-5-5}
+    environment:
+      # Plain, because this Postgres has no certificate and its traffic stays
+      # on the compose network. A database anywhere else keeps TLS.
+      MENSOR_POSTGRES: postgres://mensor:${MENSOR_DB_PASSWORD:?set MENSOR_DB_PASSWORD}@postgres/mensor?sslmode=disable
+    volumes: !reset []
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  postgres:
+    image: postgres:18.1-trixie
+    environment:
+      POSTGRES_USER: mensor
+      POSTGRES_PASSWORD: ${MENSOR_DB_PASSWORD:?set MENSOR_DB_PASSWORD}
+    volumes: [postgres:/var/lib/postgresql]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "mensor"]
+      interval: 2s
+      retries: 30
+
+volumes:
+  postgres:
