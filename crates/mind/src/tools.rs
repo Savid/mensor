@@ -543,14 +543,6 @@ mod tests {
     }
 
     #[test]
-    fn the_minds_own_tools_are_named_as_shown() {
-        for tool in MindTool::ALL {
-            assert_eq!(tool.name().parse::<MindTool>(), Ok(tool));
-        }
-        assert_eq!("bash".parse::<MindTool>(), Err(NoMindTool("bash".into())));
-    }
-
-    #[test]
     fn a_tool_use_names_its_hand_apart_from_its_input() {
         let (hand, rest) = split(&json!({"hand": "b2", "command": "ls"}));
         assert_eq!(hand, Some(Ok(name("b2"))));

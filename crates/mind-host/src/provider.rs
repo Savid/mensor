@@ -294,7 +294,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_request_the_api_rejects_is_not_sent_again() {
+    async fn a_rejected_request_is_told_with_its_status_type_message_and_request_id() {
         let router = axum::Router::new().route(
             "/v1/messages",
             post(|| async {

@@ -225,14 +225,6 @@ mod tests {
     }
 
     #[test]
-    fn a_new_hand_has_read_nothing() {
-        let hello = core().hello(Vec::new());
-        assert_eq!((hello.mind, hello.hand), (name("m"), name("a1")));
-        assert_eq!((hello.boot.as_str(), hello.last_id), ("boot-1", 0));
-        assert!(hello.running.is_empty() && hello.held.is_empty());
-    }
-
-    #[test]
     fn a_call_runs_once() {
         let mut core = core();
         start(&mut core, 1);
@@ -245,6 +237,7 @@ mod tests {
             );
         }
         assert_eq!(core.last_id(), 3);
+        assert_eq!(core.hello(Vec::new()).last_id, 3);
         assert_eq!(core.running().collect::<Vec<_>>(), vec![1, 3]);
     }
 

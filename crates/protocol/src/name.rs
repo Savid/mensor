@@ -112,20 +112,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn accepts_url_safe_names() {
-        for ok in [
-            "a1",
-            "b7",
-            "build-box",
-            "A.b_c-9",
-            &"x".repeat(Name::MAX_LEN),
-        ] {
+    fn a_name_is_url_safe_starts_with_a_letter_or_digit_and_fits_64_bytes() {
+        for ok in ["a1", "build-box", "A.b_c-9", &"x".repeat(Name::MAX_LEN)] {
             assert_eq!(Name::new(ok).unwrap().as_str(), ok);
         }
-    }
-
-    #[test]
-    fn refuses_everything_else() {
         assert_eq!(Name::new(""), Err(InvalidName::Empty));
         assert_eq!(
             Name::new("x".repeat(Name::MAX_LEN + 1)),

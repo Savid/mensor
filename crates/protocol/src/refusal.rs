@@ -75,19 +75,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn codes_are_distinct_and_in_the_application_range() {
-        for refusal in Refusal::ALL {
-            assert!((4000..5000).contains(&refusal.code()));
-            assert_eq!(Refusal::from_code(refusal.code()), Some(refusal));
-        }
-    }
-
-    #[test]
-    fn only_a_mind_not_made_yet_is_worth_another_try() {
-        let retried: Vec<_> = Refusal::ALL
+    fn refusals_close_with_the_codes_the_protocol_names_and_only_4002_is_worth_another_try() {
+        let codes: Vec<(u16, bool)> = Refusal::ALL
             .into_iter()
-            .filter(|refusal| !refusal.is_final())
+            .map(|refusal| {
+                assert_eq!(Refusal::from_code(refusal.code()), Some(refusal));
+                (refusal.code(), refusal.is_final())
+            })
             .collect();
-        assert_eq!(retried, [Refusal::UnknownMind]);
+        assert_eq!(
+            codes,
+            [
+                (4000, true),
+                (4002, false),
+                (4003, true),
+                (4004, true),
+                (4005, true),
+                (4006, true)
+            ]
+        );
     }
 }

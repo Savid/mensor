@@ -62,32 +62,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn output_within_the_bound_is_kept_whole() {
-        let mut capture = Capture::new(10);
-        capture.push(b"hello");
-        capture.push(b" you");
-        assert_eq!(capture.text(), ("hello you".into(), false));
-    }
-
-    #[test]
-    fn output_past_the_bound_keeps_its_two_ends() {
-        let mut capture = Capture::new(10);
-        capture.push(b"0123456789");
-        capture.push(b"abcdefghij");
-        capture.push(b"KLMNO");
-        assert_eq!(
-            capture.text(),
-            ("01234\n... 15 bytes omitted ...\nKLMNO".into(), true)
-        );
-    }
-
-    #[test]
-    fn one_large_write_keeps_its_two_ends() {
-        let mut capture = Capture::new(4);
-        capture.push(b"abcdefgh");
-        assert_eq!(
-            capture.text(),
-            ("ab\n... 4 bytes omitted ...\ngh".into(), true)
-        );
+    fn output_past_its_bound_keeps_its_two_ends_and_says_what_it_left_out() {
+        let cases: [(usize, &[&[u8]], &str, bool); 3] = [
+            (10, &[b"hello", b" you"], "hello you", false),
+            (
+                10,
+                &[b"0123456789", b"abcdefghij", b"KLMNO"],
+                "01234\n... 15 bytes omitted ...\nKLMNO",
+                true,
+            ),
+            (4, &[b"abcdefgh"], "ab\n... 4 bytes omitted ...\ngh", true),
+        ];
+        for (bound, writes, text, cut) in cases {
+            let mut capture = Capture::new(bound);
+            for write in writes {
+                capture.push(write);
+            }
+            assert_eq!(capture.text(), (text.into(), cut), "{writes:?}");
+        }
     }
 }

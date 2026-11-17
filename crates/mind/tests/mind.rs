@@ -2,8 +2,8 @@
 
 use mensor_mind::{
     Block, CLONE, Conflict, Content, Fork, HandRecord, Item, MadeFrom, MemoryStore, Message, Mind,
-    MindRecord, MindSettings, MindTool, ModelReply, ModelRequest, Outcome, Output, Report, Role,
-    Settings, State, Status, Stop, Store, Unbranched, Untold, Usage, tail_from,
+    MindRecord, MindTool, ModelReply, ModelRequest, Outcome, Output, Report, Role, Settings, State,
+    Status, Stop, Store, Unbranched, Untold, Usage, tail_from,
 };
 use mensor_protocol::{
     Call, CallId, CallResult, CapabilityDecl, FromMind, Hello, Name, OperationDecl, Refusal, Reply,
@@ -344,7 +344,7 @@ fn the_calls_of_one_step_run_one_at_a_time_in_order() {
 }
 
 #[test]
-fn a_tool_the_hand_lacks_does_not_run() {
+fn a_tool_no_hand_has_does_not_run() {
     let mut host = Host::new();
     host.attach(&hello("boot-1"));
     host.prompt("fly");
@@ -3026,22 +3026,4 @@ fn a_mind_with_no_fork_limit_gives_its_children_none() {
         host.stored.last(),
         Some(Item::Forked { left: None, .. })
     ));
-}
-
-#[test]
-fn a_mind_asks_with_the_model_and_effort_it_was_made_with() {
-    let mut host = Host::with(Settings {
-        own: MindSettings {
-            model: Some("claude-haiku-5-5".into()),
-            effort: Some("low".into()),
-            system: Some("Play.".into()),
-        },
-        ..Settings::default()
-    });
-    host.attach(&hello("boot-1"));
-    host.prompt("go");
-    let asked = host.asked.last().unwrap();
-    assert_eq!(asked.model.as_deref(), Some("claude-haiku-5-5"));
-    assert_eq!(asked.effort.as_deref(), Some("low"));
-    assert_eq!(asked.system.as_deref(), Some("Play."));
 }

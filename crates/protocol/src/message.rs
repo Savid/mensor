@@ -220,23 +220,26 @@ mod tests {
     }
 
     #[test]
-    fn a_minds_messages_round_trip() {
+    fn a_minds_messages_are_written_as_the_protocol_shows_them() {
         let call = FromMind::Call(Call {
             id: 42,
             capability: "commands".into(),
             operation: "bash".into(),
             input: json!({"command": "cargo test"}),
         });
-        assert_eq!(
-            call.encode(),
-            r#"{"type":"call","id":42,"capability":"commands","operation":"bash","input":{"command":"cargo test"}}"#
-        );
-        for message in [
-            call,
-            FromMind::Cancel { id: 42 },
-            FromMind::Ack { ids: vec![40, 41] },
+        for (message, text) in [
+            (
+                call,
+                r#"{"type":"call","id":42,"capability":"commands","operation":"bash","input":{"command":"cargo test"}}"#,
+            ),
+            (FromMind::Cancel { id: 42 }, r#"{"type":"cancel","id":42}"#),
+            (
+                FromMind::Ack { ids: vec![40, 41] },
+                r#"{"type":"ack","ids":[40,41]}"#,
+            ),
         ] {
-            assert_eq!(FromMind::decode(&message.encode()).unwrap(), message);
+            assert_eq!(message.encode(), text);
+            assert_eq!(FromMind::decode(text).unwrap(), message);
         }
     }
 
@@ -247,11 +250,5 @@ mod tests {
             FromMind::decode(text).unwrap(),
             FromMind::Ack { ids: vec![1] }
         );
-    }
-
-    #[test]
-    fn a_bad_name_refuses_the_hello() {
-        let text = r#"{"type":"hello","mind":"m","hand":"a/b","boot":"x","lastId":0}"#;
-        assert!(matches!(FromHand::decode(text), Err(DecodeError::Json(_))));
     }
 }

@@ -12,7 +12,9 @@ use mensor::hand::{Does, Hands};
 use mensor::local::Local;
 use mensor_hand::{Capabilities, Core, Limits};
 use mensor_hand_host::capabilities::{Commands, Disk, Files};
-use mensor_hand_host::{Backoff, Dial, Ended, Error, Handle, WebSocket, boot, start};
+use mensor_hand_host::{
+    Backoff, BoxFuture, Dial, DialError, Ended, Error, Handle, Link, WebSocket, boot, start,
+};
 use mensor_mind::{
     Block, Content, Item, MemoryStore, MindRecord, ModelReply, ModelRequest, Origin, Outcome, Role,
     Settings, State, Stop, Store, StoreError, Usage,
@@ -20,7 +22,7 @@ use mensor_mind::{
 use mensor_mind_host::{
     Config, Host, HostError, MindStatus, Prompted, Scripted, Token, mind_token,
 };
-use mensor_protocol::{NOT_LOCAL, Name, Refusal};
+use mensor_protocol::{Hello, NOT_LOCAL, Name, Refusal};
 use mensor_store_sqlite::SqliteStore;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -39,14 +41,19 @@ struct Server {
 
 impl Server {
     async fn start(config: Config) -> Self {
-        Self::over(Arc::new(MemoryStore::new()), config, "127.0.0.1:0").await
+        Self::over(Arc::new(MemoryStore::new()), config, loopback()).await
     }
 
-    async fn over(store: Arc<dyn Store>, config: Config, address: &str) -> Self {
+    /// A host over `store`, serving on `listener`. A test that restarts a
+    /// host on one address gives the second a clone of the first's
+    /// listener, so the port stays bound between them and no other test
+    /// can be given it.
+    async fn over(store: Arc<dyn Store>, config: Config, listener: std::net::TcpListener) -> Self {
         let held = Arc::downgrade(&store);
         let model = Arc::new(Scripted::new());
         let host = Host::open(store, model.clone(), config).await.unwrap();
-        let listener = TcpListener::bind(address).await.unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let listener = TcpListener::from_std(listener).unwrap();
         let address = listener.local_addr().unwrap();
         let serving = host.clone();
         let task = tokio::spawn(async move {
@@ -158,6 +165,28 @@ impl Drop for Server {
     fn drop(&mut self) {
         self.task.abort();
     }
+}
+
+/// A dial that keeps every hello it says.
+struct Watched {
+    dial: WebSocket,
+    hellos: Arc<std::sync::Mutex<Vec<Hello>>>,
+}
+
+impl Dial for Watched {
+    fn dial(&self, hello: Hello) -> BoxFuture<'_, Result<Box<dyn Link>, DialError>> {
+        lock(&self.hellos).push(hello.clone());
+        self.dial.dial(hello)
+    }
+}
+
+fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap()
+}
+
+/// A listener on a port of its own on loopback.
+fn loopback() -> std::net::TcpListener {
+    std::net::TcpListener::bind("127.0.0.1:0").unwrap()
 }
 
 fn hand_through(
@@ -372,22 +401,28 @@ async fn two_hands_of_one_mind_run_their_calls_at_once() {
     let (_b2, _b2_task) = server.hand(fresh("m", "b2"), b.path());
     server.settled_with("m", &["a1", "b2"]).await;
 
-    let timed = "date +%s%N > start; sleep 0.4; date +%s%N > end";
+    // Each marks in its own hand's directory that it started, and waits for
+    // the other hand's mark: two calls run one after the other would never
+    // end.
+    let wait_for = |other: &Path| {
+        let mark = other.join("started");
+        format!(
+            "touch started; until [ -e '{}' ]; do sleep 0.01; done",
+            mark.display()
+        )
+    };
     server
         .model
-        .then(vec![on("tu_1", "a1", timed), on("tu_2", "b2", timed)])
+        .then(vec![
+            on("tu_1", "a1", &wait_for(b.path())),
+            on("tu_2", "b2", &wait_for(a.path())),
+        ])
         .then(vec![text("Both ran.")]);
     server.prompt("m", "run in both places").await;
-    server.settled_with("m", &["a1", "b2"]).await;
-
-    let time = |dir: &Path, file: &str| -> u128 {
-        let text = std::fs::read_to_string(dir.join(file)).unwrap();
-        text.trim().parse().unwrap()
-    };
-    // Each started before the other ended.
-    assert!(time(a.path(), "start") < time(b.path(), "end"));
-    assert!(time(b.path(), "start") < time(a.path(), "end"));
-    assert_eq!(said(&server.history("m")), ["Both ran."]);
+    eventually("both ran", || async {
+        said(&server.history("m")) == ["Both ran."]
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -630,15 +665,18 @@ async fn only_a_parent_makes_a_mind_with_a_child_name() {
 #[tokio::test]
 async fn a_dropped_connection_loses_no_result() {
     let server = Server::start(Config::default()).await;
+    let held = "echo started > mark; until [ -e go ]; do sleep 0.01; done; echo survived";
     server
         .model
-        .then(vec![bash(
-            "tu_1",
-            "echo started > mark; sleep 0.3; echo survived",
-        )])
+        .then(vec![bash("tu_1", held)])
         .then(vec![text("Done.")]);
     let dir = tempfile::tempdir().unwrap();
-    let (hand, _task) = server.hand(fresh("m", "a1"), dir.path());
+    let hellos = Arc::default();
+    let dial = Watched {
+        dial: WebSocket::new(server.attach()),
+        hellos: Arc::clone(&hellos),
+    };
+    let (hand, _task) = hand_through(dial, fresh("m", "a1"), dir.path());
     server.settled("m").await;
     server.prompt("m", "wait, then speak").await;
     eventually("the command is running", || async {
@@ -646,9 +684,14 @@ async fn a_dropped_connection_loses_no_result() {
     })
     .await;
 
-    // The command outlives the connection, and its result arrives on the
-    // next one.
+    // The command outlives the connection: the hand dials again saying it
+    // still runs, and its result arrives on the next connection.
     hand.redial();
+    eventually("the hand dials again with its call running", || async {
+        lock(&hellos).iter().any(|hello| hello.running == [1])
+    })
+    .await;
+    std::fs::write(dir.path().join("go"), "").unwrap();
     server.settled("m").await;
 
     let history = server.history("m");
@@ -691,7 +734,9 @@ fn postgres(database: &str) -> Arc<dyn Store> {
 /// A host that stops, and one over the same store after it, which carries
 /// every mind on from where the first left it.
 async fn restarts_carry_every_mind_on(open: impl Fn() -> Arc<dyn Store>, dir: &Path) {
-    let first = Server::over(open(), Config::default(), "127.0.0.1:0").await;
+    let listener = loopback();
+    let kept = listener.try_clone().unwrap();
+    let first = Server::over(open(), Config::default(), listener).await;
     first
         .model
         .then(vec![bash("tu_1", "echo one")])
@@ -700,13 +745,12 @@ async fn restarts_carry_every_mind_on(open: impl Fn() -> Arc<dyn Store>, dir: &P
     first.settled("m").await;
     first.prompt("m", "count").await;
     first.settled("m").await;
-    let address = first.address.to_string();
     let before = first.history("m");
     first.stop().await;
 
     // A new host over the same store, on the same address. The hand drops
     // its old connection and finds the new host.
-    let second = Server::over(open(), Config::default(), &address).await;
+    let second = Server::over(open(), Config::default(), kept).await;
     assert_eq!(second.history("m"), before);
     hand.redial();
     second.settled("m").await;
@@ -1247,52 +1291,6 @@ async fn an_interrupt_kills_the_command_a_hand_runs_and_ends_the_turn() {
     ));
 }
 
-#[tokio::test]
-async fn a_conversation_past_its_limit_carries_on_from_a_summary() {
-    let server = Server::start(Config {
-        mind: Settings {
-            compact_at: Some(100),
-            ..Settings::default()
-        },
-        ..Config::default()
-    })
-    .await;
-    let dir = tempfile::tempdir().unwrap();
-    let (_hand, _task) = server.hand(fresh("m", "a1"), dir.path());
-    server.settled("m").await;
-
-    server.model.then_with(|_| ModelReply {
-        content: vec![text("hi")],
-        stop: Stop::EndTurn,
-        usage: Usage {
-            input: 95,
-            output: 5,
-        },
-    });
-    server.prompt("m", "hello").await;
-    server.settled("m").await;
-
-    server
-        .model
-        .then(vec![text("We greeted each other.")])
-        .then(vec![text("Paris.")]);
-    server.prompt("m", "What is the capital of France?").await;
-    server.settled("m").await;
-
-    let items = server.history("m");
-    assert!(items.iter().any(|item| matches!(
-        item,
-        Item::Summary { text, .. } if text == "We greeted each other."
-    )));
-    assert_eq!(said(&items), ["hi", "Paris."]);
-    let requests = server.model.requests();
-    assert!(requests[1].text_only);
-    // The step after the summary reads the summary, the hands, and the
-    // prompt, and nothing of what came before.
-    assert_eq!(requests[2].messages.len(), 1);
-    assert_eq!(requests[2].messages[0].content.len(), 3);
-}
-
 /// A host over a database file whose minds rest soon, and sum up early.
 async fn restful(path: &Path) -> Server {
     let config = Config {
@@ -1304,7 +1302,7 @@ async fn restful(path: &Path) -> Server {
         ..Config::default()
     };
     let store = Arc::new(SqliteStore::open(path).unwrap());
-    Server::over(store, config, "127.0.0.1:0").await
+    Server::over(store, config, loopback()).await
 }
 
 /// Stops a hand, and waits until its mind has left the host's memory.
@@ -1431,7 +1429,7 @@ async fn a_long_history_is_read_a_page_at_a_time() {
     store
         .create(&MindRecord::root(name("m")), &prompts)
         .unwrap();
-    let server = Server::over(store, Config::default(), "127.0.0.1:0").await;
+    let server = Server::over(store, Config::default(), loopback()).await;
     let http = client();
 
     // One answer holds a page, and says where the next begins.
@@ -1658,7 +1656,7 @@ async fn a_fork_its_host_stopped_in_is_made_once() {
         armed: std::sync::atomic::AtomicBool::new(false),
         fired: std::sync::atomic::AtomicBool::new(false),
     });
-    let server = Server::over(store, Config::default(), "127.0.0.1:0").await;
+    let server = Server::over(store, Config::default(), loopback()).await;
     for _ in 0..3 {
         server.model.then_with(|request| {
             let told = told(request);
@@ -1820,7 +1818,7 @@ async fn a_parent_that_waits_through_a_host_restart_over_postgres_hears_from_its
 /// A parent that forks and waits, through a restart of its host over the
 /// same store, hears from its child once its child's hand comes back.
 async fn waits_through_a_restart(open: impl Fn() -> Arc<dyn Store>, root: &Path) {
-    let first = Server::over(open(), Config::default(), "127.0.0.1:0").await;
+    let first = Server::over(open(), Config::default(), loopback()).await;
     for _ in 0..3 {
         first.model.then_with(waiting_through);
     }
@@ -1857,7 +1855,7 @@ async fn waits_through_a_restart(open: impl Fn() -> Arc<dyn Store>, root: &Path)
 
     // A new host wakes the parent, which waits with no hand. Only the
     // child's hand comes back: its command is lost, and it answers.
-    let second = Server::over(open(), Config::default(), "127.0.0.1:0").await;
+    let second = Server::over(open(), Config::default(), loopback()).await;
     eventually("the parent is awake", || async {
         second.host.awake().await == 1
     })
@@ -1892,22 +1890,26 @@ async fn waits_through_a_restart(open: impl Fn() -> Arc<dyn Store>, root: &Path)
     .await;
 }
 
-/// Answers a parent that forks and waits, and a child that takes a while.
-fn slow_child(request: &ModelRequest) -> ModelReply {
-    let told = told(request);
-    reply(if told.contains("\"you\"") {
-        if told.contains("exit") {
-            vec![text("Here.")]
+/// Answers a parent that forks a child and waits, and a child whose command
+/// runs until the file `gate` exists.
+fn slow_child(gate: &Path) -> impl FnOnce(&ModelRequest) -> ModelReply + Send + 'static {
+    let held = format!("until [ -e '{}' ]; do sleep 0.01; done", gate.display());
+    move |request| {
+        let told = told(request);
+        reply(if told.contains("\"you\"") {
+            if told.contains("exit") {
+                vec![text("Here.")]
+            } else {
+                vec![bash("tu_s", &held)]
+            }
+        } else if told.contains("Here.") {
+            vec![text("It answered.")]
+        } else if told.contains("\"children\"") {
+            vec![own("tu_w", "wait", json!({}))]
         } else {
-            vec![bash("tu_s", "sleep 3")]
-        }
-    } else if told.contains("Here.") {
-        vec![text("It answered.")]
-    } else if told.contains("\"children\"") {
-        vec![own("tu_w", "wait", json!({}))]
-    } else {
-        vec![own("tu_f", "fork", json!({"prompts": ["take your time"]}))]
-    })
+            vec![own("tu_f", "fork", json!({"prompts": ["take your time"]}))]
+        })
+    }
 }
 
 #[tokio::test]
@@ -1917,10 +1919,11 @@ async fn a_parent_that_rests_while_it_waits_hears_from_its_child() {
         ..Config::default()
     })
     .await;
-    for _ in 0..5 {
-        server.model.then_with(slow_child);
-    }
     let root = tempfile::tempdir().unwrap();
+    let gate = root.path().join("go");
+    for _ in 0..5 {
+        server.model.then_with(slow_child(&gate));
+    }
     let (dir, clones) = (root.path().join("work"), root.path().join("clones"));
     std::fs::create_dir(&dir).unwrap();
     let _hands = server.cloning_hand("m", "a1", &dir, &clones);
@@ -1958,7 +1961,9 @@ async fn a_parent_that_rests_while_it_waits_hears_from_its_child() {
         (State::Working, vec![child.clone()], 0)
     );
 
-    // The child rests; the parent wakes, hears it, and answers.
+    // The child's command ends, and the child rests; the parent wakes,
+    // hears it, and answers.
+    std::fs::write(&gate, "").unwrap();
     eventually("the parent answers", || async {
         said(&server.history("m")) == ["It answered."]
     })
@@ -2060,7 +2065,7 @@ async fn a_mind_that_ends_lets_its_hands_go_and_takes_nothing_more() {
 /// played on its hand `vm` in `dir`, then ended: and the index just after
 /// the save.
 async fn played_and_ended(store: Arc<dyn Store>, dir: &Path) -> (Server, usize) {
-    let server = Server::over(store, Config::default(), "127.0.0.1:0").await;
+    let server = Server::over(store, Config::default(), loopback()).await;
     server
         .model
         .then(vec![

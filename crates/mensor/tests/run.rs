@@ -4,6 +4,7 @@
 mod common;
 
 use std::process::Command;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 use common::{Running, spawn};
@@ -15,14 +16,19 @@ fn client() -> reqwest::Client {
     reqwest::Client::new()
 }
 
-/// A free port on loopback, and its address.
+/// An address on loopback for a binary to listen on. Its port is below the
+/// kernel's ephemeral range, where a test binding port 0 is never given it,
+/// in a block of this process's own, and free when it is handed out.
 fn listen() -> String {
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    format!("127.0.0.1:{port}")
+    static NEXT: AtomicU16 = AtomicU16::new(0);
+    let block = 20_000 + u16::try_from(std::process::id() % 500).unwrap() * 20;
+    for _ in 0..20 {
+        let port = block + NEXT.fetch_add(1, Ordering::Relaxed) % 20;
+        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return format!("127.0.0.1:{port}");
+        }
+    }
+    panic!("no port free in {block}..{}", block + 20);
 }
 
 async fn until(what: &str, mut check: impl AsyncFnMut() -> bool) {

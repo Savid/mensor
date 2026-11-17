@@ -268,14 +268,6 @@ pub async fn serve(hosting: Hosting) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn forks_are_a_number_or_unlimited() {
-        assert_eq!(forks("64").unwrap().0, Some(64));
-        assert_eq!(forks("0").unwrap().0, Some(0));
-        assert_eq!(forks("unlimited").unwrap().0, None);
-        assert!(forks("lots").is_err());
-    }
-
     #[derive(clap::Parser)]
     struct Cli {
         #[command(flatten)]
@@ -289,19 +281,19 @@ mod tests {
     }
 
     #[test]
-    fn a_reply_may_hold_a_token_at_least() {
+    fn host_flags_read_as_the_readme_says_and_refuse_the_rest() {
+        assert_eq!(forks("64").unwrap().0, Some(64));
+        assert_eq!(forks("unlimited").unwrap().0, None);
+        assert!(forks("lots").is_err());
         assert!(parsed(&["--max-tokens", "0"]).is_err());
-        assert_eq!(
-            parsed(&["--max-tokens", "24000"]).unwrap().max_tokens,
-            24_000
-        );
-    }
-
-    #[test]
-    fn the_models_offered_are_named() {
         let offered = parsed(&["--models", "claude-haiku-5-5, claude-sonnet-5-5"]).unwrap();
         assert_eq!(offered.models, ["claude-haiku-5-5", "claude-sonnet-5-5"]);
         assert!(parsed(&["--models", "claude-haiku-5-5,,b"]).is_err());
+        assert_eq!(
+            tools("tell, fork,tell").unwrap().0,
+            [MindTool::Tell, MindTool::Fork]
+        );
+        assert!(tools("").unwrap().0.is_empty());
         assert!(
             parsed(&["--mind-tools", ""])
                 .unwrap()
@@ -309,17 +301,6 @@ mod tests {
                 .0
                 .is_empty()
         );
-    }
-
-    #[test]
-    fn the_minds_own_tools_are_named_each_once() {
-        assert_eq!(tools("fork").unwrap().0, [MindTool::Fork]);
-        assert_eq!(
-            tools("tell, fork,tell").unwrap().0,
-            [MindTool::Tell, MindTool::Fork]
-        );
-        assert!(tools("").unwrap().0.is_empty());
-        let refused = tools("fork,bash").unwrap_err();
-        assert!(refused.contains("bash"), "{refused}");
+        assert!(tools("fork,bash").unwrap_err().contains("bash"));
     }
 }

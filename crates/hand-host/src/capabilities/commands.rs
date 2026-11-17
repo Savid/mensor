@@ -371,34 +371,52 @@ mod tests {
         assert!(!dir.path().join("late").exists());
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_dropped_call_kills_its_command() {
         let (dir, commands) = here();
-        let call = commands.call("bash", json!({"command": "sleep 1; touch survived"}));
-        assert!(timeout(Duration::from_millis(100), call).await.is_err());
-        tokio::time::sleep(Duration::from_millis(1500)).await;
-        assert!(!dir.path().join("survived").exists());
+        // The shell may exec its last command: the child it starts in the
+        // background shows the whole group is killed.
+        let started = "sleep 30 & echo $! > pid; wait";
+        let mut call = Box::pin(commands.call("bash", json!({"command": started})));
+        // Run the call until its command has started, then drop it.
+        let pid = loop {
+            tokio::select! {
+                _ = &mut call => panic!("the command ended"),
+                () = tokio::time::sleep(Duration::from_millis(10)) => {
+                    let pid = std::fs::read_to_string(dir.path().join("pid")).unwrap_or_default();
+                    if pid.ends_with('\n') {
+                        break pid.trim().to_owned();
+                    }
+                }
+            }
+        };
+        drop(call);
+        until_gone(&[pid]).await;
     }
 
     #[tokio::test]
     async fn what_a_finished_command_leaves_running_does_not_hold_its_result() {
         let (dir, commands) = here();
-        let started = Instant::now();
-        let ran = bash(
-            &commands,
-            json!({"command": "(sleep 2; touch later) & echo started"}),
+        // The leftover waits for `go`, which comes only once the result is
+        // back: a result that waited on it would never come.
+        let leftover = "(until [ -e go ]; do sleep 0.01; done; touch later) & echo started";
+        let ran = timeout(
+            Duration::from_secs(1),
+            bash(&commands, json!({"command": leftover})),
         )
-        .await;
+        .await
+        .expect("the result waited on the leftover");
         assert_eq!(
             (ran["exit"].clone(), ran["stdout"].clone()),
             (json!(0), json!("started\n"))
         );
-        assert!(
-            started.elapsed() < Duration::from_secs(1),
-            "the result waited on the leftover"
-        );
-        tokio::time::sleep(Duration::from_millis(2500)).await;
-        assert!(dir.path().join("later").exists(), "the leftover was killed");
+        std::fs::write(dir.path().join("go"), "").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !dir.path().join("later").exists() {
+            assert!(Instant::now() < deadline, "the leftover was killed");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     /// Whether the process `pid` is gone: ended, if not yet reaped.
@@ -424,10 +442,16 @@ mod tests {
         assert!(pids.iter().all(|pid| !gone(pid)), "{pids:?}");
 
         drop(commands);
+        until_gone(&pids).await;
+    }
+
+    /// Waits until every process in `pids` is gone, five seconds at most.
+    #[cfg(target_os = "linux")]
+    async fn until_gone(pids: &[String]) {
         let deadline = Instant::now() + Duration::from_secs(5);
         while !pids.iter().all(|pid| gone(pid)) {
             assert!(Instant::now() < deadline, "{pids:?} lived on");
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 

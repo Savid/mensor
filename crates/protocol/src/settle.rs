@@ -93,24 +93,12 @@ mod tests {
     }
 
     #[test]
-    fn a_first_connection_has_nothing_to_settle() {
-        let plan = settle(None, &[], &hello("b1", 0, &[], &[]));
-        assert_eq!(
-            plan,
-            Plan {
-                calls: Vec::new(),
-                ack: Vec::new(),
-                new_boot: true
-            }
-        );
-    }
-
-    #[test]
     fn each_pending_call_takes_the_first_row_that_matches() {
+        // 37 was taken before: it is only acked.
         let plan = settle(
             Some("b1"),
             &[38, 39, 40, 41, 42],
-            &hello("b1", 41, &[41], &[39, 40]),
+            &hello("b1", 41, &[41], &[37, 39, 40]),
         );
         assert_eq!(
             plan.calls,
@@ -122,31 +110,21 @@ mod tests {
                 (42, Settled::Resend),
             ]
         );
-        assert_eq!(plan.ack, vec![39, 40]);
+        assert_eq!(plan.ack, vec![37, 39, 40]);
         assert!(!plan.new_boot);
     }
 
     #[test]
-    fn a_hand_that_restarted_knows_no_pending_call() {
-        let plan = settle(Some("b1"), &[41, 42], &hello("b2", 0, &[], &[]));
+    fn a_new_boot_knows_no_pending_call_and_its_results_are_acked_but_not_taken() {
+        let first = settle(None, &[], &hello("b1", 0, &[], &[]));
+        assert_eq!((first.calls.len(), first.new_boot), (0, true));
+
+        let plan = settle(Some("b1"), &[41, 42], &hello("b2", 41, &[], &[41]));
         assert_eq!(
             plan.calls,
             vec![(41, Settled::Unknown), (42, Settled::Unknown)]
         );
+        assert_eq!(plan.ack, vec![41]);
         assert!(plan.new_boot);
-    }
-
-    #[test]
-    fn a_restarted_hands_results_are_acked_but_not_taken() {
-        let plan = settle(Some("b1"), &[1], &hello("b2", 1, &[], &[1]));
-        assert_eq!(plan.calls, vec![(1, Settled::Unknown)]);
-        assert_eq!(plan.ack, vec![1]);
-    }
-
-    #[test]
-    fn a_result_the_mind_already_has_is_only_acked() {
-        let plan = settle(Some("b1"), &[], &hello("b1", 9, &[], &[8, 9]));
-        assert!(plan.calls.is_empty());
-        assert_eq!(plan.ack, vec![8, 9]);
     }
 }
