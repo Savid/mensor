@@ -80,24 +80,12 @@ any language: [examples/own-hand](examples/own-hand) is one in Python, and
 [examples/opencode](examples/opencode) makes opencode one.
 
 Commands start without the host's token, the model's credentials or the
-store's URL in their environment, and on Linux every mensor process closes
-its environment and memory to its user's other processes as it starts.
-What a command leaves running outlives its call but not its hand: when the
-hand ends, or a signal it handles stops it, its commands' process groups
-are killed. That leaves open:
-
-- a process of the same user already running, which can catch a binary as
-  it starts;
-- jobs left behind by a hand killed with SIGKILL;
-- root with `CAP_SYS_PTRACE`;
-- whatever holds the variables around mensor: a shell script, an init such
-  as tini, a `docker exec` shell;
-- macOS, where a process can read its user's other processes' environments.
-
-A hand is not a sandbox: a command can reach whatever the hand's process
-can, so confining it is up to whoever runs it. `mensor run` is for one
-person, on a machine they trust the model with: its commands run beside the
-process that holds the model's credential.
+store's URL in their environment, and what they leave running dies with
+their hand. A hand is not a sandbox: a command can reach whatever the hand's
+process can, so confining it is up to whoever runs it. `mensor run` is for
+one person, on a machine they trust the model with. See
+[docs/security.md](docs/security.md) for what is kept from commands and what
+is not.
 
 ### How calls run
 
@@ -198,33 +186,10 @@ lets a mind fork, and neither clone a hand nor let one go, and
 
 With `MENSOR_TOKEN` set, every request needs `Authorization: Bearer <token>`,
 and a hand sends the one in its own `MENSOR_TOKEN`. The host's token reaches
-every mind. `mensor token --mind m` prints one for `m` alone, to give `m`'s
-hands instead:
-
-```bash
-hand_token="$(mensor token --mind m)"   # MENSOR_TOKEN holds the host's
-MENSOR_TOKEN="$hand_token" mensor hand --mind m --hand a1 --url wss://mensor.example/v1/attach
-```
-
-A token for `m`:
-
-- reaches `m` and its children, all of them: it can prompt and interrupt
-  them, release their hands, read their histories, and say hello as any of
-  their hands, taking its place;
-- gets 403 for any other mind, and a hello for one is closed with 4006.
-  `GET /v1/minds` lists only `m`'s;
-- is kept nowhere by the host: a new `MENSOR_TOKEN` ends them all;
-- separates only hands that run as another user or on another machine than
-  the host: a hand of the host's own user can read its store.
-
-Carry it as any secret, and never in a file in a hand's directory, where the
-model reads.
-
-Without `MENSOR_TOKEN`, the host trusts every process on its machine. It
-listens only on loopback, and answers 403 when `Host` is not `localhost` or
-a loopback address, or when a browser's `Origin` is not one either. That
-stops browsers only: a web page can't reach the host by DNS rebinding, or
-open a WebSocket to it as a hand.
+every mind; `mensor token --mind m` prints one that reaches only `m` and its
+children, to give `m`'s hands. Without `MENSOR_TOKEN`, the host listens only
+on loopback and trusts every process on its machine. See
+[docs/security.md](docs/security.md).
 
 `--listen` sets where the host listens (`127.0.0.1:7878`), and a hand's
 `--url` where it dials. The host speaks plain HTTP: off loopback, put TLS in
@@ -334,48 +299,12 @@ unless `--no-fallbacks` is set.
   instead of copying them.
 - A store serves one host at a time. Postgres enforces it: a second host is
   refused while the first holds the database.
+- Postgres needs `mensor` built with the `postgres` feature, and its URL in
+  `MENSOR_POSTGRES`, never a flag, since it holds the password. See
+  [docs/postgres.md](docs/postgres.md).
 - A mind is loaded when something concerns it, and unloaded a minute after
   it has no hand, no follower and no model call. A host that starts wakes
   only the minds with work that needs no hand.
-
-### Postgres
-
-`mensor` and `mensor-mind` reach Postgres when built with the `postgres`
-feature, which makes each 0.9 MB larger. `MENSOR_POSTGRES` names the
-database by a URL, and only it does, never a flag: the URL holds the
-password.
-
-```bash
-cargo build --release --locked -p mensor --features postgres
-export MENSOR_POSTGRES="postgres://mensor:$(cat path/to/db.password)@db.example/mensor"
-target/release/mensor serve
-```
-
-- `sslmode=disable` is plain. Every other `sslmode`, `prefer` and `require`
-  included, is TLS 1.3 checked as libpq's `verify-full` checks it: the
-  server's certificate against the system's roots, or those in the file
-  `sslrootcert` names (`system` names the system's), and its name against
-  the host's. A Unix socket is reached plain, as libpq reaches it.
-  `channel_binding=require` is refused: the checked certificate already
-  proves the server.
-- The host holds its schema with an advisory lock, so a second host is
-  refused. A host whose machine vanishes keeps the lock for about a minute,
-  until the server gives up on its connection. A host that reconnects takes
-  the lock again before it writes; if another host took the schema
-  meanwhile, it writes nothing more and must start again.
-- The URL must reach Postgres itself, or a pooler in session mode: in
-  transaction mode the lock holds nothing.
-- The database is UTF8, or it is refused. The tables go in an empty schema,
-  and one that holds other tables is refused. To share a database, give
-  mensor a schema of its own: `CREATE SCHEMA mensor`, and
-  `?options=-c%20search_path%3Dmensor` in the URL.
-- A commit waits for the disk (`synchronous_commit = on`), whatever the
-  database's default.
-- An item is kept as the JSON it was written as, in a `json` column, so SQL
-  reads it: `SELECT item ->> 'text' FROM items WHERE kind = 'prompt'`.
-- A connection gives up on a server gone quiet within about a minute, and
-  is made again. What found it lost runs again, unless it may already have
-  been stored.
 
 ## Binaries
 
@@ -421,7 +350,6 @@ directly, and the Cloudflare worker reuses them unchanged.
 ## Not built yet
 
 - A `wait` that times out.
-- The Responses API.
 - Deleting a mind, beyond ending it.
 - Clones made outside the hand, such as VM snapshots.
 - Hands a host gives every mind, such as one that searches the web.
@@ -437,6 +365,8 @@ MCP is not planned.
 ## Docs
 
 - [docs/protocol.md](docs/protocol.md): what a mind and its hands say to each other.
+- [docs/security.md](docs/security.md): what commands are kept from, and tokens.
+- [docs/postgres.md](docs/postgres.md): a host on Postgres.
 - [docs/cloudflare.md](docs/cloudflare.md): a mind as one Durable Object.
 - [examples/](examples): a hand of your own, hands in containers, and opencode as a hand.
 - [AGENTS.md](AGENTS.md): commands, layout and rules for working here.
