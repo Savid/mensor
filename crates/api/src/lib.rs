@@ -2,12 +2,15 @@
 //!
 //! `mensor serve` and the Cloudflare worker answer the same requests under
 //! `/v1/minds` with the same JSON, so a client reads either the same way.
-//! These are the bodies of those requests and answers, and the check of a
-//! bearer token. How a request is routed and how an answer is sent stay
-//! with each host.
+//! These are the bodies of those requests and answers, and who may ask:
+//! [`access`]. How a request is routed and how an answer is sent stay with
+//! each host.
 //!
 //! This crate is pure: no I/O, no clock and no randomness.
 
+pub mod access;
+
+pub use access::{Access, NotRoot, Token, authorized, local, mind_token};
 use mensor_mind::{Item, MindRecord, State};
 use mensor_protocol::Name;
 use serde::{Deserialize, Serialize};
@@ -141,20 +144,6 @@ impl Writing<'_> {
     pub const EVENT: &'static str = "writing";
 }
 
-/// Whether a request's `Authorization` header carries `token` as a bearer
-/// token. The comparison takes time that depends only on the lengths.
-pub fn authorized(token: &str, authorization: Option<&str>) -> bool {
-    let given = authorization.and_then(|value| value.strip_prefix("Bearer "));
-    given.is_some_and(|given| {
-        let (given, token) = (given.as_bytes(), token.as_bytes());
-        let differs = given
-            .iter()
-            .zip(token)
-            .fold(0, |differs, (a, b)| differs | (a ^ b));
-        given.len() == token.len() && differs == 0
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use mensor_mind::Origin;
@@ -225,19 +214,5 @@ mod tests {
         let plain: PromptBody = serde_json::from_value(json!({"text": "hi"})).unwrap();
         assert_eq!(plain.key, None);
         assert!(serde_json::from_value::<PromptBody>(json!({"key": "k"})).is_err());
-    }
-
-    #[test]
-    fn only_the_token_itself_is_authorized() {
-        assert!(authorized("s3cret", Some("Bearer s3cret")));
-        for other in [
-            Some("Bearer s3cres"),
-            Some("Bearer s3cret1"),
-            Some("s3cret"),
-            Some("Bearer "),
-            None,
-        ] {
-            assert!(!authorized("s3cret", other), "{other:?}");
-        }
     }
 }

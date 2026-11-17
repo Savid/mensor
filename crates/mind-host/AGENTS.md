@@ -19,3 +19,7 @@ client.
   cloned only under the lock on the host's map of minds, and dropped once
   used, except by a hand's `Connection`, which holds it until the hand
   detaches. A task that rests relies on being the only holder.
+- `guard` (`src/http.rs`) decides what a request reaches, with
+  `mensor_api::Access`. A route that names a mind takes the name through
+  `Reached`, never a bare `Path`, and attach checks the hello's mind before
+  `Host::connect`.

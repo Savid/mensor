@@ -100,6 +100,16 @@ pub enum Error {
     /// The host did not accept the hand's token.
     #[error("the mind's host did not accept this hand's token")]
     Unauthorized,
+    /// The host has no token, so it serves only its own machine, and the
+    /// hand dialled it by an address that is not one of the machine's own.
+    #[error(
+        "the mind's host has no token, so it serves only hands that dial it as localhost or a loopback address"
+    )]
+    NotLocal,
+    /// The dial was answered 403 by something else: the host, or a proxy in
+    /// front of it, with what it said.
+    #[error("the dial was refused: {0}")]
+    Forbidden(String),
 }
 
 /// A random boot for a hand process that starts from nothing.

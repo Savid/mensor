@@ -7,6 +7,7 @@ use mensor::hand::{Does, Hand, Hands};
 use mensor::host::{Hosting, open};
 use mensor::local::Local;
 use mensor::stopped;
+use mensor_mind_host::mind_token;
 use mensor_protocol::Name;
 
 #[derive(Parser)]
@@ -33,6 +34,21 @@ enum Command {
     /// trust the model with. Its clones run in this process too, and start
     /// again with it.
     Run(Run),
+    /// Print a token for one mind, made from the host's token in
+    /// `MENSOR_TOKEN`.
+    ///
+    /// It reaches that mind and its children, and no other: give it to
+    /// their hands in place of the host's. A host with a new token refuses
+    /// every token made from the old one.
+    Token(Token),
+}
+
+#[derive(Args)]
+struct Token {
+    /// The mind the token is for, which has no '.'. Its children are
+    /// reached too.
+    #[arg(long)]
+    mind: Name,
 }
 
 #[derive(Args)]
@@ -46,14 +62,28 @@ struct Run {
     does: Does,
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
-    mensor::log();
-    mensor::exit(match Cli::parse().command {
-        Command::Serve(hosting) => mensor::host::serve(hosting).await,
-        Command::Hand(hand) => mensor::hand::run(hand).await,
-        Command::Run(run) => self::run(run).await,
-    })
+fn main() -> ExitCode {
+    mensor::start();
+    let command = Cli::parse().command;
+    let runtime = tokio::runtime::Builder::new_multi_thread();
+    mensor::exit(mensor::block_on(runtime, async move {
+        match command {
+            Command::Serve(hosting) => mensor::host::serve(hosting).await,
+            Command::Hand(hand) => mensor::hand::run(hand).await,
+            Command::Run(run) => self::run(run).await,
+            Command::Token(token) => self::token(&token),
+        }
+    }))
+}
+
+/// Prints the token: that is what it is asked for.
+fn token(token: &Token) -> Result<(), String> {
+    let host = mensor::token()
+        .and_then(mensor_mind_host::Token::new)
+        .ok_or_else(|| format!("{} holds no host token to make one from", mensor::TOKEN))?;
+    let made = mind_token(&host, &token.mind).map_err(|error| error.to_string())?;
+    println!("{made}");
+    Ok(())
 }
 
 /// Serves until the process is asked to stop. A hand may end before then,

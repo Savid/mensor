@@ -23,12 +23,16 @@ const DRAIN: Duration = Duration::from_millis(250);
 /// The `commands` capability: runs shell commands on the hand's machine.
 ///
 /// Its one operation, `bash`, runs a command with `bash -c` in the hand's
-/// directory. A command that is cancelled or runs out of time is killed with
-/// everything it started. What a finished command leaves running lives on.
+/// directory, in a process group of its own. A command that is cancelled or
+/// runs out of time is killed with everything it started. What a finished
+/// command leaves running lives on until the last copy of these commands is
+/// dropped, which is when its hand ends: then every group they started is
+/// killed.
 #[derive(Clone, Debug)]
 pub struct Commands {
     directory: PathBuf,
     hidden: Vec<String>,
+    started: Arc<Started>,
     /// The most bytes kept of each of a command's output streams.
     pub max_output: usize,
     /// How long a command may run when its call does not say.
@@ -41,6 +45,7 @@ impl Commands {
         Self {
             directory: directory.into(),
             hidden: Vec::new(),
+            started: Arc::default(),
             max_output: 64 * 1024,
             timeout: Duration::from_mins(10),
         }
@@ -138,6 +143,9 @@ impl Commands {
             Ok(child) => child,
             Err(error) => return Reply::Error(format!("the command could not start: {error}")),
         };
+        if let Some(leader) = child.id() {
+            self.started.add(leader);
+        }
 
         let stdout = Arc::new(Mutex::new(Capture::new(self.max_output)));
         let stderr = Arc::new(Mutex::new(Capture::new(self.max_output)));
@@ -198,6 +206,67 @@ async fn read(mut pipe: impl AsyncRead + Unpin, into: Arc<Mutex<Capture>>) {
 
 fn lock(capture: &Mutex<Capture>) -> std::sync::MutexGuard<'_, Capture> {
     capture.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The process groups of the commands run, which every copy of a
+/// [`Commands`] shares, killed when the last copy is dropped.
+#[derive(Debug, Default)]
+struct Started(Mutex<Vec<Leader>>);
+
+/// A command's first process, whose id is its group's, and when it started.
+/// A group keeps its id from being taken while any process is in it, but a
+/// group that has ended frees it for another, which the start tells apart.
+#[derive(Debug)]
+struct Leader {
+    pid: Pid,
+    since: Option<u64>,
+}
+
+impl Started {
+    /// Records the group `leader` leads, and forgets every group that has
+    /// no process left.
+    fn add(&self, leader: u32) {
+        let Ok(pid) = i32::try_from(leader) else {
+            return;
+        };
+        let mut groups = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        groups.retain(|group| killpg(group.pid, None).is_ok());
+        groups.push(Leader {
+            pid: Pid::from_raw(pid),
+            since: started(leader),
+        });
+    }
+}
+
+impl Drop for Started {
+    fn drop(&mut self) {
+        let groups = self.0.get_mut().unwrap_or_else(PoisonError::into_inner);
+        for group in groups.iter() {
+            let taken = u32::try_from(group.pid.as_raw())
+                .ok()
+                .and_then(started)
+                .is_some_and(|since| Some(since) != group.since);
+            if !taken {
+                let _ = killpg(group.pid, Signal::SIGKILL);
+            }
+        }
+    }
+}
+
+/// When the process `pid` started, in clock ticks since boot, if it is
+/// there.
+#[cfg(target_os = "linux")]
+fn started(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, fields) = stat.rsplit_once(')')?;
+    // After the name: the state, the field numbered 3, then on to the
+    // start, numbered 22.
+    fields.split_whitespace().nth(19)?.parse().ok()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn started(_: u32) -> Option<u64> {
+    None
 }
 
 /// A command's process group, and the tasks that read its output.
@@ -330,6 +399,36 @@ mod tests {
         );
         tokio::time::sleep(Duration::from_millis(2500)).await;
         assert!(dir.path().join("later").exists(), "the leftover was killed");
+    }
+
+    /// Whether the process `pid` is gone: ended, if not yet reaped.
+    #[cfg(target_os = "linux")]
+    fn gone(pid: &str) -> bool {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| Some(stat.rsplit_once(')')?.1.trim_start().starts_with('Z')))
+            .unwrap_or(true)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn what_commands_leave_running_ends_when_their_hand_does() {
+        let (_dir, commands) = here();
+        let leftover = "sleep 30 >/dev/null 2>&1 & echo $!";
+        let first = bash(&commands, json!({"command": leftover})).await;
+        let second = bash(&commands.clone(), json!({"command": leftover})).await;
+        let pids: Vec<String> = [first, second]
+            .iter()
+            .map(|ran| ran["stdout"].as_str().unwrap().trim().to_owned())
+            .collect();
+        assert!(pids.iter().all(|pid| !gone(pid)), "{pids:?}");
+
+        drop(commands);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !pids.iter().all(|pid| gone(pid)) {
+            assert!(Instant::now() < deadline, "{pids:?} lived on");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     #[tokio::test]

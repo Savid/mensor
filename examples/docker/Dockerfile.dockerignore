@@ -1,0 +1,7 @@
+.git
+target
+build
+examples
+crates/cloudflare/build
+**/.wrangler
+*.sqlite*

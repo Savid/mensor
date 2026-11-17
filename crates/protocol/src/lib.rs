@@ -31,3 +31,9 @@ pub use message::{
 pub use name::{InvalidName, Name};
 pub use refusal::Refusal;
 pub use settle::{Plan, Settled, settle};
+
+/// The `detail` of the problem a host with no token answers 403 with, to a
+/// request, an attach included, that does not come from its own machine.
+/// A hand tells it from any other 403 by it.
+pub const NOT_LOCAL: &str =
+    "this host has no token, so it serves only requests from its own machine";

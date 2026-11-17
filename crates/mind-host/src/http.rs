@@ -2,9 +2,10 @@ use std::collections::VecDeque;
 use std::convert::Infallible;
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, Request, State};
-use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
-use axum::http::{HeaderValue, StatusCode};
+use axum::extract::{Extension, FromRequestParts, Path, Query, Request, State};
+use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, HOST, ORIGIN};
+use axum::http::request::Parts;
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -13,10 +14,11 @@ use axum::{Json, Router};
 use futures_util::stream::{self, Stream};
 use futures_util::{SinkExt, StreamExt};
 use mensor_api::{
-    History, MindStatus, PAGE, Problem, PromptBody, PromptReply, ReleaseBody, Writing, authorized,
+    Access, History, MindStatus, PAGE, Problem, PromptBody, PromptReply, ReleaseBody, Token,
+    Writing, local,
 };
 use mensor_mind::{Item, StoreError};
-use mensor_protocol::{FromHand, Hello, MAX_FRAME_BYTES, Name, Refusal};
+use mensor_protocol::{FromHand, Hello, MAX_FRAME_BYTES, NOT_LOCAL, Name, Refusal};
 use serde::Deserialize;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::time::timeout;
@@ -65,55 +67,99 @@ impl IntoResponse for HostError {
     }
 }
 
-/// Requires the host's token on every request, when it has one.
-async fn guard(State(host): State<Host>, request: Request, next: Next) -> Response {
-    if let Some(token) = &host.config().token {
-        let authorization = request.headers().get(AUTHORIZATION);
-        let authorization = authorization.and_then(|value| value.to_str().ok());
-        if !authorized(token, authorization) {
-            return problem(
-                StatusCode::UNAUTHORIZED,
-                "this host requires its bearer token",
-            );
+/// Finds what a request reaches, and turns away one that reaches nothing.
+///
+/// With a token, a request carries it, or one made from it for one mind
+/// ([`mensor_api::mind_token`]), as a bearer token. A host with no token trusts
+/// whoever reaches it, so it serves only requests from its own machine
+/// ([`mensor_api::local`]).
+async fn guard(State(host): State<Host>, mut request: Request, next: Next) -> Response {
+    match access(host.config().token.as_ref(), request.headers()) {
+        Ok(access) => {
+            request.extensions_mut().insert(access);
+            next.run(request).await
         }
+        Err((status, detail)) => problem(status, detail),
     }
-    next.run(request).await
 }
 
-async fn minds(State(host): State<Host>) -> Json<Vec<MindStatus>> {
-    Json(host.minds().await)
+/// What a request with these headers reaches on a host whose token is
+/// `token`, or the status and the reason it is turned away with.
+fn access(
+    token: Option<&Token>,
+    headers: &HeaderMap,
+) -> Result<Access, (StatusCode, &'static str)> {
+    let header = |name| headers.get(name).and_then(|value| value.to_str().ok());
+    match token {
+        Some(token) => Access::of(token, header(AUTHORIZATION)).ok_or((
+            StatusCode::UNAUTHORIZED,
+            "this host requires its bearer token",
+        )),
+        None if local(header(HOST), header(ORIGIN)) => Ok(Access::Host),
+        None => Err((StatusCode::FORBIDDEN, NOT_LOCAL)),
+    }
+}
+
+/// The mind a request's path names, which its token reaches.
+struct Reached(Name);
+
+impl<S: Send + Sync> FromRequestParts<S> for Reached {
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Response> {
+        let Path(name) = Path::<String>::from_request_parts(parts, state)
+            .await
+            .map_err(IntoResponse::into_response)?;
+        let name = Name::new(name).map_err(|error| HostError::from(error).into_response())?;
+        let access = parts.extensions.get::<Access>();
+        if !access.is_some_and(|access| access.reaches(&name)) {
+            let detail = format!("this token does not reach the mind {name}");
+            return Err(problem(StatusCode::FORBIDDEN, detail));
+        }
+        Ok(Self(name))
+    }
+}
+
+/// Every mind the request reaches.
+async fn minds(
+    State(host): State<Host>,
+    Extension(access): Extension<Access>,
+) -> Json<Vec<MindStatus>> {
+    let mut minds = host.minds().await;
+    minds.retain(|status| access.reaches(&status.mind.name));
+    Json(minds)
 }
 
 async fn mind(
     State(host): State<Host>,
-    Path(name): Path<String>,
+    Reached(name): Reached,
 ) -> Result<Json<MindStatus>, HostError> {
-    Ok(Json(host.mind(&Name::new(name)?).await?))
+    Ok(Json(host.mind(&name).await?))
 }
 
 async fn prompt(
     State(host): State<Host>,
-    Path(name): Path<String>,
+    Reached(name): Reached,
     Json(body): Json<PromptBody>,
 ) -> Result<Response, HostError> {
-    let status = host.prompt(&Name::new(name)?, body.key, body.text).await?;
+    let status = host.prompt(&name, body.key, body.text).await?;
     let code = StatusCode::from_u16(status.status()).unwrap_or(StatusCode::OK);
     Ok((code, Json(PromptReply { status })).into_response())
 }
 
 async fn interrupt(
     State(host): State<Host>,
-    Path(name): Path<String>,
+    Reached(name): Reached,
 ) -> Result<Json<MindStatus>, HostError> {
-    Ok(Json(host.interrupt(&Name::new(name)?).await?))
+    Ok(Json(host.interrupt(&name).await?))
 }
 
 async fn release(
     State(host): State<Host>,
-    Path(name): Path<String>,
+    Reached(name): Reached,
     Json(body): Json<ReleaseBody>,
 ) -> Result<Json<MindStatus>, HostError> {
-    Ok(Json(host.release(&Name::new(name)?, body.hand).await?))
+    Ok(Json(host.release(&name, body.hand).await?))
 }
 
 #[derive(Deserialize)]
@@ -124,10 +170,10 @@ struct Cursor {
 
 async fn history(
     State(host): State<Host>,
-    Path(name): Path<String>,
+    Reached(name): Reached,
     Query(cursor): Query<Cursor>,
 ) -> Result<Response, HostError> {
-    let items = read(&host, &Name::new(name)?, cursor.after).await?;
+    let items = read(&host, &name, cursor.after).await?;
     Ok(Json(History::from(cursor.after, &items)).into_response())
 }
 
@@ -149,10 +195,9 @@ async fn read(host: &Host, name: &Name, from: u64) -> Result<Vec<Item>, HostErro
 /// before the step that holds it.
 async fn events(
     State(host): State<Host>,
-    Path(name): Path<String>,
+    Reached(name): Reached,
     Query(cursor): Query<Cursor>,
 ) -> Result<Response, HostError> {
-    let name = Name::new(name)?;
     let told = host.follow(&name).await?;
     // The history is read once at the start, and again whenever it grew.
     let state = (host, name, cursor.after, VecDeque::new(), told, true);
@@ -199,15 +244,20 @@ fn sse(
     Sse::new(events).keep_alive(KeepAlive::default())
 }
 
-async fn attach(State(host): State<Host>, upgrade: WebSocketUpgrade) -> Response {
+async fn attach(
+    State(host): State<Host>,
+    Extension(access): Extension<Access>,
+    upgrade: WebSocketUpgrade,
+) -> Response {
     upgrade
         .max_message_size(MAX_FRAME_BYTES)
-        .on_upgrade(move |socket| serve(host, socket))
+        .on_upgrade(move |socket| serve(host, socket, access))
 }
 
-/// Serves one hand's connection: reads its `hello`, joins it to a mind, then
-/// carries messages both ways until either end is gone.
-async fn serve(host: Host, mut socket: WebSocket) {
+/// Serves one hand's connection: reads its `hello`, joins it to the mind it
+/// names if its token reaches that mind, then carries messages both ways
+/// until either end is gone.
+async fn serve(host: Host, mut socket: WebSocket, access: Access) {
     let hello = match timeout(host.config().hello_timeout, hello(&mut socket)).await {
         Ok(Ok(hello)) => hello,
         Ok(Err(refusal)) => return close(socket, refusal.code(), refusal.reason()).await,
@@ -217,6 +267,11 @@ async fn serve(host: Host, mut socket: WebSocket) {
         }
     };
     let (mind, hand) = (hello.mind.clone(), hello.hand.clone());
+    if !access.reaches(&mind) {
+        let refusal = Refusal::Forbidden;
+        tracing::debug!(%mind, %hand, reason = refusal.reason(), "a hand was refused");
+        return close(socket, refusal.code(), refusal.reason()).await;
+    }
     let mut connection = match host.connect(hello).await {
         Ok(connection) => connection,
         Err(Rejected::Refused(refusal)) => {

@@ -29,7 +29,7 @@ mod web;
 use serde::Serialize;
 use worker::{Context, Env, Request, Response, Result, event};
 
-use mensor_api::Problem;
+use mensor_api::{Problem, Token};
 
 /// The binding of the mind objects, as `wrangler.toml` names it.
 const MINDS: &str = "MINDS";
@@ -41,17 +41,18 @@ async fn fetch(request: Request, env: Env, _context: Context) -> Result<Response
     let token = env
         .var("MENSOR_TOKEN")
         .ok()
-        .map(|token| token.to_string())
-        .filter(|token| !token.is_empty());
+        .and_then(|token| Token::new(token.to_string()));
     let authorization = request.headers().get("authorization")?;
+    let origin = request.headers().get("origin")?;
     let host = url.host_str().unwrap_or_default();
-    if !api::permitted(token.as_deref(), authorization.as_deref(), host) {
-        let detail = if token.is_some() {
-            "this host requires its bearer token"
-        } else {
-            "this host has no MENSOR_TOKEN, so it serves only requests addressed to its own machine"
-        };
-        return problem(&Problem::new(401, detail));
+    let permitted = api::permitted(
+        token.as_ref(),
+        authorization.as_deref(),
+        host,
+        origin.as_deref(),
+    );
+    if let Err(refused) = permitted {
+        return problem(&refused);
     }
     match api::route(request.method().as_ref(), url.path()) {
         Ok(route) => {

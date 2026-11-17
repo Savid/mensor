@@ -1,6 +1,8 @@
 //! A mind's host and real hands, joined over a real WebSocket on loopback or
 //! in memory. The model is scripted. Commands run in temporary directories.
 
+mod common;
+
 use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
@@ -15,11 +17,14 @@ use mensor_mind::{
     Block, Content, Item, MemoryStore, MindRecord, ModelReply, ModelRequest, Origin, Outcome, Role,
     Settings, State, Stop, Store, StoreError, Usage,
 };
-use mensor_mind_host::{Config, Host, HostError, MindStatus, Prompted, Scripted};
-use mensor_protocol::{Name, Refusal};
+use mensor_mind_host::{
+    Config, Host, HostError, MindStatus, Prompted, Scripted, Token, mind_token,
+};
+use mensor_protocol::{NOT_LOCAL, Name, Refusal};
 use mensor_store_sqlite::SqliteStore;
 use serde_json::{Value, json};
-use tokio::net::TcpListener;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep, timeout};
 
@@ -812,7 +817,7 @@ async fn the_api_prompts_a_mind_and_follows_its_history() {
 #[tokio::test]
 async fn a_host_with_a_token_serves_only_those_who_hold_it() {
     let config = Config {
-        token: Some("secret".into()),
+        token: Token::new("secret"),
         ..Config::default()
     };
     let server = Server::start(config).await;
@@ -836,6 +841,292 @@ async fn a_host_with_a_token_serves_only_those_who_hold_it() {
 
     let (_hand, _task) = server.hand_with(fresh("m", "a1"), dir.path(), Some("secret"));
     server.settled("m").await;
+}
+
+/// The names of the minds `GET /v1/minds` lists to a request with `token`.
+async fn listed(server: &Server, token: &str) -> Vec<Value> {
+    let minds: Vec<Value> = client()
+        .get(server.api("/minds"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    minds.into_iter().map(|mind| mind["name"].clone()).collect()
+}
+
+/// The token of a host [`guarded`] starts.
+fn host_token() -> Token {
+    Token::new("fake-host-token").unwrap()
+}
+
+/// A host whose token is `fake-host-token`.
+async fn guarded() -> Server {
+    let config = Config {
+        token: Some(host_token()),
+        ..Config::default()
+    };
+    Server::start(config).await
+}
+
+#[tokio::test]
+async fn a_minds_token_reaches_only_it_and_its_children() {
+    let server = guarded().await;
+    let dir = tempfile::tempdir().unwrap();
+    let token = mind_token(&host_token(), &name("m")).unwrap();
+    let (_n, _task) = server.hand_with(fresh("n", "a1"), dir.path(), Some("fake-host-token"));
+    server.settled("n").await;
+    let (_m, _task) = server.hand_with(fresh("m", "a1"), dir.path(), Some(&token));
+    server.settled("m").await;
+
+    // A hand with it joins no other mind, and starts none.
+    for mind in ["n", "o"] {
+        let (_hand, refused) = server.hand_with(fresh(mind, "b2"), dir.path(), Some(&token));
+        let error = ended(refused).await.unwrap_err();
+        assert!(
+            matches!(error, Error::Refused(Refusal::Forbidden)),
+            "{error}"
+        );
+    }
+    assert!(server.status("o").await.is_none());
+    assert_eq!(server.status("n").await.unwrap().hands, [name("a1")]);
+
+    // A client with it sees that mind alone.
+    assert_eq!(listed(&server, &token).await, [json!("m")]);
+    assert_eq!(
+        listed(&server, "fake-host-token").await,
+        [json!("m"), json!("n")]
+    );
+    let http = client();
+    let asked = |method: reqwest::Method, path: &str| {
+        http.request(method, server.api(path))
+            .bearer_auth(&token)
+            .json(&json!({"text": "hello", "hand": "a1"}))
+    };
+    for (method, path) in [
+        (reqwest::Method::GET, "/minds/n"),
+        (reqwest::Method::POST, "/minds/n/prompt"),
+        (reqwest::Method::POST, "/minds/n/interrupt"),
+        (reqwest::Method::POST, "/minds/n/release"),
+        (reqwest::Method::GET, "/minds/n/history"),
+        (reqwest::Method::GET, "/minds/n/events"),
+        (reqwest::Method::GET, "/minds/n.d3342iuj"),
+    ] {
+        let status = asked(method.clone(), path).send().await.unwrap().status();
+        assert_eq!(status, 403, "{method} {path}");
+    }
+    assert_eq!(server.status("n").await.unwrap().hands, [name("a1")]);
+    let own = asked(reqwest::Method::GET, "/minds/m")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(own.status(), 200);
+    let child = asked(reqwest::Method::GET, "/minds/m.d3342iuj")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(child.status(), 404, "a child it would reach, not made yet");
+}
+
+#[tokio::test]
+async fn a_fork_child_joins_with_its_parents_token() {
+    let server = guarded().await;
+    for _ in 0..6 {
+        server.model.then_with(forking);
+    }
+    let root = tempfile::tempdir().unwrap();
+    let (dir, clones) = (root.path().join("work"), root.path().join("clones"));
+    std::fs::create_dir(&dir).unwrap();
+    let token = mind_token(&host_token(), &name("m")).unwrap();
+    let dial = WebSocket::new(server.attach()).token(Some(token));
+    let does = Does::new(&dir, Some(clones), &["commands", "files", "clone"]);
+    let hands = Hands::new(dial, does);
+    hands.start(name("m"), name("a1")).unwrap();
+    server.settled("m").await;
+
+    server.prompt("m", "write a note, then fork").await;
+    eventually(
+        "the child's hand has joined it, and both are done",
+        || async {
+            let minds = server.host.minds().await;
+            minds.len() == 2
+                && minds
+                    .iter()
+                    .all(|status| status.state == State::Idle && status.hands == [name("a1")])
+        },
+    )
+    .await;
+    hands.stop();
+}
+
+/// Starts the binary `mensor-hand` as `a1` of `m` on `server`, with its
+/// token, working in `dir`.
+fn hand_binary(server: &Server, dir: &Path) -> common::Running {
+    common::spawn(
+        env!("CARGO_BIN_EXE_mensor-hand"),
+        &[
+            "--url",
+            &server.attach(),
+            "--mind",
+            "m",
+            "--hand",
+            "a1",
+            "--dir",
+            dir.to_str().unwrap(),
+        ],
+        &[("MENSOR_TOKEN", "fake-host-token")],
+    )
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_command_cannot_read_the_token_of_the_hand_that_runs_it() {
+    if common::skipped_as_root("a_command_cannot_read_the_token_of_the_hand_that_runs_it") {
+        return;
+    }
+    let server = guarded().await;
+    server
+        .model
+        .then(vec![bash("tu_1", common::PROBE)])
+        .then(vec![text("Done.")]);
+    let dir = tempfile::tempdir().unwrap();
+    let hand = hand_binary(&server, dir.path());
+    server.settled("m").await;
+
+    server.prompt("m", "look at your parent").await;
+    server.settled("m").await;
+    let history = server.history("m");
+    let shown = format!("{:?}", outcome(&history, "tu_1"));
+    assert!(
+        shown.contains(&format!("parent={}", hand.0.id())),
+        "{shown}"
+    );
+    assert!(shown.contains("Permission denied"), "{shown}");
+    assert!(!format!("{history:?}").contains("fake-host-token"));
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn what_a_command_leaves_running_ends_with_the_hand_a_signal_stops() {
+    let server = guarded().await;
+    server
+        .model
+        .then(vec![bash("tu_1", common::LEAVES)])
+        .then(vec![text("Done.")]);
+    let dir = tempfile::tempdir().unwrap();
+    let mut hand = hand_binary(&server, dir.path());
+    server.settled("m").await;
+
+    server.prompt("m", "leave something running").await;
+    server.settled("m").await;
+    let leftover = common::leftover(stdout(outcome(&server.history("m"), "tu_1")));
+    assert!(!common::gone(leftover), "{leftover} ended with its call");
+
+    assert!(hand.terminate().success());
+    common::ends(leftover);
+}
+
+/// The status line a WebSocket upgrade to `server` is answered with, asked
+/// with these `Host` and `Origin` headers.
+async fn upgraded(server: &Server, host: &str, origin: Option<&str>) -> String {
+    let mut stream = TcpStream::connect(server.address).await.unwrap();
+    let origin = origin.map(|origin| format!("Origin: {origin}\r\n"));
+    let request = format!(
+        "GET /v1/attach HTTP/1.1\r\nHost: {host}\r\n{}Connection: Upgrade\r\nUpgrade: websocket\r\n\
+         Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
+        origin.unwrap_or_default()
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut answer = vec![0; 64];
+    let read = stream.read(&mut answer).await.unwrap();
+    let answer = String::from_utf8_lossy(&answer[..read]).into_owned();
+    answer.lines().next().unwrap_or_default().to_owned()
+}
+
+#[tokio::test]
+async fn a_host_without_a_token_serves_only_its_own_machine() {
+    let server = Server::start(Config::default()).await;
+    let here = format!("localhost:{}", server.address.port());
+    let http = client();
+    let asked = |host: &str, origin: Option<&str>| {
+        let mut request = http.get(server.api("/minds")).header("host", host);
+        if let Some(origin) = origin {
+            request = request.header("origin", origin);
+        }
+        request.send()
+    };
+
+    assert_eq!(asked(&here, None).await.unwrap().status(), 200);
+    let from_here = Some("http://localhost:3000");
+    assert_eq!(asked(&here, from_here).await.unwrap().status(), 200);
+    let elsewhere = asked("mensor.evil.example", None).await.unwrap();
+    assert_eq!(elsewhere.status(), 403);
+    let problem: Value = elsewhere.json().await.unwrap();
+    let detail = problem["detail"].as_str().unwrap();
+    assert!(detail.contains("its own machine"), "{detail}");
+    let from_a_page = Some("https://evil.example");
+    assert_eq!(asked(&here, from_a_page).await.unwrap().status(), 403);
+
+    // A hand's dial is held to the same, before it can say hello.
+    assert!(upgraded(&server, &here, None).await.contains(" 101 "));
+    assert!(
+        upgraded(&server, "mensor.evil.example", None)
+            .await
+            .contains(" 403 ")
+    );
+    assert!(
+        upgraded(&server, &here, from_a_page)
+            .await
+            .contains(" 403 ")
+    );
+    assert!(server.host.minds().await.is_empty());
+}
+
+/// The address of something that answers every request 403, with `body`.
+async fn forbidding(body: String) -> std::net::SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let mut asked = vec![0; 1024];
+            let _ = stream.read(&mut asked).await;
+            let answer = format!(
+                "HTTP/1.1 403 Forbidden\r\ncontent-length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(answer.as_bytes()).await;
+        }
+    });
+    address
+}
+
+#[tokio::test]
+async fn a_hand_turned_away_by_a_host_that_serves_only_its_machine_says_why() {
+    let dir = tempfile::tempdir().unwrap();
+    let dialled = async |body: String| {
+        let address = forbidding(body).await;
+        let dial = WebSocket::new(format!("ws://{address}/v1/attach"));
+        let (_hand, task) = hand_through(dial, fresh("m", "a1"), dir.path());
+        ended(task).await.unwrap_err()
+    };
+
+    let host = json!({"status": 403, "detail": NOT_LOCAL}).to_string();
+    let error = dialled(host).await;
+    assert!(matches!(error, Error::NotLocal), "{error}");
+
+    // Anything else that answers 403, such as a proxy, is told as it said.
+    let error = dialled(r#"{"status":403,"detail":"blocked by policy"}"#.into()).await;
+    assert!(
+        matches!(&error, Error::Forbidden(said) if said.contains("blocked by policy")),
+        "{error}"
+    );
+    let error = dialled("<html>Forbidden</html>".into()).await;
+    assert!(
+        matches!(&error, Error::Forbidden(said) if said == "<html>Forbidden</html>"),
+        "{error}"
+    );
 }
 
 #[tokio::test]

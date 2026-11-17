@@ -17,8 +17,9 @@ struct Cli {
     hosting: Hosting,
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
-    mensor::log();
-    mensor::exit(mensor::host::serve(Cli::parse().hosting).await)
+fn main() -> ExitCode {
+    mensor::start();
+    let hosting = Cli::parse().hosting;
+    let runtime = tokio::runtime::Builder::new_multi_thread();
+    mensor::exit(mensor::block_on(runtime, mensor::host::serve(hosting)))
 }

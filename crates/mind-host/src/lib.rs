@@ -12,6 +12,10 @@
 //!   follow it as server-sent events from a cursor, with the text of each
 //!   reply as the model writes it.
 //!
+//! A host with a token serves those who hold it, and those who hold a token
+//! made from it for one mind ([`mind_token`]), who reach only that mind and
+//! its children. A host with none serves only its own machine.
+//!
 //! The host performs each of a mind's outputs in order: an item is in the
 //! store before anything it describes is sent, and a fork's children are
 //! made before the fork is stored. It carries messages between a parent and
@@ -30,7 +34,7 @@ mod provider;
 mod task;
 
 pub use host::{Config, Connection, Host, HostError, Rejected};
-pub use mensor_api::{MindStatus, Prompted};
+pub use mensor_api::{MindStatus, NotRoot, Prompted, Token, mind_token};
 pub use model::{Model, ModelError, ModelFuture, Scripted, Wrote};
 pub use provider::Provider;
 pub use task::Outgoing;

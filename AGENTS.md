@@ -37,10 +37,12 @@ While iterating, test the crate you touched: `cargo test -p mensor-mind`.
   its children exist.
 - A capability implements `mensor_hand::Capability`, names its operations
   and bounds its own output.
-- `crates/api` holds the HTTP bodies both hosts serve: neither declares a
-  shape of its own.
-- A protocol change updates `docs/protocol.md`, `crates/protocol` and both
-  hosts.
+- `crates/api` holds the HTTP bodies both hosts serve, and who may ask
+  (`src/access.rs`): neither host declares a shape or a check of its own.
+- A protocol change updates `docs/protocol.md`, `crates/protocol`, both
+  hosts and `examples/`.
+- `make check` does not run `examples/`. A change to a message, flag or
+  endpoint an example uses updates it, and runs it as its README says.
 - `crates/mind`, `mind-host`, `hand-host`, `model`, `store-sqlite`, `mensor`
   and `cloudflare` each have an `AGENTS.md` with their own rules. Read it
   before changing that crate.
@@ -87,9 +89,18 @@ While iterating, test the crate you touched: `cargo test -p mensor-mind`.
 
 ## Secrets
 
-- Never print, log or commit a model key or the host's token. Check a
-  variable with `[ -n "$VAR" ]`.
+- Never print, log or commit a model key, the host's token or a token made
+  from it. Check a variable with `[ -n "$VAR" ]`. Only `mensor token`
+  prints one, because that is what it is asked for: keep what it prints in
+  a variable, never a file. A type that holds one shows it as `..` in its
+  `Debug`; the host's is a `mensor_api::Token`, which is never empty.
 - The host's token comes from `MENSOR_TOKEN`, never a flag.
+- `log` is built with `max_level_off`, so nothing a dependency logs through
+  it reaches a logger: tungstenite logs each handshake there, the
+  `Authorization` header included. Keep it so.
+- Each binary's `main` calls `mensor::start()` first, before its runtime or
+  anything else, so the commands it runs cannot read its environment or
+  memory.
 - No credential goes into a history or a command's environment. A new
   credential variable joins `CREDENTIALS` in `crates/mensor/src/lib.rs`.
 - `CLOUDFLARE_INCLUDE_PROCESS_ENV=true` hands a local worker every variable

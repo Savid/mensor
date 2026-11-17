@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use mensor_api::{MindStatus, PAGE, Prompted};
+use mensor_api::{MindStatus, PAGE, Prompted, Token};
 use mensor_mind::{
     Conflict, Item, Mind, MindRecord, NoHand, Origin, Report, Settings, State, Store, StoreError,
 };
@@ -19,9 +19,11 @@ use crate::task::{self, Command, Link, Outgoing, Told, blocking};
 /// How a host runs.
 #[derive(Clone, Debug)]
 pub struct Config {
-    /// The bearer token every request must carry. Without one the host
-    /// trusts whoever can reach it, so it must listen on loopback only.
-    pub token: Option<String>,
+    /// The bearer token every request must carry, or a token made from it
+    /// for the mind asked about. Without one the host trusts every process
+    /// on its machine, so it must listen on loopback only, and it serves
+    /// only requests from its own machine.
+    pub token: Option<Token>,
     /// What every mind is told when it is made: its hands and forks
     /// included.
     pub mind: Settings,
@@ -576,5 +578,29 @@ impl Known {
             record: slot.record.clone(),
             awake: slot.awake.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nothing_is_logged_through_the_log_crate() {
+        // A host is built with the hand's crate as often as not, and
+        // tungstenite logs a hand's handshake there, `Authorization`
+        // included.
+        assert_eq!(log::STATIC_MAX_LEVEL, log::LevelFilter::Off);
+    }
+
+    #[test]
+    fn a_config_never_shows_its_token() {
+        let config = Config {
+            token: Token::new("fake-host-token"),
+            ..Config::default()
+        };
+        let shown = format!("{config:?}");
+        assert!(!shown.contains("fake-host-token"), "{shown}");
+        assert!(shown.contains("token: Some(Token(..))"), "{shown}");
     }
 }

@@ -1,0 +1,38 @@
+# A host and two hands, each in a container of its own. Only the host holds
+# the model's credential and the host's token, and only the hands run the
+# model's commands. The hands hold a token made for the mind `m`, which
+# reaches `m` and its children alone.
+name: mensor
+
+x-mensor: &mensor
+  build:
+    context: ../..
+    dockerfile: examples/docker/Dockerfile
+  image: mensor-example
+
+services:
+  host:
+    <<: *mensor
+    command: serve --listen 0.0.0.0:7878 --store /data/mensor.sqlite --model ${MENSOR_MODEL:-claude-opus-5-5}
+    environment:
+      MENSOR_TOKEN: ${MENSOR_TOKEN:?set MENSOR_TOKEN}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+    ports: ["127.0.0.1:7878:7878"]
+    volumes: [store:/data]
+
+  a1:
+    <<: *mensor
+    command: hand --url ws://host:7878/v1/attach --mind m --hand a1 --dir work
+    environment:
+      MENSOR_TOKEN: ${MENSOR_HAND_TOKEN:?set MENSOR_HAND_TOKEN to a token for m}
+
+  b2:
+    <<: *mensor
+    command: hand --url ws://host:7878/v1/attach --mind m --hand b2 --dir work
+    environment:
+      MENSOR_TOKEN: ${MENSOR_HAND_TOKEN:?set MENSOR_HAND_TOKEN to a token for m}
+
+volumes:
+  store:

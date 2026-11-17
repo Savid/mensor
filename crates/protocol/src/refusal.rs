@@ -17,16 +17,20 @@ pub enum Refusal {
     /// no `.` and is at most [`Name::ROOT_MAX_LEN`](crate::Name::ROOT_MAX_LEN)
     /// bytes.
     Name,
+    /// The hand's token is for another mind: a token made for one mind
+    /// reaches only that mind and its children.
+    Forbidden,
 }
 
 impl Refusal {
     /// Every refusal.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Protocol,
         Self::UnknownMind,
         Self::Replaced,
         Self::Released,
         Self::Name,
+        Self::Forbidden,
     ];
 
     /// The WebSocket close code. 4001 is not used.
@@ -37,6 +41,7 @@ impl Refusal {
             Self::Replaced => 4003,
             Self::Released => 4004,
             Self::Name => 4005,
+            Self::Forbidden => 4006,
         }
     }
 
@@ -48,6 +53,7 @@ impl Refusal {
             Self::Replaced => "a newer connection has this mind and hand",
             Self::Released => "the mind released this hand",
             Self::Name => "a new mind's name has no '.' and is at most 55 bytes",
+            Self::Forbidden => "this hand's token does not reach that mind",
         }
     }
 

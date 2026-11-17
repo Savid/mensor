@@ -11,6 +11,7 @@ repository.workspace = true
 [dependencies]
 axum.workspace = true
 futures-util.workspace = true
+log.workspace = true
 mensor-api.workspace = true
 mensor-model.workspace = true
 mensor-protocol.workspace = true

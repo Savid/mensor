@@ -2,9 +2,9 @@
 //! what, and who may ask. The bodies of its requests and answers are
 //! [`mensor_api`]'s, the ones `mensor serve` uses.
 
-use mensor_api::{Problem, Writing, authorized};
+use mensor_api::{Problem, Token, Writing, authorized, local};
 use mensor_mind::Item;
-use mensor_protocol::Name;
+use mensor_protocol::{NOT_LOCAL, Name};
 
 /// What a request asks of one mind.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,16 +63,23 @@ pub(crate) fn route(method: &str, path: &str) -> Result<Route, Problem> {
     }
 }
 
-/// Whether a request may be served.
+/// Whether a request may be served, or the problem it is refused with.
 ///
 /// With a token, the request must carry it as a bearer token. Without one,
-/// only a request addressed to this machine is served, which is how a
+/// only a request from this machine is served ([`local`]), which is how a
 /// worker runs under local development and never how it is reached once
 /// deployed.
-pub(crate) fn permitted(token: Option<&str>, authorization: Option<&str>, host: &str) -> bool {
+pub(crate) fn permitted(
+    token: Option<&Token>,
+    authorization: Option<&str>,
+    host: &str,
+    origin: Option<&str>,
+) -> Result<(), Problem> {
     match token {
-        Some(token) => authorized(token, authorization),
-        None => matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]"),
+        Some(token) if authorized(token, authorization) => Ok(()),
+        Some(_) => Err(Problem::new(401, "this host requires its bearer token")),
+        None if local(Some(host), origin) => Ok(()),
+        None => Err(Problem::new(403, NOT_LOCAL)),
     }
 }
 
@@ -143,29 +150,42 @@ mod tests {
         assert_eq!(status("POST", "/v1/minds/a1"), 405);
     }
 
+    /// The status a request is refused with, or 200.
+    fn answer(
+        token: Option<&str>,
+        authorization: Option<&str>,
+        host: &str,
+        origin: Option<&str>,
+    ) -> u16 {
+        let token = token.and_then(Token::new);
+        permitted(token.as_ref(), authorization, host, origin)
+            .map_or_else(|problem| problem.status, |()| 200)
+    }
+
     #[test]
     fn a_token_is_required_wherever_one_is_set() {
-        assert!(permitted(
-            Some("s3cret"),
-            Some("Bearer s3cret"),
-            "example.com"
-        ));
-        assert!(!permitted(
-            Some("s3cret"),
-            Some("Bearer s3cres"),
-            "localhost"
-        ));
-        assert!(!permitted(Some("s3cret"), Some("s3cret"), "localhost"));
-        assert!(!permitted(Some("s3cret"), None, "localhost"));
+        let token = Some("s3cret");
+        assert_eq!(
+            answer(token, Some("Bearer s3cret"), "example.com", None),
+            200
+        );
+        assert_eq!(answer(token, Some("Bearer s3cres"), "localhost", None), 401);
+        assert_eq!(answer(token, Some("s3cret"), "localhost", None), 401);
+        assert_eq!(answer(token, None, "localhost", None), 401);
     }
 
     #[test]
     fn without_a_token_only_this_machine_is_served() {
         for host in ["localhost", "127.0.0.1", "[::1]"] {
-            assert!(permitted(None, None, host), "{host}");
+            assert_eq!(answer(None, None, host, None), 200, "{host}");
         }
-        assert!(!permitted(None, None, "mensor.example.workers.dev"));
-        assert!(!permitted(None, Some("Bearer anything"), "example.com"));
+        assert_eq!(answer(None, None, "mensor.example.workers.dev", None), 403);
+        assert_eq!(
+            answer(None, Some("Bearer anything"), "example.com", None),
+            403
+        );
+        let from_elsewhere = Some("https://evil.example");
+        assert_eq!(answer(None, None, "localhost", from_elsewhere), 403);
     }
 
     #[test]

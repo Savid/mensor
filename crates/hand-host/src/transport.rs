@@ -4,7 +4,7 @@ use std::sync::Once;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use mensor_protocol::{FromHand, FromMind, Hello, MAX_FRAME_BYTES, Refusal};
+use mensor_protocol::{FromHand, FromMind, Hello, MAX_FRAME_BYTES, NOT_LOCAL, Refusal};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -114,6 +114,15 @@ impl std::fmt::Debug for WebSocket {
     }
 }
 
+/// The start of what a refusal's body says, on one line. A host's problem
+/// holds its `detail` word for word, since none needs escaping in JSON; a
+/// proxy's says what it says.
+fn said(body: &[u8]) -> String {
+    let text = String::from_utf8_lossy(body);
+    let words: Vec<&str> = text.split_whitespace().collect();
+    words.join(" ").chars().take(200).collect()
+}
+
 /// Picks the cryptography a `wss://` dial uses. The first call in a process
 /// decides, so a host that has already chosen keeps its choice.
 fn tls() {
@@ -146,12 +155,21 @@ impl Dial for WebSocket {
             let mut socket = match timeout(self.connect_timeout, connecting).await {
                 Ok(Ok((socket, _))) => socket,
                 Ok(Err(tungstenite::Error::Http(response)))
-                    if matches!(
-                        response.status(),
-                        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
-                    ) =>
+                    if response.status() == StatusCode::UNAUTHORIZED =>
                 {
                     return Err(DialError::Fail(Error::Unauthorized));
+                }
+                Ok(Err(tungstenite::Error::Http(response)))
+                    if response.status() == StatusCode::FORBIDDEN =>
+                {
+                    let said = response.body().as_deref().map(said).unwrap_or_default();
+                    return Err(DialError::Fail(if said.contains(NOT_LOCAL) {
+                        Error::NotLocal
+                    } else if said.is_empty() {
+                        Error::Forbidden("no reason given".into())
+                    } else {
+                        Error::Forbidden(said)
+                    }));
                 }
                 Ok(Err(tungstenite::Error::Url(error))) => return Err(unusable(&error)),
                 Ok(Err(error)) => return Err(DialError::Retry(error.to_string())),
@@ -216,5 +234,27 @@ impl Link for Socket {
         Box::pin(async move {
             let _ = self.0.close(None).await;
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nothing_is_logged_through_the_log_crate() {
+        // tungstenite logs each handshake there, `Authorization` included.
+        assert_eq!(log::STATIC_MAX_LEVEL, log::LevelFilter::Off);
+    }
+
+    #[test]
+    fn a_refusal_is_told_as_its_body_says_it_on_one_line() {
+        let body = format!(r#"{{"status":403,"detail":"{NOT_LOCAL}"}}"#);
+        assert!(said(body.as_bytes()).contains(NOT_LOCAL));
+        assert_eq!(
+            said(b"<html>\n  Forbidden\n</html>"),
+            "<html> Forbidden </html>"
+        );
+        assert_eq!(said(&[b'x'; 500]).len(), 200);
     }
 }

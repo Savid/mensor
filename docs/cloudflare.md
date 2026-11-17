@@ -26,7 +26,9 @@ env -i PATH="$PATH" HOME="$HOME" CLOUDFLARE_INCLUDE_PROCESS_ENV=true \
 
 `CLOUDFLARE_INCLUDE_PROCESS_ENV` hands the worker every variable of the shell
 that starts it, which is why the command starts from an empty one. With no
-`MENSOR_TOKEN`, the worker serves only requests addressed to this machine.
+`MENSOR_TOKEN`, the worker serves only requests from this machine, as
+`mensor serve` does: a `Host` of `localhost` or a loopback address, and an
+`Origin`, if a browser sends one, that names one too.
 
 ```bash
 api=127.0.0.1:8787/v1/minds
@@ -48,7 +50,7 @@ npx wrangler@4.160.1 deploy
 | `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` | The credential of a model behind Claude's Messages API. A secret. |
 | `OPENAI_API_KEY` | The credential of a model behind Chat Completions. A secret. |
 | `MENSOR_API` | `messages` or `chat`, when both credentials are set. |
-| `MENSOR_TOKEN` | The bearer token every request must carry. A secret. Without it, only this machine is served. |
+| `MENSOR_TOKEN` | The bearer token every request must carry. A secret. Without it, only this machine is served. Tokens made from it for one mind, as `mensor token` makes them, are not taken: the worker's one hand is inside it. |
 | `MENSOR_MODEL` | The model every mind asks. `claude-opus-5-5` unless set. |
 | `MENSOR_EFFORT` | How hard the model works, in its API's words: for Claude `low`, `medium`, `high`, `xhigh` or `max`. |
 | `MENSOR_SYSTEM` | The system prompt every mind gives its model. |

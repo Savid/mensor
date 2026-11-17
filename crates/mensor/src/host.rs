@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use clap::Args;
 use mensor_mind::{MemoryStore, Settings, Store};
-use mensor_mind_host::{Config, Host, Provider};
+use mensor_mind_host::{Config, Host, Provider, Token};
 use mensor_store_sqlite::SqliteStore;
 use tokio::net::TcpListener;
 
@@ -53,7 +53,7 @@ pub struct Hosting {
 
 /// Opens a host over its store and model, and the address it serves on.
 pub async fn open(hosting: Hosting) -> Result<(Host, TcpListener), String> {
-    let token = token();
+    let token = token().and_then(Token::new);
     if token.is_none() && !hosting.listen.ip().is_loopback() {
         return Err(format!(
             "{} is not loopback: set {TOKEN} so that only its holders reach this host",

@@ -26,6 +26,16 @@ clap = { version = "4", features = ["derive", "env"] }
 futures-channel = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 getrandom = "0.3"
+# A host's tokens: SHA-256 to compare them, HMAC to make one for a mind.
+# Pure Rust, so the worker builds them too, on the digest tungstenite's
+# sha1 is on.
+hmac = "0.12"
+# Every `log` call is compiled out, whatever logger a binary might gain:
+# tungstenite logs each handshake at trace through `log`, the
+# `Authorization` header and its token included. mensor logs with tracing.
+# The crates that carry tungstenite depend on this, so any build of them has
+# it.
+log = { version = "0.4", features = ["max_level_off", "release_max_level_off"] }
 nix = { version = "0.31", default-features = false, features = ["signal"] }
 # No crypto of its own: a host installs ring, as the hand does, which is a
 # third the size of the default.
@@ -34,6 +44,7 @@ rusqlite = { version = "0.42", features = ["bundled"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1.54", default-features = false }

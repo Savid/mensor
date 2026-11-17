@@ -17,7 +17,14 @@ mind its history, the hand the ids it has read and the results it holds.
   object with it, passes the same messages in memory, and the rest of this
   section does not apply to it.
 - A host with a token requires `Authorization: Bearer <token>` on the
-  upgrade, and answers 401 without it.
+  upgrade, and answers 401 without it. The token is the host's, which
+  reaches every mind, or one made from it for one mind, which reaches that
+  mind and its children, and a hello for any other is closed with 4006.
+- A host with no token answers the upgrade only from its own machine: a
+  `Host` of `localhost` or a loopback address, and an `Origin`, if there is
+  one, that names one too. Anything else is answered 403, with a problem
+  whose `detail` is "this host has no token, so it serves only requests
+  from its own machine": a hand tells it from a 403 a proxy sends.
 - One connection per mind and hand. A newer one replaces the older.
 - Each message is one JSON object with a `type`. Fields are camelCase. A
   field a reader does not know is ignored.
@@ -128,7 +135,9 @@ meanwhile ends it as not run.
 
 ## Minds and names
 
-A host decides what a hello means from its `mind`:
+A host decides what a hello means from its `mind`. A token made for one
+mind reaches that mind and its children, and a hello that names any other is
+closed with 4006 before anything else. Then:
 
 | The mind is… | The host |
 | --- | --- |
@@ -170,6 +179,7 @@ A hand dials again only after one that is not final.
 | 4003 | A newer connection has this mind and hand | yes |
 | 4004 | The mind released this hand | yes: the hand ends |
 | 4005 | A new mind's name is longer than 55 bytes | yes |
+| 4006 | The hand's token was made for another mind: one made for `m` reaches only `m` and its children | yes |
 
 ## Limits
 
