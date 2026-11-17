@@ -8,6 +8,12 @@ pub struct ModelRequest {
     /// How many items the history held when this was built. The host hands it
     /// back with the reply.
     pub seen: u64,
+    /// The model to ask, when the mind has one of its own: otherwise the
+    /// host's.
+    pub model: Option<String>,
+    /// How hard the model works, when the mind says: otherwise as the host
+    /// says.
+    pub effort: Option<String>,
     /// The system prompt.
     pub system: Option<String>,
     /// The conversation so far, user first, roles alternating.

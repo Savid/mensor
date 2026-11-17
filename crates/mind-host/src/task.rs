@@ -4,15 +4,15 @@ use std::time::Duration;
 
 use mensor_api::Writing;
 use mensor_mind::{
-    Conflict, Fork, Item, Mind, MindRecord, ModelReply, ModelRequest, NoHand, Origin, Output,
-    Report, State, Store, StoreError,
+    Conflict, Fork, Item, Mind, MindRecord, MindSettings, ModelReply, ModelRequest, NoHand, Origin,
+    Output, Report, Settings, State, Store, StoreError, Untold,
 };
 use mensor_protocol::{FromHand, FromMind, Hello, Name, Refusal};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::AbortHandle;
 use tokio::time::timeout;
 
-use crate::host::{Host, Inner, Slot};
+use crate::host::{Host, HostError, Inner, Slot};
 use crate::model::{Model, ModelError};
 
 /// How much those following a mind may fall behind before they miss some
@@ -49,7 +49,7 @@ pub(crate) enum Command {
     /// A message the mind said reached the mind it was for, or could not.
     Told {
         key: String,
-        result: Result<(), String>,
+        result: Result<(), Untold>,
     },
     /// A mind this one watches is at rest.
     Rested {
@@ -60,6 +60,9 @@ pub(crate) enum Command {
     Release {
         hand: Name,
         reply: oneshot::Sender<Result<(), NoHand>>,
+    },
+    End {
+        reply: oneshot::Sender<()>,
     },
     Status {
         reply: oneshot::Sender<Status>,
@@ -114,6 +117,11 @@ pub enum Outgoing {
 struct Task {
     name: Name,
     mind: Mind,
+    /// What the mind was made with, which its fork children are made with.
+    made: MindSettings,
+    /// What it is told when it is loaded: the host's settings, with its own
+    /// over them.
+    settings: Settings,
     store: Arc<dyn Store>,
     model: Arc<dyn Model>,
     /// The host, for the day the task leaves it.
@@ -130,6 +138,15 @@ struct Task {
     told: broadcast::Sender<Told>,
     /// Whether the host has stopped.
     stopped: watch::Receiver<bool>,
+}
+
+/// What a mind made with `own` is told: `host`'s settings, with each of its
+/// own over the host's.
+fn settings(host: &Settings, own: &MindSettings) -> Settings {
+    Settings {
+        own: own.clone().or(&host.own),
+        ..host.clone()
+    }
 }
 
 /// Returns once the host has stopped, or has gone.
@@ -154,11 +171,15 @@ pub(crate) async fn blocking<T: Send + 'static>(
 /// it rest, or until its history cannot be read or stored. Either way it
 /// then leaves the host's memory, and the next thing that concerns the
 /// mind wakes it from its store.
-pub(crate) fn spawn(name: &Name, host: &Arc<Inner>) -> mpsc::UnboundedSender<Command> {
+pub(crate) fn spawn(record: &MindRecord, host: &Arc<Inner>) -> mpsc::UnboundedSender<Command> {
     let (sender, commands) = mpsc::unbounded_channel();
+    let name = &record.name;
+    let settings = settings(&host.config.mind, &record.settings);
     let task = Task {
         name: name.clone(),
-        mind: Mind::new(name.clone(), host.config.mind.clone()),
+        mind: Mind::new(name.clone(), settings.clone()),
+        made: record.settings.clone(),
+        settings,
         store: Arc::clone(&host.store),
         model: Arc::clone(&host.model),
         host: Arc::downgrade(host),
@@ -195,8 +216,7 @@ impl Task {
     async fn serve(&mut self) -> Result<(), StoreError> {
         let (store, name) = (Arc::clone(&self.store), self.name.clone());
         let (from, items) = blocking(move || store.tail(&name)).await?;
-        let settings = self.host.upgrade().map(|host| host.config.mind.clone());
-        self.mind = Mind::load(self.name.clone(), from, items, settings.unwrap_or_default());
+        self.mind = Mind::load(self.name.clone(), from, items, self.settings.clone());
         let outputs = self.mind.start();
         self.perform(outputs).await?;
         loop {
@@ -306,15 +326,12 @@ impl Task {
             }
             Command::Interrupt => {
                 let outputs = self.mind.interrupt();
-                if !outputs.is_empty() {
-                    tracing::info!(mind = %self.name, "the turn was interrupted");
-                }
-                // The request is given up, so its answer is not paid for
-                // in full. One that lands anyway is one the mind drops.
-                if let Some((_, asking)) = self.asking.take() {
-                    asking.abort();
-                }
-                self.perform(outputs).await?;
+                self.stop_turn(outputs, "the turn was interrupted").await?;
+            }
+            Command::End { reply } => {
+                let outputs = self.mind.end();
+                self.stop_turn(outputs, "the mind ended").await?;
+                let _ = reply.send(());
             }
             Command::Release { hand, reply } => match self.mind.release(&hand) {
                 Ok(outputs) => {
@@ -342,6 +359,19 @@ impl Task {
             }
         }
         Ok(())
+    }
+
+    /// Performs what stopping the mind's turn gave, saying `what` happened
+    /// if anything did. The model's request is given up, so its answer is
+    /// not paid for in full: one that lands anyway is one the mind drops.
+    async fn stop_turn(&mut self, outputs: Vec<Output>, what: &str) -> Result<(), StoreError> {
+        if !outputs.is_empty() {
+            tracing::info!(mind = %self.name, what, "the turn stopped");
+        }
+        if let Some((_, asking)) = self.asking.take() {
+            asking.abort();
+        }
+        self.perform(outputs).await
     }
 
     /// Joins a hand that said hello, or turns it away.
@@ -449,7 +479,7 @@ impl Task {
 
     /// Makes a child mind, in one write with its first items, and adds it
     /// to the host's minds, resting. A child the store already has with
-    /// this origin was made before a stop, and is the one made.
+    /// this record was made before a stop, and is the one made.
     async fn fork(&mut self, fork: Fork) -> Result<(), StoreError> {
         let Fork {
             name,
@@ -460,6 +490,7 @@ impl Task {
         let record = MindRecord {
             name: name.clone(),
             origin: Origin::Fork { parent, inherited },
+            settings: self.made.clone(),
         };
         let (store, made) = (Arc::clone(&self.store), record.clone());
         blocking(move || store.create(&made, &items)).await?;
@@ -495,7 +526,10 @@ impl Task {
         let (host, from, myself) = (Host::from(host), self.name.clone(), self.myself.clone());
         tokio::spawn(async move {
             let result = host.say(&to, Some(key.clone()), text, Some(from)).await;
-            let result = result.map(|_| ()).map_err(|error| error.to_string());
+            let result = result.map(|_| ()).map_err(|error| match error {
+                HostError::Conflict(Conflict::Ended(mind)) => Untold::Ended(mind),
+                other => Untold::Failed(other.to_string()),
+            });
             if let Some(commands) = myself.upgrade() {
                 let _ = commands.send(Command::Told { key, result });
             }

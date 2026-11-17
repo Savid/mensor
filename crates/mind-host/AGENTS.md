@@ -27,3 +27,12 @@ client.
   between commands, each hand's WebSocket with 1001. A task that lives as
   long as a mind or a connection selects on `stopped` (`src/task.rs`), so
   that what it holds, the store among it, is let go.
+- A mind wakes with its record's settings over the host's (`settings` in
+  `src/task.rs`), and a fork's child is made with its parent's.
+- `Host::make` refuses a model the host does not offer (its `Model`'s own,
+  or one of `Config::models`) and an effort its `Model` does not take. It
+  decides a mind made from another's history with `Mind::branch`, over the
+  store's `tail_at` and the other's last call, under the lock on the host's
+  minds, so that nothing else makes or joins it meanwhile.
+- A JSON body is read through `Body`, which refuses what it cannot read as
+  a 400 problem, never axum's own rejection.

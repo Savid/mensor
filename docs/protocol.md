@@ -49,7 +49,7 @@ mind its history, the hand the ids it has read and the results it holds.
 | `lastId` | The highest call id the hand has read, or 0. |
 | `running` | The calls still running. |
 | `held` | The results not yet acked, oldest first. |
-| `capabilities` | What the hand can do: each a `name` and its `operations`, each of those a `name`, a `description` and the JSON Schema of its `input`. No `input` may have a `hand` property: the mind adds its own. |
+| `capabilities` | What the hand can do: each a `name` and its `operations`, each of those a `name`, a `description` and the JSON Schema of its `input`. No `input` may have a `hand` property: the mind adds its own. A later hello's replace an earlier one's, boot or no new boot, and the mind's tools follow from its next step. |
 
 A name is 1 to 64 ASCII letters, digits, `-`, `_` or `.`, starting with a letter
 or digit.
@@ -145,7 +145,19 @@ closed with 4006 before anything else. Then:
 | new, with no `.` in its name and at most 55 bytes | starts it, with an empty history |
 | new, with a `.` in its name | refuses for now: it is a fork's child, not made yet |
 
-A mind refuses a hand it has released. Any other hand may join.
+A mind refuses a hand it has released, and a mind that has ended refuses
+every hand. Any other hand may join. Ending a mind releases every hand it
+has, each closed with 4004, and `mensor hand` deletes a released clone's
+copy as on any release.
+
+A mind made from another's first items (`PUT /v1/minds/{m}` with `from`)
+keeps one of that mind's hands, which says hello to it under the same
+name: a hand that can stand where those items end, such as a VM restored
+from a snapshot taken then. Its hello is settled as any other: a new boot
+makes a call it had not answered unknown, and the same boot is held to its
+`lastId`, `running` and `held`. The new mind's call ids start above every
+id the other mind had issued, so a hand restored from later reads them as
+new.
 
 A mind makes its children itself, when its model forks. It asks one of its
 hands to clone itself with a `call` to the hand's `clone` capability:
@@ -177,7 +189,7 @@ A hand dials again only after one that is not final.
 | 4000 | The hand broke the protocol: no hello within 10 s, a second hello, a `refused`, an `input` with a `hand` property, or a message the protocol does not define | yes |
 | 4002 | The mind is a fork's child that is not made yet | no: the hand dials again, and gives up after 2 minutes |
 | 4003 | A newer connection has this mind and hand | yes |
-| 4004 | The mind released this hand | yes: the hand ends |
+| 4004 | The mind released this hand, or has ended | yes: the hand ends |
 | 4005 | A new mind's name is longer than 55 bytes | yes |
 | 4006 | The hand's token was made for another mind: one made for `m` reaches only `m` and its children | yes |
 

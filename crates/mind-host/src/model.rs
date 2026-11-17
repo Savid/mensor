@@ -23,6 +23,16 @@ pub trait Model: Send + Sync {
     /// Asks the model once. It tells `wrote` the text of its reply as that
     /// comes, if it can.
     fn call(&self, request: ModelRequest, wrote: Wrote) -> ModelFuture<'_>;
+
+    /// The model asked when a request names none: the host's own, which a
+    /// mind may always be made with.
+    fn name(&self) -> &str;
+
+    /// The efforts its API takes, or none when it takes any that is not
+    /// empty.
+    fn efforts(&self) -> Option<&'static [&'static str]> {
+        None
+    }
 }
 
 type Script = Box<dyn FnOnce(&ModelRequest) -> ModelReply + Send>;
@@ -75,6 +85,10 @@ impl Scripted {
 }
 
 impl Model for Scripted {
+    fn name(&self) -> &'static str {
+        "scripted"
+    }
+
     fn call(&self, request: ModelRequest, mut wrote: Wrote) -> ModelFuture<'_> {
         let script = lock(&self.replies).pop_front();
         let reply = match script {

@@ -16,13 +16,15 @@
 //! Beside the item itself a row holds when it was stored, its type, and the
 //! key of a prompt that has one. Those are what a reader of the file asks
 //! by, and how the store finds a history's last summary and a prompt's key
-//! without reading the history.
+//! without reading the history. A mind's row holds its whole record as
+//! JSON, and beside it the mind whose items it shares and how many, which
+//! a read walks up by.
 
 use std::path::Path;
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use mensor_mind::{Item, MindRecord, Origin, Store, StoreError};
+use mensor_mind::{Item, MindRecord, Store, StoreError};
 use mensor_protocol::Name;
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -38,8 +40,9 @@ const SCHEMA: &str = "
     CREATE TABLE minds (
         made      INTEGER PRIMARY KEY AUTOINCREMENT,
         name      TEXT NOT NULL UNIQUE,
-        parent    TEXT REFERENCES minds (name),
-        inherited INTEGER NOT NULL
+        parent    TEXT REFERENCES minds (name), -- whose items it shares
+        inherited INTEGER NOT NULL,             -- and how many
+        record    TEXT NOT NULL                 -- the mind's record, as JSON
     ) STRICT;
     CREATE TABLE items (
         mind TEXT NOT NULL REFERENCES minds (name),
@@ -52,10 +55,17 @@ const SCHEMA: &str = "
     ) STRICT, WITHOUT ROWID;
     CREATE INDEX summaries ON items (mind, at) WHERE kind = 'summary';
     CREATE INDEX knowing ON items (mind, at)
-        WHERE kind IN ('summary', 'attached', 'cloned', 'released', 'forked', 'parted');
+        WHERE kind IN ('summary', 'attached', 'cloned', 'released', 'forked', 'parted',
+                       'branched', 'ended');
     CREATE INDEX keys ON items (mind, key) WHERE key IS NOT NULL;
     COMMIT;
 ";
+
+/// The items of one mind's rows, `?2` to `?3`, that say what it knows of
+/// its hands, its kin and itself.
+const KNOWN: &str = "SELECT at, item FROM items WHERE mind = ?1 AND at >= ?2 AND at < ?3 \
+     AND kind IN ('summary', 'attached', 'cloned', 'released', 'forked', 'parted', \
+     'branched', 'ended') ORDER BY at";
 
 /// A [`Store`] in one `SQLite` database.
 #[derive(Debug)]
@@ -118,8 +128,8 @@ impl SqliteStore {
         Self::prepare(Connection::open_in_memory().map_err(backend)?)
     }
 
-    /// Makes the tables in a new file. A file that holds other tables is
-    /// refused: its rows are not these.
+    /// Makes the tables in a new file. A file that holds other tables, or
+    /// another mensor's, is refused: its rows are not these.
     fn prepare(connection: Connection) -> Result<Self, StoreError> {
         connection.execute_batch(SETTINGS).map_err(backend)?;
         let count = |sql: &str| -> Result<i64, StoreError> {
@@ -128,8 +138,9 @@ impl SqliteStore {
                 .map_err(backend)
         };
         let tables = count("SELECT COUNT(*) FROM sqlite_schema")?;
-        let minds = count("SELECT COUNT(*) FROM sqlite_schema WHERE name = 'minds'")?;
-        match (tables, minds) {
+        let records =
+            count("SELECT COUNT(*) FROM pragma_table_info('minds') WHERE name = 'record'")?;
+        match (tables, records) {
             (0, _) => connection.execute_batch(SCHEMA).map_err(backend)?,
             (_, 1) => {}
             _ => {
@@ -236,8 +247,9 @@ fn now() -> Result<i64, StoreError> {
     i64::try_from(now.as_millis()).map_err(backend)
 }
 
-/// A mind's parent and the number of items it shares with it.
-fn origin(connection: &Connection, name: &Name) -> Result<Origin, StoreError> {
+/// The mind whose items a mind's history starts with, and how many of
+/// them: none for a root.
+fn shares(connection: &Connection, name: &Name) -> Result<Option<(Name, u64)>, StoreError> {
     let row: Option<(Option<String>, i64)> = connection
         .query_row(
             "SELECT parent, inherited FROM minds WHERE name = ?1",
@@ -248,20 +260,29 @@ fn origin(connection: &Connection, name: &Name) -> Result<Origin, StoreError> {
         .map_err(backend)?;
     match row {
         None => Err(StoreError::Missing(name.clone())),
-        Some((None, _)) => Ok(Origin::Root),
-        Some((Some(parent), inherited)) => Ok(Origin::Fork {
-            parent: stored_name(parent)?,
-            inherited: unsigned(inherited)?,
-        }),
+        Some((None, _)) => Ok(None),
+        Some((Some(parent), inherited)) => Ok(Some((stored_name(parent)?, unsigned(inherited)?))),
     }
+}
+
+/// A mind's record, if the store holds the mind.
+fn record(connection: &Connection, name: &Name) -> Result<Option<MindRecord>, StoreError> {
+    let record: Option<String> = connection
+        .query_row(
+            "SELECT record FROM minds WHERE name = ?1",
+            params![name.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(backend)?;
+    record
+        .map(|record| serde_json::from_str(&record).map_err(backend))
+        .transpose()
 }
 
 /// How many items a mind's history holds, shared ones included.
 fn length(connection: &Connection, name: &Name) -> Result<u64, StoreError> {
-    let inherited = match origin(connection, name)? {
-        Origin::Root => 0,
-        Origin::Fork { inherited, .. } => inherited,
-    };
+    let inherited = shares(connection, name)?.map_or(0, |(_, inherited)| inherited);
     let last: Option<i64> = connection
         .query_row(
             "SELECT MAX(at) FROM items WHERE mind = ?1",
@@ -277,23 +298,32 @@ fn length(connection: &Connection, name: &Name) -> Result<u64, StoreError> {
 
 /// The lineage of a mind, youngest first: each mind in it with the indices
 /// of the history that are its own rows, from the items it inherited up to
-/// the items its fork inherited from it.
+/// the items its fork inherited from it. One lookup a generation.
 fn lineage(connection: &Connection, name: &Name) -> Result<Vec<(Name, u64, u64)>, StoreError> {
     let mut segments = Vec::new();
     let (mut mind, mut end) = (name.clone(), u64::MAX);
     loop {
-        match origin(connection, &mind)? {
-            Origin::Root => {
+        match shares(connection, &mind)? {
+            None => {
                 segments.push((mind, 0, end));
                 return Ok(segments);
             }
-            Origin::Fork { parent, inherited } => {
+            Some((parent, inherited)) => {
                 segments.push((mind, inherited.min(end), end));
                 end = end.min(inherited);
                 mind = parent;
             }
         }
     }
+}
+
+/// A lineage cut at index `before`: only the indices below it.
+fn before(lineage: Vec<(Name, u64, u64)>, before: u64) -> Vec<(Name, u64, u64)> {
+    lineage
+        .into_iter()
+        .map(|(mind, start, end)| (mind, start, end.min(before)))
+        .filter(|(_, start, end)| start < end)
+        .collect()
 }
 
 /// The last item in a lineage that `filter` holds for. `source` is `items`,
@@ -331,13 +361,7 @@ fn known(
     lineage: &[(Name, u64, u64)],
     from: u64,
 ) -> Result<Vec<(u64, Item)>, StoreError> {
-    let mut select = connection
-        .prepare_cached(
-            "SELECT at, item FROM items WHERE mind = ?1 AND at >= ?2 AND at < ?3 \
-             AND kind IN ('summary', 'attached', 'cloned', 'released', 'forked', 'parted') \
-             ORDER BY at",
-        )
-        .map_err(backend)?;
+    let mut select = connection.prepare_cached(KNOWN).map_err(backend)?;
     let mut known = Vec::new();
     for (mind, start, end) in lineage.iter().rev() {
         let start = (*start).max(from);
@@ -397,28 +421,28 @@ impl Store for SqliteStore {
         let now = now()?;
         let mut connection = self.lock();
         let transaction = connection.transaction().map_err(backend)?;
-        match origin(&transaction, &mind.name) {
-            Ok(origin) if origin == mind.origin => return Ok(()),
-            Ok(_) => return Err(StoreError::Exists(mind.name.clone())),
-            Err(StoreError::Missing(_)) => {}
-            Err(failed) => return Err(failed),
+        match record(&transaction, &mind.name)? {
+            Some(made) if made == *mind => return Ok(()),
+            Some(_) => return Err(StoreError::Exists(mind.name.clone())),
+            None => {}
         }
-        let (parent, inherited) = match &mind.origin {
-            Origin::Root => (None, 0),
-            Origin::Fork { parent, inherited } => {
-                if length(&transaction, parent)? < *inherited {
+        let (parent, inherited) = match mind.origin.shares() {
+            None => (None, 0),
+            Some((parent, inherited)) => {
+                if length(&transaction, parent)? < inherited {
                     return Err(StoreError::Short {
                         parent: parent.clone(),
-                        inherited: *inherited,
+                        inherited,
                     });
                 }
-                (Some(parent.as_str()), *inherited)
+                (Some(parent.as_str()), inherited)
             }
         };
+        let written = serde_json::to_string(mind).map_err(backend)?;
         transaction
             .execute(
-                "INSERT INTO minds (name, parent, inherited) VALUES (?1, ?2, ?3)",
-                params![mind.name.as_str(), parent, signed(inherited)?],
+                "INSERT INTO minds (name, parent, inherited, record) VALUES (?1, ?2, ?3, ?4)",
+                params![mind.name.as_str(), parent, signed(inherited)?, written],
             )
             .map_err(backend)?;
         {
@@ -481,9 +505,9 @@ impl Store for SqliteStore {
         items(&connection, &lineage(&connection, name)?, from, limit)
     }
 
-    fn last(&self, name: &Name, kind: &str) -> Result<Option<Item>, StoreError> {
+    fn last(&self, name: &Name, kind: &str, before: u64) -> Result<Option<Item>, StoreError> {
         let connection = self.reading();
-        let lineage = lineage(&connection, name)?;
+        let lineage = self::before(lineage(&connection, name)?, before);
         // A summary is found by the index of them, however long the
         // history. Any other kind is searched for from the end.
         if kind == "summary" {
@@ -517,31 +541,14 @@ impl Store for SqliteStore {
     fn minds(&self) -> Result<Vec<MindRecord>, StoreError> {
         let connection = self.reading();
         let mut select = connection
-            .prepare_cached("SELECT name, parent, inherited FROM minds ORDER BY made")
+            .prepare_cached("SELECT record FROM minds ORDER BY made")
             .map_err(backend)?;
         let rows = select
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            })
+            .query_map([], |row| row.get::<_, String>(0))
             .map_err(backend)?;
         let mut minds = Vec::new();
         for row in rows {
-            let (name, parent, inherited) = row.map_err(backend)?;
-            let origin = match parent {
-                None => Origin::Root,
-                Some(parent) => Origin::Fork {
-                    parent: stored_name(parent)?,
-                    inherited: unsigned(inherited)?,
-                },
-            };
-            minds.push(MindRecord {
-                name: stored_name(name)?,
-                origin,
-            });
+            minds.push(serde_json::from_str(&row.map_err(backend)?).map_err(backend)?);
         }
         Ok(minds)
     }
@@ -565,6 +572,8 @@ fn unsigned(index: i64) -> Result<u64, StoreError> {
 
 #[cfg(test)]
 mod tests {
+    use mensor_mind::{KNOWING, MindSettings, Origin};
+
     use super::*;
 
     fn name(s: &str) -> Name {
@@ -593,6 +602,7 @@ mod tests {
         MindRecord {
             name: name(mind),
             origin,
+            settings: MindSettings::default(),
         }
     }
 
@@ -664,6 +674,35 @@ mod tests {
         drop(old);
         let refused = SqliteStore::open(&path).unwrap_err();
         assert!(refused.to_string().contains("new file"), "{refused}");
+    }
+
+    #[test]
+    fn a_file_an_older_mensor_made_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("older.sqlite");
+        let old = Connection::open(&path).unwrap();
+        old.execute_batch(
+            "CREATE TABLE minds (made INTEGER PRIMARY KEY, name TEXT, parent TEXT, \
+             inherited INTEGER)",
+        )
+        .unwrap();
+        drop(old);
+        let refused = SqliteStore::open(&path).unwrap_err();
+        assert!(refused.to_string().contains("new file"), "{refused}");
+    }
+
+    #[test]
+    fn the_kinds_read_as_known_are_those_a_mind_knows_by() {
+        let kinds = |sql: &str| -> Vec<String> {
+            let listed = sql.split("IN (").nth(1).unwrap().split(')').next().unwrap();
+            listed
+                .split(',')
+                .map(|kind| kind.trim().trim_matches(['\'', '\\']).trim().to_owned())
+                .filter(|kind| !kind.is_empty())
+                .collect()
+        };
+        assert_eq!(kinds(SCHEMA), KNOWING);
+        assert_eq!(kinds(KNOWN), KNOWING);
     }
 
     #[test]

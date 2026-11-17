@@ -105,7 +105,7 @@ enum Part<'a> {
 // mind asks for text in words, and takes only the text of the reply.
 fn body<'a>(config: &'a Config, request: &'a ModelRequest, drop_reasoning: bool) -> Body<'a> {
     Body {
-        model: &config.model,
+        model: request.model.as_deref().unwrap_or(&config.model),
         max_tokens: config.max_tokens,
         stream: true,
         system: request
@@ -125,9 +125,10 @@ fn body<'a>(config: &'a Config, request: &'a ModelRequest, drop_reasoning: bool)
         // A history only grows, so each request extends the last one's
         // prefix.
         cache_control: json!({"type": "ephemeral"}),
-        output_config: config
+        output_config: request
             .effort
             .as_ref()
+            .or(config.effort.as_ref())
             .map(|effort| json!({"effort": effort})),
         fallbacks: config.fallbacks.then_some("default"),
         thinking: drop_reasoning.then(|| {
@@ -424,6 +425,26 @@ mod tests {
                 "fallbacks": "default",
             })
         );
+    }
+
+    #[test]
+    fn a_mind_with_a_model_of_its_own_asks_it() {
+        let mut config = config();
+        config.effort = Some("high".into());
+        config.max_tokens = 24_000;
+        let request = ModelRequest {
+            model: Some("claude-haiku-5-5".into()),
+            effort: Some("low".into()),
+            ..request()
+        };
+        let body = written(&config, &request, false);
+        assert_eq!(body["model"], json!("claude-haiku-5-5"));
+        assert_eq!(body["output_config"], json!({"effort": "low"}));
+        assert_eq!(body["max_tokens"], json!(24_000));
+        // A mind that says nothing of either asks as the host says.
+        let body = written(&config, &crate::tests::request(), false);
+        assert_eq!(body["model"], json!("claude-opus-5-5"));
+        assert_eq!(body["output_config"], json!({"effort": "high"}));
     }
 
     #[test]

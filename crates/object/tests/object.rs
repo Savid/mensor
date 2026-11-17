@@ -8,8 +8,8 @@ use std::task::{Context, Poll, Waker};
 
 use mensor_hand::{Capabilities, FileSystem, Files, FsFuture};
 use mensor_mind::{
-    Block, Content, Item, ModelError, ModelReply, ModelRequest, Outcome, Settings, State, Stop,
-    Usage,
+    Block, Content, Item, MindSettings, ModelError, ModelReply, ModelRequest, Outcome, Settings,
+    State, Stop, Usage,
 };
 use mensor_object::{MemoryStorage, Model, Object, PromptError, Work, rows, step};
 use mensor_protocol::Name;
@@ -129,7 +129,10 @@ impl Host {
             || format!("boot-{boots}"),
             capabilities.declare(),
             Settings {
-                system: Some("Be brief.".into()),
+                own: MindSettings {
+                    system: Some("Be brief.".into()),
+                    ..MindSettings::default()
+                },
                 compact_at: Some(100),
                 ..Settings::default()
             },

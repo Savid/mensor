@@ -67,8 +67,9 @@ pub enum Item {
         /// What happened.
         outcome: Outcome,
     },
-    /// A hand process the mind had not recorded said hello: a new hand, or
-    /// one that restarted.
+    /// A hand said hello as a process, or with capabilities, the mind had
+    /// not recorded: a new hand, one that restarted, or one that can now do
+    /// something else.
     Attached {
         /// The hand.
         hand: Name,
@@ -101,17 +102,38 @@ pub enum Item {
     Forked {
         /// The children, in the order of the fork's prompts.
         children: Vec<Name>,
-        /// How many more minds this mind may fork.
-        left: u64,
+        /// How many more minds this mind may fork, or none for no limit.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        left: Option<u64>,
     },
     /// This mind was forked from `parent`: the first item of its own, after
     /// the outcome of the fork that made it.
     Parted {
         /// The mind it was forked from.
         parent: Name,
-        /// How many minds it may fork.
-        left: u64,
+        /// How many minds it may fork, or none for no limit.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        left: Option<u64>,
     },
+    /// This mind was made from the first `at` items of `from`'s history:
+    /// the first item of its own after the hands it did not keep were let
+    /// go. It is no kin of `from`, and starts with no parent, no children
+    /// and a fork budget of its own.
+    Branched {
+        /// The mind whose items it shares.
+        from: Name,
+        /// How many of them.
+        at: u64,
+        /// How many minds it may fork, or none for no limit.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        left: Option<u64>,
+        /// The highest id of a call `from` had made when this mind was
+        /// made. This mind's own calls are numbered above it.
+        last_call: CallId,
+    },
+    /// The mind ended: it let every hand go, asks its model no more, and
+    /// takes no prompt. Its history stays, for the minds that share it.
+    Ended,
     /// The mind stopped without asking its model, and waits for a prompt.
     Paused {
         /// Why.
@@ -143,8 +165,9 @@ pub enum Item {
         hands: BTreeMap<Name, HandRecord>,
         /// The id of the last call the history holds, or 0.
         last_call: CallId,
-        /// How many more minds the mind may fork.
-        forks_left: u64,
+        /// How many more minds the mind may fork, or none for no limit.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        forks_left: Option<u64>,
         /// The mind this one was forked from.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent: Option<Name>,
@@ -184,6 +207,8 @@ impl Item {
             Self::Released { .. } => "released",
             Self::Forked { .. } => "forked",
             Self::Parted { .. } => "parted",
+            Self::Branched { .. } => "branched",
+            Self::Ended => "ended",
             Self::Paused { .. } => "paused",
             Self::Failed { .. } => "failed",
             Self::Summary { .. } => "summary",
@@ -359,7 +384,7 @@ mod tests {
                         },
                     )]),
                     last_call: 3,
-                    forks_left: 20,
+                    forks_left: Some(20),
                     parent: Some(Name::new("m").unwrap()),
                     children: vec![Name::new("m.d3342iuj").unwrap()],
                 },
@@ -377,17 +402,49 @@ mod tests {
             (
                 Item::Forked {
                     children: vec![Name::new("m.d3342iuj").unwrap()],
-                    left: 31,
+                    left: Some(31),
                 },
                 json!({"type": "forked", "children": ["m.d3342iuj"], "left": 31}),
             ),
             (
                 Item::Parted {
                     parent: Name::new("m").unwrap(),
-                    left: 31,
+                    left: Some(31),
                 },
                 json!({"type": "parted", "parent": "m", "left": 31}),
             ),
+            // A mind with no limit to its forks says nothing of one.
+            (
+                Item::Parted {
+                    parent: Name::new("m").unwrap(),
+                    left: None,
+                },
+                json!({"type": "parted", "parent": "m"}),
+            ),
+            (
+                Item::Summary {
+                    text: "So far.".into(),
+                    usage: Usage::default(),
+                    from: 0,
+                    hands: BTreeMap::new(),
+                    last_call: 0,
+                    forks_left: None,
+                    parent: None,
+                    children: Vec::new(),
+                },
+                json!({"type": "summary", "text": "So far.", "usage": {"input": 0, "output": 0},
+                       "from": 0, "lastCall": 0}),
+            ),
+            (
+                Item::Branched {
+                    from: Name::new("k").unwrap(),
+                    at: 40,
+                    left: Some(64),
+                    last_call: 17,
+                },
+                json!({"type": "branched", "from": "k", "at": 40, "left": 64, "lastCall": 17}),
+            ),
+            (Item::Ended, json!({"type": "ended"})),
         ];
         round_trip(cases);
     }

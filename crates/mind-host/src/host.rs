@@ -5,9 +5,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use mensor_api::{MindStatus, PAGE, Prompted, Token};
+use mensor_api::{Made, MindStatus, PAGE, Prompted, Token};
 use mensor_mind::{
-    Conflict, Item, Mind, MindRecord, NoHand, Origin, Report, Settings, State, Store, StoreError,
+    Conflict, Item, MadeFrom, Mind, MindRecord, MindSettings, NoHand, Origin, Report, Settings,
+    Store, StoreError, Unbranched,
 };
 use mensor_protocol::{FromHand, Hello, InvalidName, Name, Refusal};
 use tokio::net::TcpListener;
@@ -25,8 +26,12 @@ pub struct Config {
     /// only requests from its own machine.
     pub token: Option<Token>,
     /// What every mind is told when it is made: its hands and forks
-    /// included.
+    /// included. A mind made with settings of its own takes those over
+    /// these.
     pub mind: Settings,
+    /// The models a mind may be made with beside the host's own, which it
+    /// may always be. One made with none asks the host's.
+    pub models: Vec<String>,
     /// How long a new connection has to say hello.
     pub hello_timeout: Duration,
     /// How long a connection may stay silent before it is dropped. A hand
@@ -43,6 +48,7 @@ impl Default for Config {
         Self {
             token: None,
             mind: Settings::default(),
+            models: Vec::new(),
             hello_timeout: Duration::from_secs(10),
             idle_timeout: Duration::from_mins(1),
             rest_after: Duration::from_mins(1),
@@ -93,9 +99,37 @@ pub enum HostError {
     /// No mind has this name.
     #[error("no mind is named {0}")]
     Missing(Name),
-    /// The prompt's key is already used by another prompt.
+    /// The prompt's key is already used by another prompt, or the mind has
+    /// ended.
     #[error(transparent)]
     Conflict(#[from] Conflict),
+    /// A mind of this name was made otherwise.
+    #[error("a mind named {0} was made otherwise: with another origin or other settings")]
+    Exists(Name),
+    /// A mind is made with a root name.
+    #[error(
+        "{0} is no root's name: a mind is made with one that holds no '.', of 55 bytes at most"
+    )]
+    NotRoot(Name),
+    /// The host does not offer the model asked for.
+    #[error("this host does not offer the model {asked}: it offers {}", .offered.join(", "))]
+    Model {
+        /// The model asked for.
+        asked: String,
+        /// Those it offers.
+        offered: Vec<String>,
+    },
+    /// The host's model's API does not take the effort asked for.
+    #[error("{}", effort_refused(.asked, .taken.as_deref()))]
+    Effort {
+        /// The effort asked for.
+        asked: String,
+        /// Those the API takes, or none when it takes any that is not empty.
+        taken: Option<String>,
+    },
+    /// A mind cannot be made from those items of the history named.
+    #[error(transparent)]
+    Unbranched(#[from] Unbranched),
     /// The mind has no such hand to release.
     #[error(transparent)]
     NoHand(#[from] NoHand),
@@ -108,6 +142,17 @@ pub enum HostError {
     /// The name asked for is not one a mind can have.
     #[error(transparent)]
     Name(#[from] InvalidName),
+}
+
+/// Why an effort is refused, for a person.
+fn effort_refused(asked: &str, taken: Option<&str>) -> String {
+    match (asked, taken) {
+        ("", _) => "an effort is not empty".into(),
+        (asked, Some(taken)) => {
+            format!("this host's model does not take the effort {asked}: it takes {taken}")
+        }
+        (asked, None) => format!("this host's model does not take the effort {asked}"),
+    }
 }
 
 /// Why a hand was not connected.
@@ -220,7 +265,7 @@ impl Host {
                 let working = names.into_iter().filter(|name| match store.recent(name) {
                     Ok(latest) => {
                         let status = Mind::status(name.clone(), latest);
-                        status.state != State::Idle && status.waiting.is_empty()
+                        !status.state.rests() && status.waiting.is_empty()
                     }
                     Err(error) => {
                         tracing::warn!(mind = %name, %error, "a mind's history could not be read");
@@ -521,8 +566,130 @@ impl Host {
     fn wake(&self, slot: &mut Slot) -> mpsc::UnboundedSender<Command> {
         let awake = slot
             .awake
-            .get_or_insert_with(|| task::spawn(&slot.record.name, &self.inner));
+            .get_or_insert_with(|| task::spawn(&slot.record, &self.inner));
         awake.clone()
+    }
+
+    /// Makes a mind named `name`, a root, with `settings` of its own, and
+    /// from the first items of another's history if `from` says so. A mind
+    /// made so before is the one made, if it was made the same way: else
+    /// it is refused. Its settings are fixed from then on.
+    ///
+    /// A mind made from another shares its first `at` items, and keeps its
+    /// hand `hand`, which says hello as it again: see [`Mind::branch`].
+    /// Each setting it is not given is that mind's.
+    pub async fn make(
+        &self,
+        name: &Name,
+        settings: MindSettings,
+        from: Option<MadeFrom>,
+    ) -> Result<Made, HostError> {
+        if !name.is_root() {
+            return Err(HostError::NotRoot(name.clone()));
+        }
+        self.offers(&settings)?;
+        let mut minds = self.inner.minds.lock().await;
+        let record = match &from {
+            None => MindRecord {
+                name: name.clone(),
+                origin: Origin::Root,
+                settings,
+            },
+            Some(from) => {
+                let keeper = minds.get(&from.mind);
+                let keeper = keeper.ok_or_else(|| HostError::Missing(from.mind.clone()))?;
+                MindRecord {
+                    name: name.clone(),
+                    origin: Origin::From { from: from.clone() },
+                    settings: settings.or(&keeper.record.settings),
+                }
+            }
+        };
+        if let Some(made) = minds.get(name) {
+            return if made.record == record {
+                Ok(Made::Existing)
+            } else {
+                Err(HostError::Exists(name.clone()))
+            };
+        }
+        let items = match from {
+            None => Vec::new(),
+            Some(from) => {
+                // Its calls are numbered above every one its keeper made, so
+                // a hand restored from later than `at` reads them as new.
+                let (store, of, at) = (Arc::clone(&self.inner.store), from.mind.clone(), from.at);
+                let (tail, last) = blocking(move || {
+                    let last = match store.last(&of, "call", u64::MAX)? {
+                        Some(Item::Call { id, .. }) => id,
+                        _ => 0,
+                    };
+                    Ok((store.tail_at(&of, at)?, last))
+                })
+                .await
+                .map_err(HostError::Store)?;
+                Mind::branch(&from, tail, last, &self.inner.config.mind)?
+            }
+        };
+        let (store, made) = (Arc::clone(&self.inner.store), record.clone());
+        blocking(move || store.create(&made, &items))
+            .await
+            .map_err(|error| match error {
+                StoreError::Exists(name) => HostError::Exists(name),
+                StoreError::Missing(name) => HostError::Missing(name),
+                other => HostError::Store(other),
+            })?;
+        tracing::info!(mind = %name, origin = ?record.origin, "a mind was made");
+        minds.insert(
+            name.clone(),
+            Slot {
+                record,
+                awake: None,
+            },
+        );
+        Ok(Made::Made)
+    }
+
+    /// Refuses settings the host cannot ask with: a model it does not
+    /// offer, or an effort its model's API does not take.
+    fn offers(&self, settings: &MindSettings) -> Result<(), HostError> {
+        let model = &self.inner.model;
+        if let Some(asked) = &settings.model {
+            let mut offered = vec![model.name().to_owned()];
+            offered.extend(self.inner.config.models.iter().cloned());
+            if !offered.contains(asked) {
+                return Err(HostError::Model {
+                    asked: asked.clone(),
+                    offered,
+                });
+            }
+        }
+        if let Some(effort) = &settings.effort {
+            let taken = model.efforts();
+            let known = taken.is_none_or(|taken| taken.contains(&effort.as_str()));
+            if effort.is_empty() || !known {
+                return Err(HostError::Effort {
+                    asked: effort.clone(),
+                    taken: taken.map(|taken| taken.join(", ")),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Ends a mind: its turn stops, every hand is let go, and from then on
+    /// it asks its model nothing and takes no prompt. Its history stays,
+    /// and so do the minds that share it. Ending one that has ended does
+    /// nothing.
+    pub async fn end(&self, name: &Name) -> Result<MindStatus, HostError> {
+        let commands = self.reach(name).await?;
+        let (reply, answer) = oneshot::channel();
+        let stopped = || HostError::Stopped(name.clone());
+        commands
+            .send(Command::End { reply })
+            .map_err(|_| stopped())?;
+        drop(commands);
+        answer.await.map_err(|_| stopped())?;
+        self.mind(name).await
     }
 
     /// Connects a hand that has said `hello`, over whatever carries it.
@@ -551,10 +718,7 @@ impl Host {
                 return Err(Rejected::Refused(refusal));
             }
             Entry::Vacant(new) => {
-                let record = MindRecord {
-                    name: mind.clone(),
-                    origin: Origin::Root,
-                };
+                let record = MindRecord::root(mind.clone());
                 let (store, made) = (Arc::clone(&self.inner.store), record.clone());
                 blocking(move || store.create(&made, &[]))
                     .await
@@ -608,6 +772,63 @@ mod tests {
         // tungstenite logs a hand's handshake there, `Authorization`
         // included.
         assert_eq!(log::STATIC_MAX_LEVEL, log::LevelFilter::Off);
+    }
+
+    /// A model behind Claude's Messages API, which is never asked here.
+    struct Claude;
+
+    impl Model for Claude {
+        fn call(&self, _: mensor_mind::ModelRequest, _: crate::Wrote) -> crate::ModelFuture<'_> {
+            Box::pin(async { Err(crate::ModelError("never asked".into())) })
+        }
+
+        fn name(&self) -> &'static str {
+            "claude-opus-5-5"
+        }
+
+        fn efforts(&self) -> Option<&'static [&'static str]> {
+            mensor_model::Api::Messages.efforts()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_mind_is_made_only_with_a_model_and_effort_its_host_offers() {
+        let store = Arc::new(mensor_mind::MemoryStore::new());
+        let config = Config {
+            models: vec!["claude-haiku-5-5".into()],
+            ..Config::default()
+        };
+        let host = Host::open(store, Arc::new(Claude), config).await.unwrap();
+        let name = |name: &str| Name::new(name).unwrap();
+        let with = |model: &str, effort: &str| MindSettings {
+            model: Some(model.into()),
+            effort: Some(effort.into()),
+            system: None,
+        };
+        // Its own model, which it need not list, and one it lists.
+        let made = host
+            .make(&name("a"), with("claude-opus-5-5", "xhigh"), None)
+            .await;
+        assert!(made.is_ok(), "{made:?}");
+        let made = host
+            .make(&name("b"), with("claude-haiku-5-5", "low"), None)
+            .await;
+        assert!(made.is_ok(), "{made:?}");
+        let refused = host.make(&name("c"), with("gpt-9", "low"), None).await;
+        assert!(
+            matches!(refused, Err(HostError::Model { .. })),
+            "{refused:?}"
+        );
+        for effort in ["turbo", ""] {
+            let refused = host
+                .make(&name("d"), with("claude-opus-5-5", effort), None)
+                .await;
+            assert!(
+                matches!(refused, Err(HostError::Effort { .. })),
+                "{refused:?}"
+            );
+        }
+        assert!(host.mind(&name("d")).await.is_err());
     }
 
     #[test]

@@ -11,7 +11,7 @@
 pub mod access;
 
 pub use access::{Access, NotRoot, Token, authorized, local, mind_token};
-use mensor_mind::{Item, MindRecord, State};
+use mensor_mind::{Item, MadeFrom, MindRecord, MindSettings, State};
 use mensor_protocol::Name;
 use serde::{Deserialize, Serialize};
 
@@ -39,6 +39,7 @@ impl Problem {
 
 /// The body of `POST /v1/minds/{name}/prompt`.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PromptBody {
     /// The caller's key. A prompt under a key the history already holds is
     /// that prompt, not a new one.
@@ -75,10 +76,63 @@ pub struct PromptReply {
     pub status: Prompted,
 }
 
+/// The body of `PUT /v1/minds/{name}`, which makes a mind: its settings,
+/// each the host's when left out, and the history it starts from.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MakeBody {
+    /// The model it asks: one the host offers.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// How hard that model works, in its API's words.
+    #[serde(default)]
+    pub effort: Option<String>,
+    /// The system prompt it gives its model.
+    #[serde(default)]
+    pub system: Option<String>,
+    /// Another mind's history to start from: the first `at` items of
+    /// `mind`'s, keeping its hand `hand`. Without it, the mind starts from
+    /// nothing. Each setting the body leaves out is then that mind's.
+    #[serde(default)]
+    pub from: Option<MadeFrom>,
+}
+
+impl MakeBody {
+    /// The settings it names.
+    pub fn settings(&self) -> MindSettings {
+        MindSettings {
+            model: self.model.clone(),
+            effort: self.effort.clone(),
+            system: self.system.clone(),
+        }
+    }
+}
+
+/// What became of a mind asked to be made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Made {
+    /// It is made.
+    Made,
+    /// It was made before, the same way.
+    Existing,
+}
+
+impl Made {
+    /// The HTTP status the answer is sent with.
+    pub const fn status(self) -> u16 {
+        match self {
+            Self::Made => 201,
+            Self::Existing => 200,
+        }
+    }
+}
+
 /// A mind and what it is doing: the answer to `GET /v1/minds/{name}`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct MindStatus {
-    /// The mind and where its history begins.
+    /// The mind, where its history begins, and the settings it was made
+    /// with.
     #[serde(flatten)]
     pub mind: MindRecord,
     /// What it is doing.
@@ -95,6 +149,7 @@ pub struct MindStatus {
 
 /// The body of `POST /v1/minds/{name}/release`.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReleaseBody {
     /// The hand to let go.
     pub hand: Name,
@@ -154,10 +209,7 @@ mod tests {
     #[test]
     fn answers_are_written_as_a_client_reads_them() {
         let status = MindStatus {
-            mind: MindRecord {
-                name: Name::new("m").unwrap(),
-                origin: Origin::Root,
-            },
+            mind: MindRecord::root(Name::new("m").unwrap()),
             state: State::Working,
             hands: vec![Name::new("a1").unwrap()],
             waiting: vec![Name::new("b2").unwrap()],
@@ -208,11 +260,69 @@ mod tests {
     }
 
     #[test]
+    fn a_mind_is_made_with_settings_and_maybe_from_another() {
+        let body: MakeBody = serde_json::from_value(json!({
+            "model": "claude-haiku-5-5", "system": "Play.",
+            "from": {"mind": "k", "at": 41, "hand": "vm"},
+        }))
+        .unwrap();
+        assert_eq!(body.settings().model.as_deref(), Some("claude-haiku-5-5"));
+        assert_eq!(body.settings().effort, None);
+        let from = body.from.unwrap();
+        assert_eq!(
+            (from.mind.as_str(), from.at, from.hand.as_str()),
+            ("k", 41, "vm")
+        );
+        let plain: MakeBody = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(plain.settings(), MindSettings::default());
+        // A word misspelt is refused, not left out.
+        assert!(serde_json::from_value::<MakeBody>(json!({"modle": "x"})).is_err());
+        assert!(
+            serde_json::from_value::<MakeBody>(json!({"from": {"mind": "k", "at": 1}})).is_err()
+        );
+        assert_eq!((Made::Made.status(), Made::Existing.status()), (201, 200));
+
+        let made = MindStatus {
+            mind: MindRecord {
+                name: Name::new("r2").unwrap(),
+                origin: Origin::From {
+                    from: MadeFrom {
+                        mind: Name::new("k").unwrap(),
+                        at: 41,
+                        hand: Name::new("vm").unwrap(),
+                    },
+                },
+                settings: MindSettings {
+                    model: Some("claude-haiku-5-5".into()),
+                    ..MindSettings::default()
+                },
+            },
+            state: State::Ended,
+            hands: Vec::new(),
+            waiting: Vec::new(),
+            watching: Vec::new(),
+            length: 44,
+        };
+        assert_eq!(
+            serde_json::to_value(made).unwrap(),
+            json!({"name": "r2", "origin": "from", "from": {"mind": "k", "at": 41, "hand": "vm"},
+                   "model": "claude-haiku-5-5", "state": "ended", "hands": [], "waiting": [],
+                   "watching": [], "length": 44})
+        );
+    }
+
+    #[test]
     fn a_prompt_may_carry_a_key() {
         let keyed: PromptBody = serde_json::from_value(json!({"key": "k", "text": "hi"})).unwrap();
         assert_eq!(keyed.key.as_deref(), Some("k"));
         let plain: PromptBody = serde_json::from_value(json!({"text": "hi"})).unwrap();
         assert_eq!(plain.key, None);
         assert!(serde_json::from_value::<PromptBody>(json!({"key": "k"})).is_err());
+        let misspelt = json!({"text": "hi", "kye": "k"});
+        assert!(serde_json::from_value::<PromptBody>(misspelt).is_err());
+        let released: ReleaseBody = serde_json::from_value(json!({"hand": "a1"})).unwrap();
+        assert_eq!(released.hand.as_str(), "a1");
+        let misspelt = json!({"hand": "a1", "why": "done"});
+        assert!(serde_json::from_value::<ReleaseBody>(misspelt).is_err());
     }
 }

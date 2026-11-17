@@ -28,7 +28,7 @@ mod worker;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use mensor_mind::{Item, Latest, MindRecord, Origin, Store, StoreError};
+use mensor_mind::{Item, Latest, MindRecord, Store, StoreError};
 use mensor_protocol::Name;
 
 use crate::connect::Target;
@@ -39,8 +39,9 @@ const SCHEMA: &str = "
     CREATE TABLE minds (
         made      bigint GENERATED ALWAYS AS IDENTITY,
         name      text PRIMARY KEY,
-        parent    text REFERENCES minds (name),
-        inherited bigint NOT NULL
+        parent    text REFERENCES minds (name), -- whose items it shares
+        inherited bigint NOT NULL,             -- and how many
+        record    json NOT NULL                -- the mind's record
     );
     CREATE TABLE items (
         mind text        NOT NULL REFERENCES minds (name),
@@ -53,7 +54,8 @@ const SCHEMA: &str = "
     );
     CREATE INDEX summaries ON items (mind, at) WHERE kind = 'summary';
     CREATE INDEX knowing ON items (mind, at)
-        WHERE kind IN ('summary', 'attached', 'cloned', 'released', 'forked', 'parted');
+        WHERE kind IN ('summary', 'attached', 'cloned', 'released', 'forked', 'parted',
+                       'branched', 'ended');
     CREATE INDEX keys ON items (mind, key) WHERE key IS NOT NULL;
     CREATE TABLE hold (
         taken bigint NOT NULL -- one more each time a host takes the schema
@@ -112,18 +114,22 @@ const KEYED: &str = lineage_rows!(
 const KNOWN: &str = lineage_rows!(
     "items.at, items.item::text",
     "items.at >= $4 \
-     AND items.kind IN ('summary', 'attached', 'cloned', 'released', 'forked', 'parted') \
-     ORDER BY items.at"
+     AND items.kind IN ('summary', 'attached', 'cloned', 'released', 'forked', 'parted', \
+     'branched', 'ended') ORDER BY items.at"
 );
 
-const MINDS: &str = "SELECT name, parent, inherited FROM minds ORDER BY made";
-const ORIGIN: &str = "SELECT parent, inherited FROM minds WHERE name = $1";
+const MINDS: &str = "SELECT record::text FROM minds ORDER BY made";
+const RECORD: &str = "SELECT record::text FROM minds WHERE name = $1";
+/// Whether the minds in the schema have records: an older mensor's had none.
+const RECORDS: &str = "SELECT count(*) FROM information_schema.columns \
+     WHERE table_schema = current_schema() AND table_name = 'minds' AND column_name = 'record'";
 /// How long each of the minds `$1` is: each one's name, the items it
 /// shares, and the index of its last own item.
 const LENGTHS: &str = "SELECT minds.name, minds.inherited, \
      (SELECT max(at) FROM items WHERE items.mind = minds.name) \
      FROM minds WHERE minds.name = ANY($1)";
-const INSERT_MIND: &str = "INSERT INTO minds (name, parent, inherited) VALUES ($1, $2, $3)";
+const INSERT_MIND: &str =
+    "INSERT INTO minds (name, parent, inherited, record) VALUES ($1, $2, $3, $4::text::json)";
 const INSERT_ITEMS: &str = "INSERT INTO items (mind, at, kind, key, item) \
      SELECT mind, at, kind, key, item::json \
      FROM unnest($1::text[], $2::bigint[], $3::text[], $4::bytea[], $5::text[]) \
@@ -164,9 +170,9 @@ impl PostgresStore {
 }
 
 /// Makes the tables in a schema with none, and takes the schema. A schema
-/// that holds other tables is refused: its rows are not these. So is a
-/// database whose encoding is not UTF-8: one item it cannot hold would fail
-/// every append committed with it.
+/// that holds other tables, or another mensor's, is refused: its rows are
+/// not these. So is a database whose encoding is not UTF-8: one item it
+/// cannot hold would fail every append committed with it.
 fn prepare(session: &mut Session) -> Result<(), StoreError> {
     let encoding: String = session
         .with(|client| client.query_one("SHOW server_encoding", &[]))?
@@ -190,12 +196,17 @@ fn prepare(session: &mut Session) -> Result<(), StoreError> {
             transaction.batch_execute(SCHEMA)?;
             transaction.commit()
         })?;
-    } else if sorted != ours {
-        return Err(StoreError::Backend(
-            "the Postgres schema holds tables this store does not: give it a database, or a \
-             schema, of its own"
-                .into(),
-        ));
+    } else {
+        let records: i64 = session
+            .with(|client| client.query_one(RECORDS, &[]))?
+            .get(0);
+        if sorted != ours || records != 1 {
+            return Err(StoreError::Backend(
+                "the Postgres schema holds tables this store does not: give it a database, or a \
+                 schema, of its own"
+                    .into(),
+            ));
+        }
     }
     session.take()
 }
@@ -290,33 +301,34 @@ impl<'a> Rows<'a> {
 }
 
 /// Starts a mind's history, in one transaction. Run again after it was
-/// stored, it finds the mind made, with the same origin: so it may be.
+/// stored, it finds the mind made, with the same record: so it may be.
 fn create(session: &mut Session, mind: &MindRecord, own: &[Row]) -> Result<(), StoreError> {
-    let origin = session.statement(ORIGIN)?;
+    let record = session.statement(RECORD)?;
     let lengths = session.statement(LENGTHS)?;
     let insert_mind = session.statement(INSERT_MIND)?;
     let insert = session.statement(INSERT_ITEMS)?;
+    let written = serde_json::to_string(mind).map_err(backend)?;
     session.with(|client| {
         let mut transaction = client.transaction()?;
-        let found = transaction.query_opt(&origin, &[&mind.name.as_str()])?;
+        let found = transaction.query_opt(&record, &[&mind.name.as_str()])?;
         if let Some(found) = found {
-            let found = stored_origin(found.get(0), found.get(1));
+            let found: Result<MindRecord, _> = serde_json::from_str(found.get(0));
             return Ok(match found {
-                Ok(found) if found == mind.origin => Ok(()),
+                Ok(found) if found == *mind => Ok(()),
                 Ok(_) => Err(StoreError::Exists(mind.name.clone())),
-                Err(error) => Err(error),
+                Err(error) => Err(backend(error)),
             });
         }
-        let (parent, inherited) = match &mind.origin {
-            Origin::Root => (None, 0),
-            Origin::Fork { parent, inherited } => {
+        let (parent, inherited) = match mind.origin.shares() {
+            None => (None, 0),
+            Some((parent, inherited)) => {
                 let length = transaction.query_opt(&lengths, &[&vec![parent.as_str()]])?;
                 let Some(length) = length else {
                     return Ok(Err(StoreError::Missing(parent.clone())));
                 };
                 let last: Option<i64> = length.get(2);
                 let length = last.map_or_else(|| length.get::<_, i64>(1), |last| last + 1);
-                let inherited = i64::try_from(*inherited).unwrap_or(i64::MAX);
+                let inherited = i64::try_from(inherited).unwrap_or(i64::MAX);
                 if length < inherited {
                     return Ok(Err(StoreError::Short {
                         parent: parent.clone(),
@@ -326,7 +338,9 @@ fn create(session: &mut Session, mind: &MindRecord, own: &[Row]) -> Result<(), S
                 (Some(parent.as_str()), inherited)
             }
         };
-        transaction.execute(&insert_mind, &[&mind.name.as_str(), &parent, &inherited])?;
+        let row: [&(dyn postgres::types::ToSql + Sync); 4] =
+            [&mind.name.as_str(), &parent, &inherited, &written];
+        transaction.execute(&insert_mind, &row)?;
         let mut rows = Rows::default();
         for (at, row) in (inherited..).zip(own) {
             rows.push(mind.name.as_str(), at, row);
@@ -371,6 +385,15 @@ impl Lineage {
             }
         }
         Ok(lineage)
+    }
+
+    /// The lineage cut at index `before`: only the indices below it.
+    fn before(mut self, before: u64) -> Self {
+        let before = saturated(before);
+        for high in &mut self.highs {
+            *high = (*high).min(before);
+        }
+        self
     }
 
     /// The items of the lineage that `sql` selects, with `then` as its
@@ -446,10 +469,10 @@ impl Store for PostgresStore {
             .run(move |session| Lineage::of(session, &name)?.read(session, from, limit))
     }
 
-    fn last(&self, name: &Name, kind: &str) -> Result<Option<Item>, StoreError> {
+    fn last(&self, name: &Name, kind: &str, before: u64) -> Result<Option<Item>, StoreError> {
         let (name, kind) = (name.clone(), kind.to_owned());
         self.reader.run(move |session| {
-            let lineage = Lineage::of(session, &name)?;
+            let lineage = Lineage::of(session, &name)?.before(before);
             if kind == "summary" {
                 return lineage.last(session, LAST_SUMMARY, &[]);
             }
@@ -509,12 +532,7 @@ impl Store for PostgresStore {
             let statement = session.statement(MINDS)?;
             let rows = session.with(|client| client.query(&statement, &[]))?;
             rows.iter()
-                .map(|row| {
-                    Ok(MindRecord {
-                        name: stored_name(row.get(0))?,
-                        origin: stored_origin(row.get(1), row.get(2))?,
-                    })
-                })
+                .map(|row| serde_json::from_str(row.get(0)).map_err(backend))
                 .collect()
         })
     }
@@ -538,20 +556,6 @@ fn parse(item: &str) -> Result<Item, StoreError> {
     serde_json::from_str(item).map_err(backend)
 }
 
-fn stored_origin(parent: Option<String>, inherited: i64) -> Result<Origin, StoreError> {
-    Ok(match parent {
-        None => Origin::Root,
-        Some(parent) => Origin::Fork {
-            parent: stored_name(parent)?,
-            inherited: unsigned(inherited),
-        },
-    })
-}
-
-fn stored_name(name: String) -> Result<Name, StoreError> {
-    Name::new(name).map_err(backend)
-}
-
 /// An index as Postgres holds it: one past `i64::MAX` is past every row.
 fn saturated(index: u64) -> i64 {
     i64::try_from(index).unwrap_or(i64::MAX)
@@ -572,8 +576,8 @@ mod tests {
     fn kinds(sql: &str) -> Vec<&str> {
         let listed = sql.split("IN (").nth(1).unwrap().split(')').next().unwrap();
         listed
-            .split(", ")
-            .map(|kind| kind.trim_matches('\''))
+            .split(',')
+            .map(|kind| kind.trim().trim_matches('\''))
             .collect()
     }
 

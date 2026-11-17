@@ -47,11 +47,15 @@ pub(crate) fn child_name(parent: &Name, call: CallId, index: usize) -> Option<Na
 /// How a mind with `left` forks shares what remains after it forks
 /// `children`: each child's share, and its own. What remains is split
 /// evenly between the mind and its children, the mind keeping what does not
-/// divide. `children` is at most `left`.
-pub(crate) fn shares(left: u64, children: u64) -> (u64, u64) {
+/// divide. `children` is at most `left`. A mind with no limit gives its
+/// children none either: nothing is split.
+pub(crate) fn shares(left: Option<u64>, children: u64) -> (Option<u64>, Option<u64>) {
+    let Some(left) = left else {
+        return (None, None);
+    };
     let remains = left.saturating_sub(children);
     let share = remains / (children + 1);
-    (share, remains - share * children)
+    (Some(share), Some(remains - share * children))
 }
 
 #[cfg(test)]
@@ -84,9 +88,20 @@ mod tests {
 
     #[test]
     fn what_remains_of_a_budget_is_split_evenly() {
-        assert_eq!(shares(64, 2), (20, 22));
-        assert_eq!(shares(64, 1), (31, 32));
-        assert_eq!(shares(3, 3), (0, 0));
-        assert_eq!(shares(10, 8), (0, 2));
+        assert_eq!(shares(Some(64), 2), (Some(20), Some(22)));
+        assert_eq!(shares(Some(64), 1), (Some(31), Some(32)));
+        assert_eq!(shares(Some(3), 3), (Some(0), Some(0)));
+        assert_eq!(shares(Some(10), 8), (Some(0), Some(2)));
+    }
+
+    #[test]
+    fn no_limit_is_never_split() {
+        assert_eq!(shares(None, 8), (None, None));
+        // However many generations take over from the one before.
+        let mut left = None;
+        for _ in 0..100 {
+            left = shares(left, 8).0;
+        }
+        assert_eq!(left, None);
     }
 }

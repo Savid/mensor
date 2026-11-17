@@ -1,9 +1,9 @@
 //! What a mind does, driven the way a host drives it.
 
 use mensor_mind::{
-    Block, CLONE, Conflict, Content, Fork, HandRecord, Item, MemoryStore, Message, Mind,
-    MindRecord, ModelReply, ModelRequest, Origin, Outcome, Output, Report, Role, Settings, State,
-    Status, Stop, Store, Usage, tail_from,
+    Block, CLONE, Conflict, Content, Fork, HandRecord, Item, MadeFrom, MemoryStore, Message, Mind,
+    MindRecord, MindSettings, MindTool, ModelReply, ModelRequest, Outcome, Output, Report, Role,
+    Settings, State, Status, Stop, Store, Unbranched, Untold, Usage, tail_from,
 };
 use mensor_protocol::{
     Call, CallId, CallResult, CapabilityDecl, FromMind, Hello, Name, OperationDecl, Refusal, Reply,
@@ -413,7 +413,7 @@ fn a_prompt_under_a_key_is_stored_once() {
     assert!(again.existing && again.outputs.is_empty());
     assert_eq!(
         keyed(&mut host.mind, "other"),
-        Err(Conflict { key: "k1".into() })
+        Err(Conflict::Key { key: "k1".into() })
     );
     assert_eq!(
         host.stored
@@ -857,7 +857,7 @@ fn a_conversation_that_grew_too_long_is_summed_up_mid_turn() {
             )]
             .into(),
             last_call: 1,
-            forks_left: 64,
+            forks_left: Some(64),
             parent: None,
             children: Vec::new(),
         })
@@ -1117,7 +1117,7 @@ fn a_key_from_before_the_items_a_mind_holds_is_one_its_host_looks_up() {
     assert_eq!(
         host.mind
             .prompt(Some("k1".into()), "other".into(), None, found),
-        Err(Conflict { key: "k1".into() })
+        Err(Conflict::Key { key: "k1".into() })
     );
 }
 
@@ -1671,7 +1671,7 @@ fn a_fork_makes_its_children_before_it_is_stored() {
     assert!(matches!(&outputs[2], Output::Append(Item::Outcome { .. })));
     assert!(matches!(
         &outputs[3],
-        Output::Append(Item::Forked { left: 22, .. })
+        Output::Append(Item::Forked { left: Some(22), .. })
     ));
     assert!(matches!(
         &outputs[4],
@@ -1704,7 +1704,7 @@ fn a_fork_makes_its_children_before_it_is_stored() {
             },
             Item::Parted {
                 parent: name("m"),
-                left: 20
+                left: Some(20)
             },
             Item::Prompt {
                 key: None,
@@ -1717,7 +1717,7 @@ fn a_fork_makes_its_children_before_it_is_stored() {
         host.stored.last(),
         Some(&Item::Forked {
             children: children.clone(),
-            left: 22
+            left: Some(22)
         })
     );
     assert!(
@@ -1811,7 +1811,7 @@ fn a_clone_that_fails_makes_no_child() {
 #[test]
 fn a_mind_forks_no_more_than_its_budget_allows() {
     let mut host = Host::with(Settings {
-        max_forks: 1,
+        max_forks: Some(1),
         ..Settings::default()
     });
     host.attach(&cloning("a1", "boot-a"));
@@ -1827,12 +1827,12 @@ fn a_mind_forks_no_more_than_its_budget_allows() {
         host.forks[0].items[1],
         Item::Parted {
             parent: name("m"),
-            left: 0
+            left: Some(0)
         }
     );
     assert!(matches!(
         host.stored.last(),
-        Some(Item::Forked { left: 0, .. })
+        Some(Item::Forked { left: Some(0), .. })
     ));
 }
 
@@ -1996,18 +1996,15 @@ fn a_fork_whose_clone_may_have_run_names_its_children_and_spends_their_share() {
         panic!("not unknown");
     };
     assert!(why.contains("child minds m."), "{why}");
-    assert!(
-        again
-            .stored
-            .iter()
-            .any(|item| matches!(item, Item::Forked { children, left: 22 } if children.len() == 2))
-    );
+    assert!(again.stored.iter().any(
+        |item| matches!(item, Item::Forked { children, left: Some(22) } if children.len() == 2)
+    ));
 }
 
 #[test]
 fn a_mind_loaded_after_a_fork_knows_its_budget() {
     let settings = Settings {
-        max_forks: 3,
+        max_forks: Some(3),
         ..Settings::default()
     };
     let mut host = Host::with(settings.clone());
@@ -2313,11 +2310,7 @@ fn a_name_two_hands_now_know_by_other_tools_names_them() {
 /// it of a mind that rests: from what a store gives as its recent items.
 fn told_from_store(stored: &[Item]) -> Status {
     let store = MemoryStore::new();
-    let record = MindRecord {
-        name: name("m"),
-        origin: Origin::Root,
-    };
-    store.create(&record, stored).unwrap();
+    store.create(&MindRecord::root(name("m")), stored).unwrap();
     Mind::status(name("m"), store.recent(&name("m")).unwrap())
 }
 
@@ -2422,4 +2415,581 @@ fn a_name_one_hand_now_knows_by_two_tools_names_them() {
                 .into()
         )
     );
+}
+
+#[test]
+fn an_ended_mind_lets_its_hands_go_and_takes_nothing_more() {
+    let mut host = waiting_on_a_call();
+    let outputs = host.mind.end();
+    host.perform(outputs);
+    assert_eq!(
+        outcome(&host.stored, "tu_1"),
+        &Outcome::Unknown("the hand was released before it answered".into())
+    );
+    assert_eq!(host.stored.last(), Some(&Item::Ended));
+    assert_eq!(host.closed, [(name("a1"), Refusal::Released)]);
+    assert_eq!(host.mind.state(), State::Ended);
+    assert_eq!(host.mind.report(), Some(Report::Ended));
+    assert!(host.mind.waiting().is_empty());
+
+    let prompted = host.mind.prompt(None, "more".into(), None, None);
+    assert_eq!(prompted, Err(Conflict::Ended(name("m"))));
+    assert_eq!(host.mind.attach(&hello("boot-2")), Err(Refusal::Released));
+    assert_eq!(
+        host.mind.attach(&hand("b2", "boot-b")),
+        Err(Refusal::Released)
+    );
+    // A result that comes late is acked and nothing more.
+    let stored = host.stored.len();
+    host.result(1, json!("done"));
+    assert_eq!(host.stored.len(), stored);
+    assert!(host.mind.interrupt().is_empty());
+    assert!(host.mind.end().is_empty());
+    assert_eq!(host.asked(), 1);
+
+    // Loaded again, or told of from a store, it is still ended.
+    let mut loaded = Mind::load(name("m"), 0, host.stored.clone(), Settings::default());
+    assert!(loaded.start().is_empty());
+    assert_eq!(loaded.state(), State::Ended);
+    assert_eq!(told_from_store(&host.stored).state, State::Ended);
+    assert_eq!(told_from_store(&host.stored).report, Some(Report::Ended));
+}
+
+#[test]
+fn an_ended_mind_stops_a_tool_use_that_had_not_started() {
+    let mut host = Host::new();
+    host.attach(&hello("boot-1"));
+    host.attach(&hand("b2", "boot-b"));
+    host.prompt("both");
+    host.reply(vec![on("tu_1", "a1", "ls"), on("tu_2", "a1", "pwd")]);
+    let outputs = host.mind.end();
+    host.perform(outputs);
+    assert!(matches!(outcome(&host.stored, "tu_1"), Outcome::Unknown(_)));
+    assert_eq!(
+        outcome(&host.stored, "tu_2"),
+        &Outcome::NotRun("the mind ended before this call started".into())
+    );
+    let released: Vec<&Name> = host
+        .stored
+        .iter()
+        .filter_map(|item| match item {
+            Item::Released { hand, reason } if reason == "the mind ended" => Some(hand),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(released, [&name("a1"), &name("b2")]);
+}
+
+#[test]
+fn a_message_to_a_mind_that_has_ended_did_not_run() {
+    let (host, _) = forked();
+    let mut child = first_child(&host);
+    child.prompt("tell your parent");
+    child.reply(vec![own(
+        "tu_9",
+        "tell",
+        json!({"mind": "m", "text": "done"}),
+    )]);
+    let (_, key, _) = child.told.pop().unwrap();
+    let outputs = child.mind.told(&key, Err(Untold::Ended(name("m"))));
+    child.perform(outputs);
+    assert_eq!(
+        outcome(&child.stored, "tu_9"),
+        &Outcome::NotRun("m has ended".into())
+    );
+}
+
+#[test]
+fn a_parent_that_waits_hears_a_child_ended() {
+    let (mut host, children) = forked();
+    host.reply(vec![own("tu_2", "wait", json!({}))]);
+    for child in &children {
+        let outputs = host.mind.rested(child, Report::Ended);
+        host.perform(outputs);
+    }
+    assert_eq!(
+        outcome(&host.stored, "tu_2"),
+        &Outcome::Output(json!({
+            children[0].as_str(): "ended",
+            children[1].as_str(): "ended",
+        }))
+    );
+}
+
+#[test]
+fn a_mind_that_ends_while_a_fork_is_out_makes_no_children_from_its_late_clone() {
+    let (mut host, id) = forking();
+    let outputs = host.mind.end();
+    host.perform(outputs);
+    assert!(matches!(
+        outcome(&host.stored, "tu_1"),
+        Outcome::Unknown(why) if why.contains("may have made the child minds")
+    ));
+    host.result_from("a1", id, Reply::Output(json!({})));
+    assert!(host.forks.is_empty());
+    assert_eq!(host.mind.state(), State::Ended);
+}
+
+/// The first items a mind made from the first `at` items of `m`'s history
+/// `stored` would have, keeping `hand`, when `m`'s last call so far is
+/// `last_call`.
+fn branch(
+    stored: &[Item],
+    at: usize,
+    hand: &str,
+    last_call: CallId,
+    settings: &Settings,
+) -> Result<Vec<Item>, Unbranched> {
+    let from = MadeFrom {
+        mind: name("m"),
+        at: u64::try_from(at).unwrap(),
+        hand: name(hand),
+    };
+    let shared = stored[..at.min(stored.len())].to_vec();
+    Mind::branch(&from, (0, shared), last_call, settings)
+}
+
+/// The mind `r2` made from `stored`'s first `at` items, as its host would
+/// load it, before any hand says hello: its own first items, and it.
+fn loaded_from(stored: &[Item], at: usize, hand: &str, last_call: CallId) -> (Vec<Item>, Host) {
+    let own = branch(stored, at, hand, last_call, &Settings::default()).unwrap();
+    let mut history = stored[..at].to_vec();
+    history.extend(own.clone());
+    let mut made = Host::around(
+        Mind::load(name("r2"), 0, history.clone(), Settings::default()),
+        history,
+    );
+    let outputs = made.mind.start();
+    made.perform(outputs);
+    (own, made)
+}
+
+/// The same, with `hand` said hello as a new process.
+fn made_from(host: &Host, at: usize, hand: &str) -> (Vec<Item>, Host) {
+    let (own, mut made) = loaded_from(&host.stored, at, hand, 0);
+    made.attach(&Hello {
+        mind: name("r2"),
+        ..self::hand(hand, "boot-restored")
+    });
+    (own, made)
+}
+
+/// Where the outcome of `tool_use` is among `stored`, plus one: a mind made
+/// from that many items starts just after it.
+fn just_after(stored: &[Item], tool_use: &str) -> usize {
+    1 + stored
+        .iter()
+        .position(|item| matches!(item, Item::Outcome { tool_use: of, .. } if of == tool_use))
+        .unwrap()
+}
+
+#[test]
+fn a_mind_made_from_another_runs_the_rest_of_its_step_on_the_hand_it_keeps() {
+    let mut host = Host::new();
+    host.attach(&hello("boot-1"));
+    host.attach(&hand("b2", "boot-b"));
+    host.prompt("three things");
+    host.reply(vec![
+        on("tu_1", "a1", "save"),
+        on("tu_2", "a1", "play"),
+        on("tu_3", "b2", "watch"),
+    ]);
+    host.result(1, json!("saved"));
+    // Made from just after the save's result: a1 had begun the next call,
+    // and b2 had not answered.
+    let at = just_after(&host.stored, "tu_1");
+    let (own, mut made) = made_from(&host, at, "a1");
+    assert_eq!(
+        own,
+        [
+            Item::Outcome {
+                tool_use: "tu_3".into(),
+                call: Some(2),
+                outcome: Outcome::Unknown("the hand was released before it answered".into()),
+            },
+            Item::Released {
+                hand: name("b2"),
+                reason: "it stayed with m when this mind was made from it".into(),
+            },
+            Item::Branched {
+                from: name("m"),
+                at: u64::try_from(at).unwrap(),
+                left: Some(64),
+                last_call: 2,
+            },
+        ]
+    );
+    // The play runs on the hand it kept, as call 3: ids go on from those
+    // the history holds.
+    let sent = made.sent_to();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].0, "a1");
+    assert!(
+        matches!(&sent[0].1, FromMind::Call(Call { id: 3, input, .. }) if input["command"] == "play"),
+        "{sent:?}"
+    );
+    made.result(3, json!("played"));
+    assert_eq!(made.asked(), 1);
+    assert_eq!(shown(&made), ["bash"]);
+}
+
+#[test]
+fn a_mind_made_from_another_numbers_its_calls_above_every_one_the_other_made() {
+    let mut host = waiting_on_a_call();
+    let at = host.stored.len();
+    host.result(1, json!("listed"));
+    host.reply(vec![bash("tu_2", "pwd"), bash("tu_3", "date")]);
+    host.result(2, json!("/"));
+    host.result(3, json!("today"));
+    // Made from before call 1's result, once m had made calls 1 to 3. Its
+    // hand is restored from after call 3, so it has read all three.
+    let (_, mut made) = loaded_from(&host.stored, at, "a1", 3);
+    made.attach(&Hello {
+        mind: name("r2"),
+        last_id: 3,
+        ..hand("a1", "boot-later")
+    });
+    assert!(matches!(outcome(&made.stored, "tu_1"), Outcome::Unknown(_)));
+    made.reply(vec![bash("tu_4", "ls")]);
+    assert!(
+        matches!(made.sent().as_slice(), [FromMind::Call(Call { id: 4, .. })]),
+        "the call is numbered above the 3 the hand has read"
+    );
+}
+
+#[test]
+fn a_hand_that_says_hello_to_a_mind_made_from_another_as_the_same_process_is_settled() {
+    // m sent call 1 to a1, which had not answered.
+    let host = waiting_on_a_call();
+    let at = host.stored.len();
+
+    // The same process, which never read it: it is sent again.
+    let (_, mut made) = loaded_from(&host.stored, at, "a1", 1);
+    made.attach(&Hello {
+        mind: name("r2"),
+        ..hello("boot-1")
+    });
+    assert_eq!(made.sent(), [call(1, "ls")]);
+
+    // The same process, still running it: it is waited for.
+    let (_, mut made) = loaded_from(&host.stored, at, "a1", 1);
+    made.attach(&Hello {
+        mind: name("r2"),
+        last_id: 1,
+        running: vec![1],
+        ..hello("boot-1")
+    });
+    assert!(made.sent().is_empty());
+    assert_eq!(made.mind.state(), State::Working);
+    made.result(1, json!("listed"));
+    assert_eq!(
+        outcome(&made.stored, "tu_1"),
+        &Outcome::Output(json!("listed"))
+    );
+}
+
+#[test]
+fn a_clone_in_flight_when_a_mind_is_made_from_another_is_the_others() {
+    // m forks onto a1, and the clone is out.
+    let (host, id) = forking();
+    let at = host.stored.len();
+    let (first, mut made) = loaded_from(&host.stored, at, "a1", id);
+    assert_eq!(
+        first[0],
+        Item::Outcome {
+            tool_use: "tu_1".into(),
+            call: Some(id),
+            outcome: Outcome::Unknown(
+                "m was cloning a hand when this mind was made from it: the clone is m's".into()
+            ),
+        }
+    );
+    assert!(!first.iter().any(|item| matches!(item, Item::Forked { .. })));
+
+    // The restored hand never read the clone: nothing is sent again.
+    made.attach(&Hello {
+        mind: name("r2"),
+        ..cloning("a1", "boot-a")
+    });
+    assert!(made.sent().is_empty());
+    // A result for it, after all, makes no child and no kin.
+    made.result_from("a1", id, Reply::Output(json!({})));
+    assert!(made.forks.is_empty());
+    made.prompt("go on");
+    assert!(!shown(&made).contains(&"wait".to_owned()));
+
+    // A clone_hand in flight is m's too: r2 has no clone of a1.
+    let mut host = Host::new();
+    host.attach(&cloning("a1", "boot-a"));
+    host.prompt("two of you");
+    host.reply(vec![own("tu_1", "clone_hand", json!({}))]);
+    let (id, _) = clone_call(&mut host, "a1");
+    let at = host.stored.len();
+    let (first, mut made) = loaded_from(&host.stored, at, "a1", id);
+    assert!(matches!(
+        &first[0],
+        Item::Outcome {
+            outcome: Outcome::Unknown(_),
+            ..
+        }
+    ));
+    made.attach(&Hello {
+        mind: name("r2"),
+        ..cloning("a1", "boot-a")
+    });
+    made.result_from("a1", id, Reply::Output(json!({})));
+    assert_eq!(made.mind.connected(), [name("a1")]);
+    assert!(
+        !made
+            .stored
+            .iter()
+            .any(|item| matches!(item, Item::Cloned { .. }))
+    );
+}
+
+#[test]
+fn the_hand_a_mind_made_from_another_keeps_is_not_a_clone_it_made() {
+    let mut host = Host::with(Settings {
+        max_clones: 1,
+        ..Settings::default()
+    });
+    host.attach(&cloning("a1", "boot-a"));
+    host.prompt("two of you");
+    host.reply(vec![own("tu_1", "clone_hand", json!({}))]);
+    let (id, _) = clone_call(&mut host, "a1");
+    host.result_from("a1", id, Reply::Output(json!({})));
+    host.attach(&cloning("a1-2", "boot-clone"));
+    // r2 keeps the clone, which m made: r2 itself has made none.
+    let at = host.stored.len();
+    let first = branch(&host.stored, at, "a1-2", id, &Settings::default()).unwrap();
+    let mut history = host.stored.clone();
+    history.extend(first);
+    let mut made = Host::around(
+        Mind::load(
+            name("r2"),
+            0,
+            history.clone(),
+            Settings {
+                max_clones: 1,
+                ..Settings::default()
+            },
+        ),
+        history,
+    );
+    made.attach(&Hello {
+        mind: name("r2"),
+        ..cloning("a1-2", "boot-restored")
+    });
+    made.prompt("another");
+    made.reply(vec![own("tu_2", "clone_hand", json!({"hand": "a1-2"}))]);
+    assert!(
+        made.sent()
+            .iter()
+            .any(|message| matches!(message, FromMind::Call(Call { capability, .. }) if capability == CLONE)),
+        "{:?}",
+        made.stored.last()
+    );
+}
+
+#[test]
+fn a_mind_made_from_a_child_is_no_kin_of_anyone() {
+    let (host, _) = forked();
+    let child = first_child(&host);
+    let from = MadeFrom {
+        mind: child.mind.name().clone(),
+        at: u64::try_from(child.stored.len()).unwrap(),
+        hand: name("a1"),
+    };
+    let unlimited = Settings {
+        max_forks: None,
+        ..Settings::default()
+    };
+    let own = Mind::branch(&from, (0, child.stored.clone()), 1, &unlimited).unwrap();
+    let mut stored = child.stored.clone();
+    stored.extend(own);
+    let mut made = Host::around(
+        Mind::load(name("r2"), 0, stored.clone(), Settings::default()),
+        stored,
+    );
+    made.attach(&Hello {
+        mind: name("r2"),
+        ..cloning("a1", "boot-restored")
+    });
+    made.prompt("go on");
+    assert_eq!(shown(&made), ["bash", "fork", "clone_hand", "release_hand"]);
+}
+
+#[test]
+fn a_mind_is_made_only_from_items_it_had_with_a_hand_it_had() {
+    let mut host = waiting_on_a_call();
+    host.result(1, json!("listed"));
+    host.reply(vec![text("Done.")]);
+    let outputs = host.mind.release(&name("a1")).unwrap();
+    host.perform(outputs);
+    let length = host.stored.len();
+    let settings = Settings::default();
+    assert_eq!(
+        branch(&host.stored, length + 1, "a1", 1, &settings),
+        Err(Unbranched::Short {
+            mind: name("m"),
+            length: u64::try_from(length).unwrap(),
+            at: u64::try_from(length).unwrap() + 1,
+        })
+    );
+    // a1 was let go at the end, so only items before that keep it.
+    assert!(matches!(
+        branch(&host.stored, length, "a1", 1, &settings),
+        Err(Unbranched::NoHand { .. })
+    ));
+    assert!(branch(&host.stored, length - 1, "a1", 1, &settings).is_ok());
+    assert!(matches!(
+        branch(&host.stored, 2, "b2", 1, &settings),
+        Err(Unbranched::NoHand { .. })
+    ));
+
+    // An ended mind is made from only before it ended.
+    let mut ended = waiting_on_a_call();
+    let outputs = ended.mind.end();
+    ended.perform(outputs);
+    let all = ended.stored.len();
+    assert!(matches!(
+        branch(&ended.stored, all, "a1", 1, &settings),
+        Err(Unbranched::Ended { .. })
+    ));
+    let before = ended
+        .stored
+        .iter()
+        .position(|item| matches!(item, Item::Released { .. }))
+        .unwrap();
+    let made = branch(&ended.stored, before, "a1", 1, &settings);
+    assert!(made.is_ok(), "{made:?}");
+}
+
+#[test]
+fn an_ended_mind_takes_again_a_message_it_holds() {
+    let mut host = waiting_on_a_call();
+    let keyed = host
+        .mind
+        .prompt(
+            Some("m.c/4/tu_9".into()),
+            "done".into(),
+            Some(name("m.c")),
+            None,
+        )
+        .unwrap();
+    host.perform(keyed.outputs);
+    let outputs = host.mind.end();
+    host.perform(outputs);
+    // The child says it again after a restart: it was had.
+    let again = host
+        .mind
+        .prompt(
+            Some("m.c/4/tu_9".into()),
+            "done".into(),
+            Some(name("m.c")),
+            None,
+        )
+        .unwrap();
+    assert!(again.existing);
+    assert_eq!(
+        host.mind
+            .prompt(Some("m.c/4/tu_9".into()), "other".into(), None, None),
+        Err(Conflict::Key {
+            key: "m.c/4/tu_9".into()
+        })
+    );
+    assert_eq!(
+        host.mind
+            .prompt(Some("new".into()), "more".into(), None, None),
+        Err(Conflict::Ended(name("m")))
+    );
+}
+
+#[test]
+fn a_hand_that_says_hello_again_able_to_clone_brings_the_fork_tools() {
+    let mut host = Host::new();
+    host.attach(&hello("boot-1"));
+    host.prompt("hi");
+    host.reply(vec![text("Hello.")]);
+    let stored = host.stored.len();
+    // The same process again, able to do the same: nothing is recorded.
+    host.attach(&hello("boot-1"));
+    assert_eq!(host.stored.len(), stored);
+
+    host.attach(&cloning("a1", "boot-1"));
+    assert_eq!(
+        host.stored.last(),
+        Some(&Item::Attached {
+            hand: name("a1"),
+            boot: "boot-1".into(),
+            capabilities: cloning("a1", "boot-1").capabilities,
+        })
+    );
+    host.prompt("now fork");
+    assert_eq!(shown(&host), ["bash", "fork", "clone_hand", "release_hand"]);
+    assert!(
+        host.last_message().content.contains(&Content::Text(
+            "(Hand a1 can now: bash, and be cloned.)".into()
+        )),
+        "{:?}",
+        host.last_message()
+    );
+}
+
+#[test]
+fn a_host_may_offer_fork_alone_of_the_minds_own_tools() {
+    let mut host = Host::with(Settings {
+        tools: vec![MindTool::Fork],
+        ..Settings::default()
+    });
+    host.attach(&cloning("a1", "boot-a"));
+    host.prompt("go");
+    assert_eq!(shown(&host), ["bash", "fork"]);
+    host.reply(vec![own("tu_1", "release_hand", json!({"hand": "a1"}))]);
+    assert_eq!(
+        outcome(&host.stored, "tu_1"),
+        &Outcome::NotRun("there is no tool named release_hand".into())
+    );
+    assert!(host.mind.connected().contains(&name("a1")));
+}
+
+#[test]
+fn a_mind_with_no_fork_limit_gives_its_children_none() {
+    let mut host = Host::with(Settings {
+        max_forks: None,
+        ..Settings::default()
+    });
+    host.attach(&cloning("a1", "boot-a"));
+    host.prompt("try eight ways");
+    let prompts: Vec<String> = (0..8).map(|way| format!("way {way}")).collect();
+    host.reply(vec![own("tu_1", "fork", json!({"prompts": prompts}))]);
+    let (id, _) = clone_call(&mut host, "a1");
+    host.result_from("a1", id, Reply::Output(json!({})));
+    assert_eq!(host.forks.len(), 8);
+    assert!(host.forks[0].items.contains(&Item::Parted {
+        parent: name("m"),
+        left: None
+    }));
+    assert!(matches!(
+        host.stored.last(),
+        Some(Item::Forked { left: None, .. })
+    ));
+}
+
+#[test]
+fn a_mind_asks_with_the_model_and_effort_it_was_made_with() {
+    let mut host = Host::with(Settings {
+        own: MindSettings {
+            model: Some("claude-haiku-5-5".into()),
+            effort: Some("low".into()),
+            system: Some("Play.".into()),
+        },
+        ..Settings::default()
+    });
+    host.attach(&hello("boot-1"));
+    host.prompt("go");
+    let asked = host.asked.last().unwrap();
+    assert_eq!(asked.model.as_deref(), Some("claude-haiku-5-5"));
+    assert_eq!(asked.effort.as_deref(), Some("low"));
+    assert_eq!(asked.system.as_deref(), Some("Play."));
 }

@@ -130,7 +130,10 @@ them:
 
 `fork`, `clone_hand` and `release_hand` are offered while a hand can clone,
 `tell` while the mind has a parent or children, and `wait` while it has
-children.
+children. `--mind-tools`, a comma list, picks which of them a host offers
+at all (`fork,clone_hand,release_hand,tell,wait` by default): `--mind-tools
+fork` lets a mind fork, and neither clone a hand nor let one go, and
+`--mind-tools ''` offers none.
 
 ## Forks and clones
 
@@ -147,6 +150,9 @@ children.
   a name with a `.`.
 - `--max-forks` (64) caps how many minds a root and its descendants may
   fork. Each fork splits what remains between the parent and its children.
+  `--max-forks unlimited` splits nothing: whether a fork is made is then for
+  the cloning hand to say, by its `clone` succeeding or failing.
+- A child is made with its parent's model, effort and system prompt.
 - `--max-clones` (4) caps the clones a mind has made with `clone_hand` and
   not released. Hands that join by themselves, and the hand a child was
   forked onto, are not counted.
@@ -164,9 +170,11 @@ children.
 - `tell` reaches the other mind as a prompt marked "(From your parent m:)" or
   "(From your child m.d3342iuj:)". A message sent again after a restart is
   stored once.
-- `wait` returns what each child said last, or that it was stopped or its
-  model failed. Only a parent waits, so two minds never wait on each other.
-  An interrupt ends a wait.
+- `wait` returns what each child said last, or that it was stopped, its
+  model failed, or it ended. Only a parent waits, so two minds never wait
+  on each other. An interrupt ends a wait.
+- A message to a mind that has ended does not run, and the model is told
+  so.
 - A waiting parent needs no hand. It may rest, or its host may restart: it
   watches its children again when it wakes.
 
@@ -174,11 +182,13 @@ children.
 
 | Request | Does |
 | --- | --- |
-| `GET /v1/minds` | Lists every mind. |
-| `GET /v1/minds/{m}` | `{name, origin, state, hands, waiting, watching, length}`: what it is doing, its connected hands, and the hands and children its turn waits for. |
-| `POST /v1/minds/{m}/prompt` | Stores `{"text", "key"?}`. 202 if new, 200 if the key is already stored, 409 if the key holds other text. |
+| `GET /v1/minds` | Lists every mind, each without its system prompt. |
+| `GET /v1/minds/{m}` | `{name, origin, state, hands, waiting, watching, length}`, and the settings it was made with: what it is doing, its connected hands, and the hands and children its turn waits for. `origin` is `root`, `fork` with `parent` and `inherited`, or `from` with `from`. |
+| `PUT /v1/minds/{m}` | Makes `m` with settings of its own, and maybe from another mind's history. See [Making a mind](#making-a-mind). |
+| `POST /v1/minds/{m}/prompt` | Stores `{"text", "key"?}`. 202 if new, 200 if the key is already stored, 409 if the key holds other text or the mind has ended. |
 | `POST /v1/minds/{m}/interrupt` | Stops the turn. |
 | `POST /v1/minds/{m}/release` | Lets a hand go: `{"hand": "a1"}`. |
+| `POST /v1/minds/{m}/end` | Ends `m`: its turn stops, every hand is let go (4004), and it asks its model nothing more and takes no prompt it does not hold already. Its history stays, for its children and for minds made from it. |
 | `GET /v1/minds/{m}/history?after=` | Up to 512 items from index `after`, and the next cursor. |
 | `GET /v1/minds/{m}/events?after=` | The same as server-sent events, live, with `writing` events that carry each reply as the model writes it. An event's id is its item's index: resume with `after` set to the last id plus one. |
 | `GET /v1/attach` | The WebSocket a hand dials. See [docs/protocol.md](docs/protocol.md). |
@@ -217,6 +227,47 @@ open a WebSocket to it as a hand.
 `--url` where it dials. The host speaks plain HTTP: off loopback, put TLS in
 front of it and have hands dial `wss://`.
 
+### Making a mind
+
+A hand that says hello to a root no one made starts it, with the host's
+settings. `PUT /v1/minds/{m}` makes it first, with its own, which are fixed
+from then on:
+
+| Field | Is |
+| --- | --- |
+| `model` | The model it asks: `--model`, or one of `--models`. |
+| `effort` | How hard that model works: for the Messages API `low`, `medium`, `high`, `xhigh` or `max`, and for Chat Completions any the server takes. |
+| `system` | Its system prompt, in place of `--system-file`'s. |
+| `from` | `{"mind", "at", "hand"}`: start from the first `at` items of `mind`'s history, keeping its hand `hand`. |
+
+- A setting left out is the host's, or with `from`, that mind's. A fork's
+  children are made with their parent's.
+- With `from`, the mind shares those items, as a fork's child does, and
+  none stored after them. To start just after an item, `at` is its index
+  plus one. `mind` may have ended, so long as `at` falls before its end.
+- It keeps `hand`, which says hello to it as that hand again: a hand that
+  can stand at `at`, such as a VM restored from a snapshot taken then. A
+  new process's hello makes a call that hand had not answered unknown; the
+  same process's settles it by what it has read, runs and holds, as any
+  hello does. The rest of the step then runs on it. Its calls are numbered
+  above every one `mind` had made, so a hand restored from later than `at`
+  reads them as new.
+- Every other hand stays behind, and so does a clone in flight at `at`,
+  whose outcome is unknown. The mind is no kin of `mind`, and forks as one
+  that starts from nothing.
+- 201 when made, 200 when made the same way before, 409 when made another
+  way, 404 when `from` names no mind. 400 for a name with a `.` or of more
+  than 55 bytes, a model the host does not offer, an effort its model's API
+  does not take, or a `from` it cannot be made from. With a token for one
+  mind, `from` must name one it reaches, or it is 403.
+- `PUT` comes before the hand's hello: once a hello has started the mind
+  with the host's settings, a `PUT` with others is 409.
+
+`POST /v1/minds/{m}/end` releases every hand of the mind, as
+`POST /release` does each: `mensor hand` deletes a released clone's copy,
+so ending a fork's child deletes its directory. A mind made `from` an
+ended one needs a hand that can stand where it starts.
+
 ## Models
 
 | Credential | API | Address |
@@ -226,9 +277,17 @@ front of it and have hands dial `wss://`.
 
 With both set it is the Messages API, unless `MENSOR_API=chat`. `--model`
 picks the model (`claude-opus-5-5` by default, so name one for Chat
-Completions), and `--effort` how hard it works. A request Claude declines
-may be answered by a fallback model, unless `--no-fallbacks` is set.
+Completions), and `--effort` how hard it works. `--models`, a comma list,
+names more a mind may be made with, through the same API and credential. A
+request Claude declines may be answered by a fallback model, unless
+`--no-fallbacks` is set.
 
+- `--max-tokens` (16,000) caps one reply: the Messages API's `max_tokens`,
+  and Chat Completions' `max_completion_tokens`, which OpenAI and
+  OpenRouter both honour. A reply cut off while it asks for a tool is
+  asked for again, with that tool not run; one cut off in its text ends
+  the turn. Chat Completions counts reasoning in it too, so a reasoning
+  model at a high effort can spend it all thinking.
 - Replies stream. `/events` carries each one as `writing` events before its
   step is stored.
 - At `--compact-at` tokens (150,000; 0 turns it off) the model sums the
@@ -296,8 +355,8 @@ target/release/mensor serve
 
 | Binary | Runs | Size |
 | --- | --- | --- |
-| `mensor` | `serve`, `hand`, `run` and `token` | 5.3 MB |
-| `mensor-mind` | what `serve` does, with its flags | 4.8 MB |
+| `mensor` | `serve`, `hand`, `run` and `token` | 5.4 MB |
+| `mensor-mind` | what `serve` does, with its flags | 4.9 MB |
 | `mensor-hand` | what `hand` does, with its flags | 2.5 MB |
 
 Sizes are for x86-64 Linux, stripped, without the `postgres` feature. Each
@@ -335,14 +394,15 @@ directly, and the Cloudflare worker reuses them unchanged.
 
 - A `wait` that times out.
 - The Responses API.
-- Deleting a mind.
+- Deleting a mind, beyond ending it.
 - Clones made outside the hand, such as VM snapshots.
 - Hands a host gives every mind, such as one that searches the web.
 - `fetch` for `mensor hand`.
 - Tokens that expire, or that can be taken back one at a time.
 - Several hosts over one Postgres database, each with minds of its own.
-- On Cloudflare: forks, remote hands, tokens for one mind, and listing
-  minds.
+- A fork's children with models of their own.
+- On Cloudflare: forks, remote hands, tokens for one mind, making or ending
+  a mind, and listing minds.
 
 MCP is not planned.
 

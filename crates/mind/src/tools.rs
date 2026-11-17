@@ -8,7 +8,10 @@
 //!
 //! The mind has tools of its own: `fork`, `clone_hand` and `release_hand`,
 //! shown while a hand can clone itself, `tell`, shown while it has a parent
-//! or children, and `wait`, shown while it has children.
+//! or children, and `wait`, shown while it has children. A host may offer
+//! only some of them ([`Settings::tools`](crate::Settings::tools)).
+
+use std::str::FromStr;
 
 use mensor_protocol::{CapabilityDecl, Name, OperationDecl};
 use serde_json::{Map, Value, json};
@@ -27,16 +30,27 @@ pub(crate) const HAND: &str = "hand";
 
 /// One of the mind's own tools.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum MindTool {
+pub enum MindTool {
+    /// `fork`: makes child minds, each on a clone of a hand.
     Fork,
+    /// `clone_hand`: makes another hand of the mind from one of its own.
     CloneHand,
+    /// `release_hand`: lets one of the mind's hands go.
     ReleaseHand,
+    /// `tell`: says something to the mind's parent or a child.
     Tell,
+    /// `wait`: waits for children to end their turns.
     Wait,
 }
 
+/// A name that is not one of the mind's own tools.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{0} is not one of a mind's own tools: fork, clone_hand, release_hand, tell or wait")]
+pub struct NoMindTool(pub String);
+
 impl MindTool {
-    const ALL: [Self; 5] = [
+    /// Every one, in the order they are shown.
+    pub const ALL: [Self; 5] = [
         Self::Fork,
         Self::CloneHand,
         Self::ReleaseHand,
@@ -44,7 +58,8 @@ impl MindTool {
         Self::Wait,
     ];
 
-    pub(crate) const fn name(self) -> &'static str {
+    /// Its name, as the model is shown it.
+    pub const fn name(self) -> &'static str {
         match self {
             Self::Fork => "fork",
             Self::CloneHand => "clone_hand",
@@ -128,6 +143,17 @@ impl MindTool {
     }
 }
 
+impl FromStr for MindTool {
+    type Err = NoMindTool;
+
+    fn from_str(name: &str) -> Result<Self, NoMindTool> {
+        Self::ALL
+            .into_iter()
+            .find(|tool| tool.name() == name)
+            .ok_or_else(|| NoMindTool(name.to_owned()))
+    }
+}
+
 /// What a tool does.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Does {
@@ -159,11 +185,13 @@ pub(crate) struct Table {
 
 impl Table {
     /// The tools of `hands`, the mind's hands that are not released, in the
-    /// order of their names, then the mind's own. An operation two hands
-    /// declare is one tool, defined as the first of them declares it.
+    /// order of their names, then those of the mind's own that are
+    /// `offered`. An operation two hands declare is one tool, defined as the
+    /// first of them declares it.
     pub(crate) fn new<'a>(
         hands: impl IntoIterator<Item = (&'a Name, &'a [CapabilityDecl])>,
         family: Family,
+        offered: &[MindTool],
     ) -> Self {
         let mut operations: Vec<(&str, &OperationDecl, Vec<Name>)> = Vec::new();
         let mut cloners = Vec::new();
@@ -213,18 +241,20 @@ impl Table {
                 (tool, does, holders.clone())
             })
             .collect();
-        if !cloners.is_empty() {
-            for tool in [MindTool::Fork, MindTool::CloneHand, MindTool::ReleaseHand] {
-                entries.push((tool.tool(), Does::Mind(tool), cloners.clone()));
+        for tool in MindTool::ALL {
+            let shown = match tool {
+                MindTool::Fork | MindTool::CloneHand | MindTool::ReleaseHand => !cloners.is_empty(),
+                MindTool::Tell => family.parent || family.children,
+                MindTool::Wait => family.children,
+            };
+            if !shown || !offered.contains(&tool) {
+                continue;
             }
-        }
-        if family.parent || family.children {
-            let tool = MindTool::Tell;
-            entries.push((tool.tool(), Does::Mind(tool), Vec::new()));
-        }
-        if family.children {
-            let tool = MindTool::Wait;
-            entries.push((tool.tool(), Does::Mind(tool), Vec::new()));
+            let holders = match tool {
+                MindTool::Tell | MindTool::Wait => Vec::new(),
+                MindTool::Fork | MindTool::CloneHand | MindTool::ReleaseHand => cloners.clone(),
+            };
+            entries.push((tool.tool(), Does::Mind(tool), holders));
         }
         Self { entries }
     }
@@ -388,7 +418,11 @@ mod tests {
             capability("commands", &["bash"]),
             capability("files", &["read"]),
         ];
-        let table = Table::new([(&name("a1"), a1.as_slice())], Family::default());
+        let table = Table::new(
+            [(&name("a1"), a1.as_slice())],
+            Family::default(),
+            &MindTool::ALL,
+        );
         assert_eq!(names(&table), ["bash", "read"]);
         let read = &table.tools()[1];
         assert!(read.input["properties"]["x"].is_object());
@@ -410,7 +444,11 @@ mod tests {
             capability("files", &["read", "write"]),
             capability("notes", &["read"]),
         ];
-        let table = Table::new([(&name("a1"), a1.as_slice())], Family::default());
+        let table = Table::new(
+            [(&name("a1"), a1.as_slice())],
+            Family::default(),
+            &MindTool::ALL,
+        );
         assert_eq!(names(&table), ["files_read", "write", "notes_read"]);
     }
 
@@ -424,6 +462,7 @@ mod tests {
         let table = Table::new(
             [(&name("a1"), a1.as_slice()), (&name("b2"), b2.as_slice())],
             Family::default(),
+            &MindTool::ALL,
         );
         assert_eq!(names(&table), ["bash", "fetch"]);
         assert_eq!(table.find("bash").unwrap().1, [name("a1"), name("b2")]);
@@ -433,7 +472,11 @@ mod tests {
     #[test]
     fn the_minds_own_tools_come_with_a_hand_that_can_clone() {
         let plain = vec![capability("commands", &["bash"])];
-        let table = Table::new([(&name("a1"), plain.as_slice())], Family::default());
+        let table = Table::new(
+            [(&name("a1"), plain.as_slice())],
+            Family::default(),
+            &MindTool::ALL,
+        );
         assert!(table.find("fork").is_none());
 
         let cloning = vec![
@@ -448,6 +491,7 @@ mod tests {
                 (&name("c3"), fork.as_slice()),
             ],
             Family::default(),
+            &MindTool::ALL,
         );
         assert_eq!(
             names(&table),
@@ -466,17 +510,44 @@ mod tests {
             parent: true,
             children: false,
         };
-        assert_eq!(names(&Table::new(hands, child)), ["bash", "tell"]);
+        assert_eq!(
+            names(&Table::new(hands, child, &MindTool::ALL)),
+            ["bash", "tell"]
+        );
         let parent = Family {
             parent: false,
             children: true,
         };
-        let table = Table::new(hands, parent);
+        let table = Table::new(hands, parent, &MindTool::ALL);
         assert_eq!(names(&table), ["bash", "tell", "wait"]);
         assert_eq!(
             table.find("wait").unwrap(),
             (&Does::Mind(MindTool::Wait), &[][..])
         );
+    }
+
+    #[test]
+    fn a_host_offers_only_the_minds_own_tools_it_chooses() {
+        let cloning = vec![capability(CLONE, &["clone"])];
+        let hands = [(&name("a1"), cloning.as_slice())];
+        let family = Family {
+            parent: true,
+            children: true,
+        };
+        let table = Table::new(hands, family, &[MindTool::Fork, MindTool::Wait]);
+        assert_eq!(names(&table), ["fork", "wait"]);
+        assert!(table.find("clone_hand").is_none());
+        assert!(table.find("release_hand").is_none());
+        assert_eq!(table.find("fork").unwrap().1, [name("a1")]);
+        assert!(Table::new(hands, family, &[]).tools().is_empty());
+    }
+
+    #[test]
+    fn the_minds_own_tools_are_named_as_shown() {
+        for tool in MindTool::ALL {
+            assert_eq!(tool.name().parse::<MindTool>(), Ok(tool));
+        }
+        assert_eq!("bash".parse::<MindTool>(), Err(NoMindTool("bash".into())));
     }
 
     #[test]

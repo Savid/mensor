@@ -51,7 +51,7 @@ docker exec "$name" pg_isready -q -h 127.0.0.1 -U postgres
 port=$(docker port "$name" 5432/tcp | head -1 | sed 's/.*://')
 
 # The end-to-end tests name their databases; the store's make their own.
-for database in e2e_restart e2e_wait; do
+for database in e2e_restart e2e_wait e2e_from; do
   docker exec "$name" createdb -U postgres "$database"
 done
 

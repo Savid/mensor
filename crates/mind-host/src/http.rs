@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::convert::Infallible;
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Extension, FromRequestParts, Path, Query, Request, State};
+use axum::extract::{Extension, FromRequest, FromRequestParts, Path, Query, Request, State};
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, HOST, ORIGIN};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
@@ -14,12 +14,13 @@ use axum::{Json, Router};
 use futures_util::stream::{self, Stream};
 use futures_util::{SinkExt, StreamExt};
 use mensor_api::{
-    Access, History, MindStatus, PAGE, Problem, PromptBody, PromptReply, ReleaseBody, Token,
-    Writing, local,
+    Access, History, MakeBody, MindStatus, PAGE, Problem, PromptBody, PromptReply, ReleaseBody,
+    Token, Writing, local,
 };
 use mensor_mind::{Item, StoreError};
 use mensor_protocol::{FromHand, Hello, MAX_FRAME_BYTES, NOT_LOCAL, Name, Refusal};
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::time::timeout;
 
@@ -32,10 +33,11 @@ impl Host {
         Router::new()
             .route("/v1/attach", get(attach))
             .route("/v1/minds", get(minds))
-            .route("/v1/minds/{name}", get(mind))
+            .route("/v1/minds/{name}", get(mind).put(make))
             .route("/v1/minds/{name}/prompt", post(prompt))
             .route("/v1/minds/{name}/interrupt", post(interrupt))
             .route("/v1/minds/{name}/release", post(release))
+            .route("/v1/minds/{name}/end", post(end))
             .route("/v1/minds/{name}/history", get(history))
             .route("/v1/minds/{name}/events", get(events))
             .layer(middleware::from_fn_with_state(self.clone(), guard))
@@ -57,7 +59,10 @@ impl IntoResponse for HostError {
     fn into_response(self) -> Response {
         let status = match &self {
             Self::Missing(_) | Self::Name(_) | Self::NoHand(_) => StatusCode::NOT_FOUND,
-            Self::Conflict(_) => StatusCode::CONFLICT,
+            Self::NotRoot(_) | Self::Model { .. } | Self::Effort { .. } | Self::Unbranched(_) => {
+                StatusCode::BAD_REQUEST
+            }
+            Self::Conflict(_) | Self::Exists(_) => StatusCode::CONFLICT,
             Self::Stopped(_) | Self::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         if status.is_server_error() {
@@ -100,6 +105,22 @@ fn access(
     }
 }
 
+/// A request's JSON body. One that cannot be read as it, for a missing
+/// content type, malformed JSON or a field it does not have, is refused
+/// with a 400 problem, as every other refusal is a problem.
+struct Body<T>(T);
+
+impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for Body<T> {
+    type Rejection = Response;
+
+    async fn from_request(request: Request, state: &S) -> Result<Self, Response> {
+        match Json::<T>::from_request(request, state).await {
+            Ok(Json(body)) => Ok(Self(body)),
+            Err(rejection) => Err(problem(StatusCode::BAD_REQUEST, rejection.body_text())),
+        }
+    }
+}
+
 /// The mind a request's path names, which its token reaches.
 struct Reached(Name);
 
@@ -120,13 +141,17 @@ impl<S: Send + Sync> FromRequestParts<S> for Reached {
     }
 }
 
-/// Every mind the request reaches.
+/// Every mind the request reaches. Each is listed without its system
+/// prompt, which a fork's children share with it: `GET` one mind for that.
 async fn minds(
     State(host): State<Host>,
     Extension(access): Extension<Access>,
 ) -> Json<Vec<MindStatus>> {
     let mut minds = host.minds().await;
     minds.retain(|status| access.reaches(&status.mind.name));
+    for status in &mut minds {
+        status.mind.settings.system = None;
+    }
     Json(minds)
 }
 
@@ -137,10 +162,38 @@ async fn mind(
     Ok(Json(host.mind(&name).await?))
 }
 
+/// Makes a mind. One made from another's history needs a token that
+/// reaches that mind too.
+async fn make(
+    State(host): State<Host>,
+    Extension(access): Extension<Access>,
+    Reached(name): Reached,
+    Body(body): Body<MakeBody>,
+) -> Result<Response, HostError> {
+    if let Some(from) = &body.from
+        && !access.reaches(&from.mind)
+    {
+        let detail = format!("this token does not reach the mind {}", from.mind);
+        return Ok(problem(StatusCode::FORBIDDEN, detail));
+    }
+    let settings = body.settings();
+    let made = host.make(&name, settings, body.from).await?;
+    let status = host.mind(&name).await?;
+    let code = StatusCode::from_u16(made.status()).unwrap_or(StatusCode::OK);
+    Ok((code, Json(status)).into_response())
+}
+
+async fn end(
+    State(host): State<Host>,
+    Reached(name): Reached,
+) -> Result<Json<MindStatus>, HostError> {
+    Ok(Json(host.end(&name).await?))
+}
+
 async fn prompt(
     State(host): State<Host>,
     Reached(name): Reached,
-    Json(body): Json<PromptBody>,
+    Body(body): Body<PromptBody>,
 ) -> Result<Response, HostError> {
     let status = host.prompt(&name, body.key, body.text).await?;
     let code = StatusCode::from_u16(status.status()).unwrap_or(StatusCode::OK);
@@ -157,7 +210,7 @@ async fn interrupt(
 async fn release(
     State(host): State<Host>,
     Reached(name): Reached,
-    Json(body): Json<ReleaseBody>,
+    Body(body): Body<ReleaseBody>,
 ) -> Result<Json<MindStatus>, HostError> {
     Ok(Json(host.release(&name, body.hand).await?))
 }

@@ -71,11 +71,13 @@ It is the API of `mensor serve`, for one mind at a time.
 | `GET /v1/minds/{name}/history?after=` | The items from a cursor, 512 at the most, and the next cursor. |
 | `GET /v1/minds/{name}/events?after=` | The same as server-sent events, each new item as it is stored. Between them come `writing` events: the reply the model is writing, piece by piece. |
 
-It differs from the server in four ways:
+It differs from the server in five ways:
 
 - No `/v1/attach`: the hand is already there, so `hands` is always
   `["local"]`, and `waiting` and `watching` are empty.
 - No `/release`: the one hand is never let go.
+- No `PUT` and no `/end`: every mind has the worker's settings, and none
+  ends.
 - No `GET /v1/minds`: each object knows only itself.
 - A mind starts with its first prompt, not with a hand attaching.
 

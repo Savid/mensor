@@ -105,6 +105,14 @@ impl Model for Provider {
     fn call(&self, request: ModelRequest, mut wrote: Wrote) -> ModelFuture<'_> {
         Box::pin(async move { self.ask(&request, &mut wrote).await })
     }
+
+    fn name(&self) -> &str {
+        &self.config.model
+    }
+
+    fn efforts(&self) -> Option<&'static [&'static str]> {
+        self.config.api.efforts()
+    }
 }
 
 #[cfg(test)]
@@ -132,6 +140,8 @@ mod tests {
     fn request() -> ModelRequest {
         ModelRequest {
             seen: 1,
+            model: None,
+            effort: None,
             system: Some("Be brief.".into()),
             messages: vec![Message {
                 role: Role::User,

@@ -9,7 +9,8 @@ use crate::fork::{Fork, child_name, shares};
 use crate::tools::{CLONE, Does, Family, HAND, MAX_CHILDREN, MindTool, Table, split};
 use crate::window::{to_summarise, window};
 use crate::{
-    Block, Content, HandRecord, Item, Latest, Message, ModelReply, ModelRequest, Outcome, Stop,
+    Block, Content, HandRecord, Item, Latest, MadeFrom, Message, MindSettings, ModelReply,
+    ModelRequest, Outcome, Stop,
 };
 
 /// Something the host of a mind must do. A host performs a mind's outputs in
@@ -94,6 +95,15 @@ pub enum State {
     Thinking,
     /// It has a call for a hand, or waits on one.
     Working,
+    /// Nothing, ever again: it has ended.
+    Ended,
+}
+
+impl State {
+    /// Whether the mind is at rest: idle, or ended.
+    pub fn rests(self) -> bool {
+        matches!(self, Self::Idle | Self::Ended)
+    }
 }
 
 /// What a mind is doing, told from its history.
@@ -127,6 +137,8 @@ pub enum Report {
     /// No mind has this name: a fork whose outcome is unknown may not have
     /// made it.
     Missing,
+    /// It has ended.
+    Ended,
 }
 
 /// What became of a prompt.
@@ -139,12 +151,29 @@ pub struct Prompted {
     pub outputs: Vec<Output>,
 }
 
-/// A prompt whose key the history already holds with other text.
+/// Why a prompt is refused.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("another prompt already has the key {key:?}")]
-pub struct Conflict {
-    /// The key both prompts carry.
-    pub key: String,
+pub enum Conflict {
+    /// The history already holds a prompt under its key, with other text.
+    #[error("another prompt already has the key {key:?}")]
+    Key {
+        /// The key both prompts carry.
+        key: String,
+    },
+    /// The mind has ended.
+    #[error("the mind {0} has ended")]
+    Ended(Name),
+}
+
+/// Why a message did not reach the mind it was for.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum Untold {
+    /// That mind has ended.
+    #[error("{0} has ended")]
+    Ended(Name),
+    /// It could not be given the message, for this reason.
+    #[error("{0}")]
+    Failed(String),
 }
 
 /// A hand the mind does not have, or has released.
@@ -152,11 +181,45 @@ pub struct Conflict {
 #[error("the mind has no hand named {0}")]
 pub struct NoHand(pub Name);
 
+/// Why a mind cannot be made from the first items of another's history.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum Unbranched {
+    /// The history holds fewer items.
+    #[error("{mind}'s history ends at index {length}, before {at}")]
+    Short {
+        /// The mind whose history it is.
+        mind: Name,
+        /// How many items it holds.
+        length: u64,
+        /// How many were asked for.
+        at: u64,
+    },
+    /// The mind had ended within those items.
+    #[error("{mind} ended before index {at}: make a mind from fewer of its items")]
+    Ended {
+        /// The mind whose history it is.
+        mind: Name,
+        /// How many items were asked for.
+        at: u64,
+    },
+    /// The mind had no such hand then.
+    #[error("{mind} had no hand named {hand} at index {at}")]
+    NoHand {
+        /// The mind whose history it is.
+        mind: Name,
+        /// The hand asked for.
+        hand: Name,
+        /// How many items were asked for.
+        at: u64,
+    },
+}
+
 /// What a mind is told when it is made.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settings {
-    /// The system prompt the mind gives its model.
-    pub system: Option<String>,
+    /// Its model, how hard it works, and the system prompt it is given.
+    /// A model or effort left out is the host's.
+    pub own: MindSettings,
     /// How many tokens a request may hold before the mind has its model sum
     /// the conversation up, and carries on from the summary and not from the
     /// beginning: what the last step read and wrote, and the results since.
@@ -174,22 +237,28 @@ pub struct Settings {
     pub max_clones: usize,
     /// How many minds a mind that starts from nothing may fork, its
     /// children's included: each fork shares what remains of it between the
-    /// mind and its children.
-    pub max_forks: u64,
+    /// mind and its children. `None` sets no limit, and splits nothing:
+    /// whether a fork is made is then for the hand it clones to say.
+    pub max_forks: Option<u64>,
+    /// Which of the mind's own tools its model is offered, each while it
+    /// applies.
+    pub tools: Vec<MindTool>,
 }
 
 impl Default for Settings {
-    /// No system prompt, a summary once a request would pass 150,000
-    /// tokens, 96 KB of results a step (40,000 tokens at the most), four
-    /// clones and 64 forks. The summary is asked for with the last step's
-    /// results, so a model that reads 200,000 has room for it.
+    /// The host's model, no system prompt, a summary once a request would
+    /// pass 150,000 tokens, 96 KB of results a step (40,000 tokens at the
+    /// most), four clones, 64 forks, and every tool of the mind's own. The
+    /// summary is asked for with the last step's results, so a model that
+    /// reads 200,000 has room for it.
     fn default() -> Self {
         Self {
-            system: None,
+            own: MindSettings::default(),
             compact_at: Some(150_000),
             max_results: 96 * 1024,
             max_clones: 4,
-            max_forks: 64,
+            max_forks: Some(64),
+            tools: MindTool::ALL.to_vec(),
         }
     }
 }
@@ -210,6 +279,8 @@ pub struct Mind {
     hands: BTreeMap<Name, Hand>,
     /// Its parent, its children and its forks.
     kin: Kin,
+    /// Whether it has ended.
+    ended: bool,
     /// The request the model is answering now.
     asking: Option<Asking>,
     /// The message on its way to another mind.
@@ -224,8 +295,8 @@ struct Kin {
     parent: Option<Name>,
     /// In the order they were made.
     children: Vec<Name>,
-    /// How many more minds it may fork.
-    forks_left: u64,
+    /// How many more minds it may fork, or none for no limit.
+    forks_left: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -382,6 +453,9 @@ impl Mind {
 
     /// What the mind is doing.
     pub fn state(&self) -> State {
+        if self.ended {
+            return State::Ended;
+        }
         match self.next() {
             Next::Idle => State::Idle,
             Next::Ask => State::Thinking,
@@ -431,8 +505,10 @@ impl Mind {
 
     /// What the mind said when it came to rest, while it is at rest.
     pub fn report(&self) -> Option<Report> {
-        if self.state() != State::Idle {
-            return None;
+        match self.state() {
+            State::Ended => return Some(Report::Ended),
+            State::Thinking | State::Working => return None,
+            State::Idle => {}
         }
         let last = self.items.iter().rev().find_map(|item| match item {
             Item::Step { content, .. } => {
@@ -512,6 +588,8 @@ impl Mind {
     ///
     /// `from` is the mind that says it, when its parent or one of its
     /// children does.
+    ///
+    /// A mind that has ended takes no prompt it does not hold already.
     pub fn prompt(
         &mut self,
         key: Option<String>,
@@ -535,9 +613,12 @@ impl Mind {
                         outputs: Vec::new(),
                     });
                 }
-                Some(_) => return Err(Conflict { key: key.clone() }),
+                Some(_) => return Err(Conflict::Key { key: key.clone() }),
                 None => {}
             }
+        }
+        if self.ended {
+            return Err(Conflict::Ended(self.name.clone()));
         }
         let mut outputs = Vec::new();
         self.append(Item::Prompt { key, text, from }, &mut outputs);
@@ -558,28 +639,16 @@ impl Mind {
     /// A turn interrupted while the hand was away is stopped now: a call the
     /// hand never read does not run, and one it still runs is cancelled.
     ///
-    /// A hand the mind released is refused.
+    /// What the hand says it can do replaces what it said before, and the
+    /// tools follow from the mind's next step.
+    ///
+    /// A hand the mind released is refused, and so is every hand of a mind
+    /// that has ended.
     pub fn attach(&mut self, hello: &Hello) -> Result<Vec<Output>, Refusal> {
+        if let Some(refusal) = self.refusal(hello) {
+            return Err(refusal);
+        }
         let hand = hello.hand.clone();
-        // Every tool's `hand` names the hand that runs it, so an operation
-        // that takes one of its own could never be given it.
-        let operations = hello
-            .capabilities
-            .iter()
-            .flat_map(|capability| &capability.operations);
-        if operations
-            .into_iter()
-            .any(|operation| operation.input["properties"].get(HAND).is_some())
-        {
-            return Err(Refusal::Protocol);
-        }
-        if self
-            .hands
-            .get(&hand)
-            .is_some_and(|known| known.released.is_some())
-        {
-            return Err(Refusal::Released);
-        }
         let pending: Vec<(CallId, String)> = self
             .pending()
             .into_iter()
@@ -634,7 +703,11 @@ impl Mind {
             };
             self.append(item, &mut outputs);
         }
-        if plan.new_boot {
+        let can_else = self
+            .hands
+            .get(&hand)
+            .is_some_and(|known| known.record.capabilities != hello.capabilities);
+        if plan.new_boot || can_else {
             let item = Item::Attached {
                 hand: hand.clone(),
                 boot: hello.boot.clone(),
@@ -663,6 +736,24 @@ impl Mind {
         }
         self.drive(&mut outputs);
         Ok(outputs)
+    }
+
+    /// Why a hand that says `hello` is refused, if it is.
+    fn refusal(&self, hello: &Hello) -> Option<Refusal> {
+        // Every tool's `hand` names the hand that runs it, so an operation
+        // that takes one of its own could never be given it.
+        let mut operations = hello
+            .capabilities
+            .iter()
+            .flat_map(|capability| &capability.operations);
+        if operations.any(|operation| operation.input["properties"].get(HAND).is_some()) {
+            return Some(Refusal::Protocol);
+        }
+        let released = self
+            .hands
+            .get(&hello.hand)
+            .is_some_and(|known| known.released.is_some());
+        (self.ended || released).then_some(Refusal::Released)
     }
 
     /// A hand's connection dropped. The mind sends it nothing until it says
@@ -822,8 +913,9 @@ impl Mind {
     }
 
     /// The mind a message went to has it, or could not be given it. `key`
-    /// is the one the [`Output::Tell`] carried.
-    pub fn told(&mut self, key: &str, result: Result<(), String>) -> Vec<Output> {
+    /// is the one the [`Output::Tell`] carried. A message to a mind that
+    /// has ended did not run.
+    pub fn told(&mut self, key: &str, result: Result<(), Untold>) -> Vec<Output> {
         let mut outputs = Vec::new();
         let Some(telling) = self.telling.take_if(|telling| telling.key == key) else {
             return outputs;
@@ -831,7 +923,8 @@ impl Mind {
         if self.outcome_of(&telling.tool_use).is_none() {
             let outcome = match result {
                 Ok(()) => Outcome::Output(json!({ "told": telling.to })),
-                Err(error) => Outcome::Error(error),
+                Err(ended @ Untold::Ended(_)) => Outcome::NotRun(ended.to_string()),
+                Err(Untold::Failed(error)) => Outcome::Error(error),
             };
             let item = Item::Outcome {
                 tool_use: telling.tool_use,
@@ -872,6 +965,151 @@ impl Mind {
         Ok(outputs)
     }
 
+    /// Ends the mind, from outside its conversation: its turn stops, every
+    /// hand is let go, and from then on it asks its model nothing and takes
+    /// no prompt. A tool use that had not started does not run, a call a
+    /// hand was sent and did not answer is unknown, and a message on its
+    /// way may have arrived. Its history stays, for the minds that share
+    /// it. A mind that has ended does nothing.
+    pub fn end(&mut self) -> Vec<Output> {
+        let mut outputs = Vec::new();
+        if self.ended {
+            return outputs;
+        }
+        self.asking = None;
+        self.watching = None;
+        if let Some(telling) = self.telling.take()
+            && self.outcome_of(&telling.tool_use).is_none()
+        {
+            let why = format!(
+                "the mind ended before it heard whether {} had the message",
+                telling.to
+            );
+            let item = Item::Outcome {
+                tool_use: telling.tool_use,
+                call: None,
+                outcome: Outcome::Unknown(why),
+            };
+            self.append(item, &mut outputs);
+        }
+        for tool_use in self.unissued() {
+            let outcome = Outcome::NotRun("the mind ended before this call started".into());
+            let item = Item::Outcome {
+                tool_use,
+                call: None,
+                outcome,
+            };
+            self.append(item, &mut outputs);
+        }
+        let hands: Vec<Name> = self
+            .hands
+            .iter()
+            .filter(|(_, hand)| hand.released.is_none())
+            .map(|(name, _)| name.clone())
+            .collect();
+        for hand in hands {
+            self.release_hand(&hand, "the mind ended", &mut outputs);
+        }
+        self.append(Item::Ended, &mut outputs);
+        outputs
+    }
+
+    /// The first items of a mind made `from` another's history: the first
+    /// `at` items of `from.mind`'s, keeping its hand `from.hand`. `tail` is
+    /// that history's end as it was then, which a store's
+    /// [`tail_at`](crate::Store::tail_at) gives, and `last_call` the
+    /// highest id of a call `from.mind` has made by now.
+    ///
+    /// The new mind keeps `hand`, which says hello as it again. A clone in
+    /// flight at `at` is `from.mind`'s: its outcome is unknown, on any
+    /// hand. Every other hand stays with `from.mind`: each is let go, and a
+    /// call it had not answered is unknown. Then the mind leaves
+    /// `from.mind`'s kin: it has no parent and no children, forks from
+    /// `settings` as one that starts from nothing, and numbers its calls
+    /// above `last_call`, so that a hand restored from later than `at`
+    /// reads them as new.
+    pub fn branch(
+        from: &MadeFrom,
+        (start, items): (u64, Vec<Item>),
+        last_call: CallId,
+        settings: &Settings,
+    ) -> Result<Vec<Item>, Unbranched> {
+        let MadeFrom { mind: of, at, hand } = from;
+        let length = start + index(items.len());
+        if length < *at {
+            return Err(Unbranched::Short {
+                mind: of.clone(),
+                length,
+                at: *at,
+            });
+        }
+        let mut mind = Self::whole(of.clone(), &[], start, items, settings.clone());
+        if mind.ended {
+            return Err(Unbranched::Ended {
+                mind: of.clone(),
+                at: *at,
+            });
+        }
+        if !mind.is_known(hand) {
+            return Err(Unbranched::NoHand {
+                mind: of.clone(),
+                hand: hand.clone(),
+                at: *at,
+            });
+        }
+        let mut outputs = Vec::new();
+        let clones: Vec<(CallId, String)> = mind
+            .round()
+            .iter()
+            .filter_map(|item| match item {
+                Item::Call {
+                    id,
+                    tool_use,
+                    capability,
+                    ..
+                } if capability == CLONE && mind.outcome_of(tool_use).is_none() => {
+                    Some((*id, tool_use.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        for (id, tool_use) in clones {
+            let why = format!(
+                "{of} was cloning a hand when this mind was made from it: the clone is {of}'s"
+            );
+            let item = Item::Outcome {
+                tool_use,
+                call: Some(id),
+                outcome: Outcome::Unknown(why),
+            };
+            mind.append(item, &mut outputs);
+        }
+        let others: Vec<Name> = mind
+            .hands
+            .iter()
+            .filter(|(name, known)| *name != hand && known.released.is_none())
+            .map(|(name, _)| name.clone())
+            .collect();
+        let why = format!("it stayed with {of} when this mind was made from it");
+        for other in others {
+            mind.release_hand(&other, &why, &mut outputs);
+        }
+        let item = Item::Branched {
+            from: of.clone(),
+            at: *at,
+            left: settings.max_forks,
+            last_call: last_call.max(mind.last_call()),
+        };
+        mind.append(item, &mut outputs);
+        Ok(outputs
+            .into_iter()
+            .filter_map(|output| match output {
+                Output::Append(item) => Some(item),
+                _ => None,
+            })
+            .collect())
+    }
+
     /// A mind that holds `items`, from index `from`, with nothing shed. It
     /// first learns what `known` says, each item at its index: what came
     /// before `items`, as far as it tells of the hands and the kin.
@@ -890,6 +1128,7 @@ impl Mind {
                 forks_left: settings.max_forks,
                 ..Kin::default()
             },
+            ended: false,
             settings,
             hands: BTreeMap::new(),
             asking: None,
@@ -897,7 +1136,7 @@ impl Mind {
             watching: None,
         };
         for (at, item) in known {
-            note(&mut mind.hands, &mut mind.kin, item, *at);
+            note(&mut mind.hands, &mut mind.kin, &mut mind.ended, item, *at);
         }
         // What the last summary carries, then what came after it.
         let summary = mind
@@ -905,7 +1144,7 @@ impl Mind {
             .iter()
             .rposition(|item| matches!(item, Item::Summary { .. }));
         for (at, item) in (mind.before..).zip(&mind.items).skip(summary.unwrap_or(0)) {
-            note(&mut mind.hands, &mut mind.kin, item, at);
+            note(&mut mind.hands, &mut mind.kin, &mut mind.ended, item, at);
         }
         mind
     }
@@ -935,7 +1174,7 @@ impl Mind {
 
     fn append(&mut self, item: Item, outputs: &mut Vec<Output>) {
         let at = self.length();
-        note(&mut self.hands, &mut self.kin, &item, at);
+        note(&mut self.hands, &mut self.kin, &mut self.ended, &item, at);
         self.items.push(item.clone());
         outputs.push(Output::Append(item));
     }
@@ -1095,9 +1334,17 @@ impl Mind {
                     let clone = into.first().map(|(_, clone)| clone);
                     Outcome::Output(json!({ "hand": clone }))
                 } else {
-                    let children: Vec<Name> = into.into_iter().map(|(mind, _)| mind).collect();
-                    self.forked(id, &tool_use, &hand, &children, outputs);
-                    return;
+                    let children: Vec<Name> = into
+                        .into_iter()
+                        .map(|(mind, _)| mind)
+                        .filter(|mind| self.is_own_child(mind))
+                        .collect();
+                    if children.is_empty() {
+                        Outcome::Unknown("the clone was for minds that are not this one's".into())
+                    } else {
+                        self.forked(id, &tool_use, &hand, &children, outputs);
+                        return;
+                    }
                 }
             }
             (_, reply) => Outcome::from(reply),
@@ -1210,7 +1457,7 @@ impl Mind {
             .iter()
             .flat_map(|into| into.as_array().into_iter().flatten())
             .filter_map(|target| Name::new(target["mind"].as_str()?).ok())
-            .filter(|mind| *mind != self.name)
+            .filter(|mind| self.is_own_child(mind))
             .collect();
         let outcome = if children.is_empty() {
             Outcome::Unknown(why.into())
@@ -1259,6 +1506,10 @@ impl Mind {
     }
 
     fn next(&self) -> Next {
+        // A mind that has ended does nothing more.
+        if self.ended {
+            return Next::Idle;
+        }
         let step = self
             .items
             .iter()
@@ -1462,10 +1713,11 @@ impl Mind {
                     "prompts are 1 to {MAX_CHILDREN} strings, one per child"
                 ));
             };
-            if index(count) > self.kin.forks_left {
+            if let Some(left) = self.kin.forks_left
+                && index(count) > left
+            {
                 return skip(format!(
-                    "this mind may fork {} more minds, and this asked for {count}",
-                    self.kin.forks_left
+                    "this mind may fork {left} more minds, and this asked for {count}"
                 ));
             }
             Target::Children(count)
@@ -1606,6 +1858,12 @@ impl Mind {
         Ok(minds)
     }
 
+    /// Whether `mind` could be a child of this mind's: one under its root
+    /// and not itself. A clone for any other is not this mind's to count.
+    fn is_own_child(&self, mind: &Name) -> bool {
+        *mind != self.name && mind.root() == self.name.root()
+    }
+
     fn is_kin(&self, mind: &Name) -> bool {
         self.kin.parent.as_ref() == Some(mind) || self.kin.children.contains(mind)
     }
@@ -1735,10 +1993,11 @@ impl Mind {
 
     /// Whether the mind may ask its model: while a hand is connected, or
     /// once it has let every hand it had go. A mind that has never had a
-    /// hand waits for its first.
+    /// hand waits for its first, and one that has ended asks nothing.
     fn may_ask(&self) -> bool {
-        self.hands.values().any(|hand| hand.attached)
-            || (!self.hands.is_empty() && self.unreleased() == 0)
+        !self.ended
+            && (self.hands.values().any(|hand| hand.attached)
+                || (!self.hands.is_empty() && self.unreleased() == 0))
     }
 
     fn is_known(&self, hand: &Name) -> bool {
@@ -1776,6 +2035,7 @@ impl Mind {
                 parent: self.kin.parent.is_some(),
                 children: !self.kin.children.is_empty(),
             },
+            &self.settings.tools,
         )
     }
 
@@ -1790,7 +2050,9 @@ impl Mind {
         }
         let request = ModelRequest {
             seen: self.length(),
-            system: self.settings.system.clone(),
+            model: self.settings.own.model.clone(),
+            effort: self.settings.own.effort.clone(),
+            system: self.settings.own.system.clone(),
             messages,
             tools: self.table().tools(),
             text_only: summary,
@@ -1944,20 +2206,21 @@ impl Mind {
     }
 
     /// The id of the last call made, or 0: ids only grow, so the last is
-    /// the highest. A summary says what it was when it was written.
+    /// the highest. A summary says what it was when it was written, and a
+    /// mind made from another's history what the other's was then.
     fn last_call(&self) -> CallId {
         let last = self.items.iter().rev().find_map(|item| match item {
             Item::Call { id, .. } => Some(*id),
-            Item::Summary { last_call, .. } => Some(*last_call),
+            Item::Summary { last_call, .. } | Item::Branched { last_call, .. } => Some(*last_call),
             _ => None,
         });
         last.unwrap_or(0)
     }
 }
 
-/// What an item at index `at` changes in what a mind knows of its hands and
-/// its kin.
-fn note(hands: &mut BTreeMap<Name, Hand>, kin: &mut Kin, item: &Item, at: u64) {
+/// What an item at index `at` changes in what a mind knows of its hands,
+/// its kin, and whether it has ended.
+fn note(hands: &mut BTreeMap<Name, Hand>, kin: &mut Kin, ended: &mut bool, item: &Item, at: u64) {
     match item {
         // What a summary carries is what the mind knew when it was written.
         Item::Summary {
@@ -2048,6 +2311,19 @@ fn note(hands: &mut BTreeMap<Name, Hand>, kin: &mut Kin, item: &Item, at: u64) {
                 forks_left: *left,
             };
         }
+        // A mind made from another's history is no kin of it, and the hand
+        // it keeps is its own.
+        Item::Branched { left, .. } => {
+            for known in hands.values_mut() {
+                known.record.cloned = false;
+            }
+            *kin = Kin {
+                parent: None,
+                children: Vec::new(),
+                forks_left: *left,
+            };
+        }
+        Item::Ended => *ended = true,
         _ => {}
     }
 }

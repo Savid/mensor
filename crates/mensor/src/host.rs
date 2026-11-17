@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Args;
-use mensor_mind::{MemoryStore, Settings, Store};
+use mensor_mind::{MemoryStore, MindSettings, MindTool, NoMindTool, Settings, Store};
 use mensor_mind_host::{Config, Host, Provider, Token};
 use mensor_store_sqlite::SqliteStore;
 use tokio::net::TcpListener;
@@ -29,18 +29,37 @@ pub struct Hosting {
     #[arg(long, default_value_t = 4)]
     max_clones: usize,
     /// How many minds a mind that starts from nothing may fork, its
-    /// children's forks included. Zero turns forking off.
-    #[arg(long, default_value_t = 64)]
-    max_forks: u64,
-    /// The model every mind asks. `ANTHROPIC_API_KEY` reaches it through
-    /// the Messages API, `OPENAI_API_KEY` through Chat Completions.
+    /// children's forks included. Zero turns forking off, and `unlimited`
+    /// sets no limit: a hand's `clone` then decides whether a fork is made.
+    #[arg(long, default_value = "64", value_parser = forks)]
+    max_forks: Forks,
+    /// A comma list of the mind's own tools a model is offered, from
+    /// `fork`, `clone_hand`, `release_hand`, `tell` and `wait`; `''` offers
+    /// none. Each is still shown only while it applies. `POST
+    /// /v1/minds/{m}/release` lets a hand go whatever this says.
+    #[arg(long, default_value = "fork,clone_hand,release_hand,tell,wait", value_parser = tools)]
+    mind_tools: Tools,
+    /// The model every mind asks, unless it was made with its own.
+    /// `ANTHROPIC_API_KEY` reaches it through the Messages API,
+    /// `OPENAI_API_KEY` through Chat Completions.
     #[arg(long, default_value = "claude-opus-5-5")]
     model: String,
+    /// A comma list of more models a mind may be made with, beside
+    /// `--model`, through the same API and credential.
+    #[arg(long, value_delimiter = ',', value_parser = model_name)]
+    models: Vec<String>,
+    /// The most tokens one reply may hold. A reply cut off while it asks
+    /// for a tool is asked for again, with that tool not run; one cut off
+    /// in its text ends the turn. Chat Completions counts a model's
+    /// reasoning in it too.
+    #[arg(long, default_value_t = 16_000, value_parser = clap::value_parser!(u32).range(1..))]
+    max_tokens: u32,
     /// How hard the model works, in its API's words: for Claude low,
     /// medium, high, xhigh or max.
     #[arg(long)]
     effort: Option<String>,
-    /// A file holding the system prompt every mind gives its model.
+    /// A file holding the system prompt a mind gives its model, unless it
+    /// was made with its own.
     #[arg(long)]
     system_file: Option<PathBuf>,
     /// Do not let a request Claude declines be served by a fallback model.
@@ -50,6 +69,51 @@ pub struct Hosting {
     /// conversation up and carries on from the summary. Zero never does.
     #[arg(long, default_value_t = 150_000)]
     compact_at: u64,
+}
+
+/// A limit to forks, or none.
+#[derive(Clone, Copy, Debug)]
+struct Forks(Option<u64>);
+
+/// `unlimited`, or a number.
+fn forks(said: &str) -> Result<Forks, String> {
+    if said == "unlimited" {
+        return Ok(Forks(None));
+    }
+    said.parse()
+        .map(|limit| Forks(Some(limit)))
+        .map_err(|_| format!("{said} is neither a number nor unlimited"))
+}
+
+/// A model's name, which is not empty.
+fn model_name(said: &str) -> Result<String, String> {
+    let said = said.trim();
+    if said.is_empty() {
+        return Err("a model's name is not empty".into());
+    }
+    Ok(said.to_owned())
+}
+
+/// Some of the mind's own tools.
+#[derive(Clone, Debug)]
+struct Tools(Vec<MindTool>);
+
+/// The tools named, each once, split at commas. None is none of them.
+fn tools(said: &str) -> Result<Tools, String> {
+    let mut tools = Vec::new();
+    for name in said
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        let tool: MindTool = name
+            .parse()
+            .map_err(|error: NoMindTool| error.to_string())?;
+        if !tools.contains(&tool) {
+            tools.push(tool);
+        }
+    }
+    Ok(Tools(tools))
 }
 
 /// Opens a host over its store and model, and the address it serves on.
@@ -72,19 +136,34 @@ pub async fn open(hosting: Hosting) -> Result<(Host, TcpListener), String> {
     let mut model =
         mensor_model::Config::from_vars(&hosting.model, |name| std::env::var(name).ok())
             .map_err(|error| error.to_string())?;
+    if let Some(effort) = &hosting.effort {
+        let efforts = model.api.efforts();
+        if effort.is_empty() || efforts.is_some_and(|known| !known.contains(&effort.as_str())) {
+            let known = efforts.map_or_else(|| "any not empty".into(), |known| known.join(", "));
+            return Err(format!(
+                "--effort {effort} is not one the model's API takes: {known}"
+            ));
+        }
+    }
     model.effort = hosting.effort;
     model.fallbacks = !hosting.no_fallbacks;
+    model.max_tokens = hosting.max_tokens;
     let model = Provider::new(model).map_err(|error| error.to_string())?;
 
     let config = Config {
         token,
         mind: Settings {
-            system,
+            own: MindSettings {
+                system,
+                ..MindSettings::default()
+            },
             compact_at: (hosting.compact_at > 0).then_some(hosting.compact_at),
             max_clones: hosting.max_clones,
-            max_forks: hosting.max_forks,
+            max_forks: hosting.max_forks.0,
+            tools: hosting.mind_tools.0,
             ..Settings::default()
         },
+        models: hosting.models,
         ..Config::default()
     };
     let host = Host::open(store, Arc::new(model), config)
@@ -182,5 +261,65 @@ pub async fn serve(hosting: Hosting) -> Result<(), String> {
             served.map_err(|error| format!("the host stopped: {error}"))
         }
         () = stopped() => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forks_are_a_number_or_unlimited() {
+        assert_eq!(forks("64").unwrap().0, Some(64));
+        assert_eq!(forks("0").unwrap().0, Some(0));
+        assert_eq!(forks("unlimited").unwrap().0, None);
+        assert!(forks("lots").is_err());
+    }
+
+    #[derive(clap::Parser)]
+    struct Cli {
+        #[command(flatten)]
+        hosting: Hosting,
+    }
+
+    fn parsed(flags: &[&str]) -> Result<Hosting, clap::Error> {
+        use clap::Parser;
+        let args = std::iter::once("mensor").chain(flags.iter().copied());
+        Cli::try_parse_from(args).map(|cli| cli.hosting)
+    }
+
+    #[test]
+    fn a_reply_may_hold_a_token_at_least() {
+        assert!(parsed(&["--max-tokens", "0"]).is_err());
+        assert_eq!(
+            parsed(&["--max-tokens", "24000"]).unwrap().max_tokens,
+            24_000
+        );
+    }
+
+    #[test]
+    fn the_models_offered_are_named() {
+        let offered = parsed(&["--models", "claude-haiku-5-5, claude-sonnet-5-5"]).unwrap();
+        assert_eq!(offered.models, ["claude-haiku-5-5", "claude-sonnet-5-5"]);
+        assert!(parsed(&["--models", "claude-haiku-5-5,,b"]).is_err());
+        assert!(
+            parsed(&["--mind-tools", ""])
+                .unwrap()
+                .mind_tools
+                .0
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_minds_own_tools_are_named_each_once() {
+        assert_eq!(tools("fork").unwrap().0, [MindTool::Fork]);
+        assert_eq!(
+            tools("tell, fork,tell").unwrap().0,
+            [MindTool::Tell, MindTool::Fork]
+        );
+        assert!(tools("").unwrap().0.is_empty());
+        let refused = tools("fork,bash").unwrap_err();
+        assert!(refused.contains("bash"), "{refused}");
     }
 }

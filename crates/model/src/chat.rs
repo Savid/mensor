@@ -32,6 +32,9 @@ pub(crate) fn is_reasoning(block: &Value) -> bool {
 #[derive(Serialize)]
 struct Body<'a> {
     model: &'a str,
+    /// The cap on a reply: the name `OpenAI` asks for, and `OpenRouter`
+    /// takes as it takes `max_tokens`.
+    max_completion_tokens: u32,
     stream: bool,
     stream_options: StreamOptions,
     messages: Vec<Said<'a>>,
@@ -109,7 +112,8 @@ fn body<'a>(config: &'a Config, request: &'a ModelRequest) -> Body<'a> {
         }
     }
     Body {
-        model: &config.model,
+        model: request.model.as_deref().unwrap_or(&config.model),
+        max_completion_tokens: config.max_tokens,
         stream: true,
         stream_options: StreamOptions {
             include_usage: true,
@@ -128,7 +132,7 @@ fn body<'a>(config: &'a Config, request: &'a ModelRequest) -> Body<'a> {
             })
             .collect(),
         tool_choice: (request.text_only && !request.tools.is_empty()).then_some("none"),
-        reasoning_effort: config.effort.as_deref(),
+        reasoning_effort: request.effort.as_deref().or(config.effort.as_deref()),
     }
 }
 
@@ -532,6 +536,7 @@ mod tests {
             body_of(&post),
             json!({
                 "model": "gpt",
+                "max_completion_tokens": 16000,
                 "stream": true,
                 "stream_options": {"include_usage": true},
                 "messages": [
@@ -549,6 +554,22 @@ mod tests {
                 }}],
             })
         );
+    }
+
+    #[test]
+    fn a_mind_with_a_model_of_its_own_asks_it() {
+        let mut config = config();
+        config.effort = Some("high".into());
+        config.max_tokens = 24_000;
+        let request = ModelRequest {
+            model: Some("gpt-mini".into()),
+            effort: Some("low".into()),
+            ..request()
+        };
+        let body = body_of(&Exchange::new(&config, &request).post());
+        assert_eq!(body["model"], json!("gpt-mini"));
+        assert_eq!(body["reasoning_effort"], json!("low"));
+        assert_eq!(body["max_completion_tokens"], json!(24_000));
     }
 
     #[test]

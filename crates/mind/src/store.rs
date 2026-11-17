@@ -10,7 +10,8 @@ use crate::Item;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "origin", rename_all = "snake_case")]
 pub enum Origin {
-    /// With nothing: a hand said hello to a mind no one had started.
+    /// With nothing: it was made so, or a hand said hello to a mind no one
+    /// had made.
     Root,
     /// With the first `inherited` items of another mind's history, because
     /// that mind forked.
@@ -20,9 +21,69 @@ pub enum Origin {
         /// How many of the parent's items are shared.
         inherited: u64,
     },
+    /// With the first items of another mind's history, because it was made
+    /// from them, keeping one of that mind's hands. It is no kin of it.
+    From {
+        /// Which items, and which hand.
+        from: MadeFrom,
+    },
 }
 
-/// A mind as a store knows it: its name, and where its history begins.
+/// The history a mind was made from: the first `at` items of `mind`'s,
+/// keeping its hand `hand`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MadeFrom {
+    /// The mind whose history is shared.
+    pub mind: Name,
+    /// How many of its items are shared: to start just after an item, its
+    /// index plus one.
+    pub at: u64,
+    /// The hand of that mind's it keeps.
+    pub hand: Name,
+}
+
+impl Origin {
+    /// The mind whose items this history starts with, and how many of
+    /// them: none for a root.
+    pub fn shares(&self) -> Option<(&Name, u64)> {
+        match self {
+            Self::Root => None,
+            Self::Fork { parent, inherited } => Some((parent, *inherited)),
+            Self::From { from } => Some((&from.mind, from.at)),
+        }
+    }
+}
+
+/// What a mind is made with, beyond what its host gives every mind. A
+/// setting left out is the host's.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MindSettings {
+    /// The model it asks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// How hard that model works, in its API's words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// The system prompt it gives its model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system: Option<String>,
+}
+
+impl MindSettings {
+    /// These, with each that is left out taken from `under`.
+    #[must_use]
+    pub fn or(self, under: &Self) -> Self {
+        Self {
+            model: self.model.or_else(|| under.model.clone()),
+            effort: self.effort.or_else(|| under.effort.clone()),
+            system: self.system.or_else(|| under.system.clone()),
+        }
+    }
+}
+
+/// A mind as a store knows it: its name, where its history begins, and what
+/// it was made with.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MindRecord {
     /// The mind's name.
@@ -30,11 +91,26 @@ pub struct MindRecord {
     /// Where its history begins.
     #[serde(flatten)]
     pub origin: Origin,
+    /// What it was made with.
+    #[serde(flatten)]
+    pub settings: MindSettings,
 }
 
-/// The kinds of item that say what a mind knows of its hands and its kin.
-pub const KNOWING: [&str; 6] = [
-    "summary", "attached", "cloned", "released", "forked", "parted",
+impl MindRecord {
+    /// A root named `name`, made with nothing of its own.
+    pub fn root(name: Name) -> Self {
+        Self {
+            name,
+            origin: Origin::Root,
+            settings: MindSettings::default(),
+        }
+    }
+}
+
+/// The kinds of item that say what a mind knows of its hands, its kin and
+/// itself.
+pub const KNOWING: [&str; 8] = [
+    "summary", "attached", "cloned", "released", "forked", "parted", "branched", "ended",
 ];
 
 /// What a store says of a mind it is not asked to load, which
@@ -54,7 +130,8 @@ pub struct Latest {
 /// Why a store refused.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    /// A mind of this name already exists, with another origin.
+    /// A mind of this name already exists, with another origin or other
+    /// settings.
     #[error("a mind named {0} already exists")]
     Exists(Name),
     /// No mind has this name.
@@ -84,7 +161,7 @@ pub enum StoreError {
 /// store also answers what a mind no longer can.
 pub trait Store: Send + Sync {
     /// Starts a mind's history with `items`, in one write. A mind that
-    /// already exists with the same origin was made by an earlier call that
+    /// already exists with the same record was made by an earlier call that
     /// was not seen to finish: it counts as made, and nothing is written.
     fn create(&self, mind: &MindRecord, items: &[Item]) -> Result<(), StoreError>;
 
@@ -95,18 +172,28 @@ pub trait Store: Send + Sync {
     /// items of it at the most.
     fn read(&self, name: &Name, from: u64, limit: usize) -> Result<Vec<Item>, StoreError>;
 
-    /// The last item of one [kind](Item::kind) in a mind's history.
-    fn last(&self, name: &Name, kind: &str) -> Result<Option<Item>, StoreError>;
+    /// The last item of one [kind](Item::kind) among the first `before`
+    /// items of a mind's history: `u64::MAX` for all of it.
+    fn last(&self, name: &Name, kind: &str, before: u64) -> Result<Option<Item>, StoreError>;
 
     /// The end of a mind's history, which is what its mind is loaded with:
     /// the index its last summary names and the items from there, or all
     /// of it from 0 when it holds no summary.
     fn tail(&self, name: &Name) -> Result<(u64, Vec<Item>), StoreError> {
-        let from = match self.last(name, "summary")? {
+        self.tail_at(name, u64::MAX)
+    }
+
+    /// The end of a mind's history as it was when it held `at` items: the
+    /// index its last summary before then names, and the items from there
+    /// up to `at`. A mind made from those `at` items is loaded with this,
+    /// and its own after it.
+    fn tail_at(&self, name: &Name, at: u64) -> Result<(u64, Vec<Item>), StoreError> {
+        let from = match self.last(name, "summary", at)? {
             Some(Item::Summary { from, .. }) => from,
             _ => 0,
         };
-        Ok((from, self.read(name, from, usize::MAX)?))
+        let limit = usize::try_from(at.saturating_sub(from)).unwrap_or(usize::MAX);
+        Ok((from, self.read(name, from, limit)?))
     }
 
     /// The latest of a mind's history, which is what [`Mind::status`] is
@@ -118,7 +205,7 @@ pub trait Store: Send + Sync {
     ///
     /// [`Mind::status`]: crate::Mind::status
     fn recent(&self, name: &Name) -> Result<Latest, StoreError> {
-        let from = match self.last(name, "step")? {
+        let from = match self.last(name, "step", u64::MAX)? {
             Some(Item::Step { seen, .. }) => seen,
             _ => 0,
         };
@@ -186,7 +273,7 @@ struct Minds {
 
 #[derive(Debug)]
 struct Entry {
-    origin: Origin,
+    record: MindRecord,
     own: Vec<Item>,
 }
 
@@ -210,11 +297,9 @@ impl Minds {
             .by_name
             .get(name)
             .ok_or_else(|| StoreError::Missing(name.clone()))?;
-        let (mut items, base) = match &entry.origin {
-            Origin::Root => (Vec::new(), 0),
-            Origin::Fork { parent, inherited } => {
-                (self.history(parent, limit.min(*inherited))?, *inherited)
-            }
+        let (mut items, base) = match entry.record.origin.shares() {
+            None => (Vec::new(), 0),
+            Some((parent, inherited)) => (self.history(parent, limit.min(inherited))?, inherited),
         };
         let own = usize::try_from(limit.saturating_sub(base)).unwrap_or(usize::MAX);
         items.extend(entry.own.iter().take(own).cloned());
@@ -226,25 +311,25 @@ impl Store for MemoryStore {
     fn create(&self, mind: &MindRecord, items: &[Item]) -> Result<(), StoreError> {
         let mut minds = self.lock();
         if let Some(entry) = minds.by_name.get(&mind.name) {
-            return if entry.origin == mind.origin {
+            return if entry.record == *mind {
                 Ok(())
             } else {
                 Err(StoreError::Exists(mind.name.clone()))
             };
         }
-        if let Origin::Fork { parent, inherited } = &mind.origin {
+        if let Some((parent, inherited)) = mind.origin.shares() {
             let have = minds.history(parent, u64::MAX)?.len();
-            if u64::try_from(have).unwrap_or(u64::MAX) < *inherited {
+            if u64::try_from(have).unwrap_or(u64::MAX) < inherited {
                 return Err(StoreError::Short {
                     parent: parent.clone(),
-                    inherited: *inherited,
+                    inherited,
                 });
             }
         }
         minds.by_name.insert(
             mind.name.clone(),
             Entry {
-                origin: mind.origin.clone(),
+                record: mind.clone(),
                 own: items.to_vec(),
             },
         );
@@ -270,8 +355,8 @@ impl Store for MemoryStore {
         Ok(items)
     }
 
-    fn last(&self, name: &Name, kind: &str) -> Result<Option<Item>, StoreError> {
-        let items = self.lock().history(name, u64::MAX)?;
+    fn last(&self, name: &Name, kind: &str, before: u64) -> Result<Option<Item>, StoreError> {
+        let items = self.lock().history(name, before)?;
         Ok(items.into_iter().rev().find(|item| item.kind() == kind))
     }
 
@@ -285,10 +370,7 @@ impl Store for MemoryStore {
         Ok(minds
             .order
             .iter()
-            .map(|name| MindRecord {
-                name: name.clone(),
-                origin: minds.by_name[name].origin.clone(),
-            })
+            .map(|name| minds.by_name[name].record.clone())
             .collect())
     }
 }
@@ -301,18 +383,67 @@ mod tests {
 
     #[test]
     fn a_mind_is_written_flat() {
-        let mind = MindRecord {
-            name: Name::new("b7").unwrap(),
+        let name = |name: &str| Name::new(name).unwrap();
+        let fork = MindRecord {
+            name: name("b7"),
             origin: Origin::Fork {
-                parent: Name::new("a1").unwrap(),
+                parent: name("a1"),
                 inherited: 4,
             },
+            settings: MindSettings::default(),
         };
-        let written = serde_json::to_value(&mind).unwrap();
+        let made = MindRecord {
+            name: name("r2"),
+            origin: Origin::From {
+                from: MadeFrom {
+                    mind: name("k"),
+                    at: 40,
+                    hand: name("vm"),
+                },
+            },
+            settings: MindSettings {
+                model: Some("claude-haiku-5-5".into()),
+                effort: None,
+                system: Some("Play.".into()),
+            },
+        };
+        let cases = [
+            (
+                fork,
+                serde_json::json!({"name": "b7", "origin": "fork", "parent": "a1", "inherited": 4}),
+            ),
+            (
+                made,
+                serde_json::json!({"name": "r2", "origin": "from",
+                                   "from": {"mind": "k", "at": 40, "hand": "vm"},
+                                   "model": "claude-haiku-5-5", "system": "Play."}),
+            ),
+        ];
+        for (mind, expected) in cases {
+            let written = serde_json::to_value(&mind).unwrap();
+            assert_eq!(written, expected);
+            assert_eq!(serde_json::from_value::<MindRecord>(written).unwrap(), mind);
+        }
+    }
+
+    #[test]
+    fn a_setting_left_out_is_taken_from_under_it() {
+        let own = MindSettings {
+            model: Some("a".into()),
+            ..MindSettings::default()
+        };
+        let under = MindSettings {
+            model: Some("b".into()),
+            effort: Some("high".into()),
+            system: None,
+        };
         assert_eq!(
-            written,
-            serde_json::json!({"name": "b7", "origin": "fork", "parent": "a1", "inherited": 4})
+            own.or(&under),
+            MindSettings {
+                model: Some("a".into()),
+                effort: Some("high".into()),
+                system: None,
+            }
         );
-        assert_eq!(serde_json::from_value::<MindRecord>(written).unwrap(), mind);
     }
 }

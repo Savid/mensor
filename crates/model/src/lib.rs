@@ -19,6 +19,8 @@
 //! let config = Config::messages(Credential::ApiKey("sk-…".into()), "claude-opus-5-5");
 //! let request = ModelRequest {
 //!     seen: 1,
+//!     model: None,
+//!     effort: None,
 //!     system: None,
 //!     messages: vec![Message { role: Role::User, content: vec![Content::Text("hi".into())] }],
 //!     tools: Vec::new(),
@@ -63,6 +65,21 @@ pub enum Api {
     Chat,
 }
 
+/// The efforts Claude's Messages API takes, from least to most.
+pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+impl Api {
+    /// The efforts it takes: Claude's for the Messages API. Chat
+    /// Completions servers differ in theirs, so any that is not empty is
+    /// sent, and one a server does not take fails its request.
+    pub fn efforts(self) -> Option<&'static [&'static str]> {
+        match self {
+            Self::Messages => Some(&EFFORTS),
+            Self::Chat => None,
+        }
+    }
+}
+
 /// How to prove who is asking.
 #[derive(Clone)]
 pub enum Credential {
@@ -92,15 +109,17 @@ pub struct Config {
     pub base_url: String,
     /// The credential every request carries.
     pub credential: Credential,
-    /// The model's id, such as `claude-opus-5-5`.
+    /// The model's id, such as `claude-opus-5-5`, unless a request names
+    /// its own.
     pub model: String,
-    /// The most tokens one reply may hold, which the Messages API must be
-    /// told. A reply that reaches it is cut off, and the mind asks again.
-    /// A Chat Completions server is left to its own limit.
+    /// The most tokens one reply may hold: the Messages API's
+    /// `max_tokens`, and Chat Completions' `max_completion_tokens`, which
+    /// `OpenAI` and `OpenRouter` both honour. A reply that reaches it is
+    /// cut off, and the mind asks again.
     pub max_tokens: u32,
     /// How hard the model works, in the API's own words: for Claude `low`,
-    /// `medium`, `high`, `xhigh` or `max`. `None` leaves the model's own
-    /// default.
+    /// `medium`, `high`, `xhigh` or `max`, unless a request says. `None`
+    /// leaves the model's own default.
     pub effort: Option<String>,
     /// Whether a request Claude declines may be served by the fallback
     /// model the Messages API picks. Turn it off where the API does not
@@ -490,6 +509,8 @@ mod tests {
     pub(crate) fn request() -> ModelRequest {
         ModelRequest {
             seen: 3,
+            model: None,
+            effort: None,
             system: Some("Be brief.".into()),
             messages: vec![
                 Message {

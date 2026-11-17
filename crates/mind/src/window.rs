@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 
 use mensor_protocol::{CapabilityDecl, Name};
 use serde_json::Value;
@@ -77,20 +77,25 @@ fn conversation(
     });
     // What the next user message holds: results first, then prompts.
     let mut user: Vec<Content> = Vec::new();
-    // The hands the model has been told of.
-    let mut told = BTreeSet::new();
+    // The hands the model has been told of, with what each can do.
+    let mut told = BTreeMap::new();
     // Steps count from the summary. Prompts count from the index it names:
     // what the last step before it had seen.
     let (steps_from, prompts_from) = match summary {
         Some((at, text, from, hands, kin)) => {
             // A summary a child shares with its parent names the parent's
-            // kin: the child's own follow it.
+            // kin: the child's own follow it. So does one a mind made from
+            // another's history shares with it.
             let parted = items[at..]
                 .iter()
-                .any(|item| matches!(item, Item::Parted { .. }));
+                .any(|item| matches!(item, Item::Parted { .. } | Item::Branched { .. }));
             let kin = if parted { (None, &Vec::new()) } else { kin };
             user.extend(summed_up(text, hands, kin));
-            told.extend(hands.keys());
+            told.extend(
+                hands
+                    .iter()
+                    .map(|(name, hand)| (name, hand.capabilities.as_slice())),
+            );
             let from = usize::try_from(from.saturating_sub(before)).unwrap_or(usize::MAX);
             (at, from.min(at))
         }
@@ -159,13 +164,13 @@ fn conversation(
 
 /// What an item tells the model among the prompts, if anything: a prompt,
 /// marked as its parent's or a child's when one of them said it; a pause;
-/// a hand joining for the first time, as `told` records; and, once it
-/// `counted`, a hand let go.
+/// a hand joining for the first time, or able to do something other than
+/// `told` records; and, once it `counted`, a hand let go.
 fn among_prompts<'a>(
     item: &'a Item,
     counted: bool,
     parent: Option<&Name>,
-    told: &mut BTreeSet<&'a Name>,
+    told: &mut BTreeMap<&'a Name, &'a [CapabilityDecl]>,
 ) -> Option<Cow<'a, str>> {
     let note = match item {
         Item::Prompt {
@@ -186,9 +191,13 @@ fn among_prompts<'a>(
         Item::Paused { reason } => format!("(The turn before this was stopped: {reason}.)"),
         Item::Attached {
             hand, capabilities, ..
-        } if told.insert(hand) => {
-            format!("(Hand {hand} joined. It can: {}.)", can(capabilities))
-        }
+        } => match told.insert(hand, capabilities) {
+            None => format!("(Hand {hand} joined. It can: {}.)", can(capabilities)),
+            Some(before) if before != capabilities.as_slice() => {
+                format!("(Hand {hand} can now: {}.)", can(capabilities))
+            }
+            Some(_) => return None,
+        },
         Item::Released { hand, reason } if counted => {
             format!("(Hand {hand} was let go: {reason}.)")
         }
@@ -342,13 +351,13 @@ mod tests {
                 from: 0,
                 hands: BTreeMap::new(),
                 last_call: 0,
-                forks_left: 10,
+                forks_left: Some(10),
                 parent: Some(name("g")),
                 children: vec![name("g.aaaaaaaa")],
             },
             Item::Parted {
                 parent: name("g.bbbbbbbb"),
-                left: 4,
+                left: Some(4),
             },
             Item::Prompt {
                 key: None,

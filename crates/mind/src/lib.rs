@@ -44,9 +44,12 @@ mod window;
 
 pub use fork::Fork;
 pub use item::{Block, HandRecord, Item, Outcome, Stop, Usage};
-pub use mind::{Conflict, Mind, NoHand, Output, Prompted, Report, Settings, State, Status};
+pub use mind::{
+    Conflict, Mind, NoHand, Output, Prompted, Report, Settings, State, Status, Unbranched, Untold,
+};
 pub use model::{Content, Message, ModelError, ModelReply, ModelRequest, Role, Tool};
 pub use store::{
-    KNOWING, Latest, MemoryStore, MindRecord, Origin, Store, StoreError, prompt_under, tail_from,
+    KNOWING, Latest, MadeFrom, MemoryStore, MindRecord, MindSettings, Origin, Store, StoreError,
+    prompt_under, tail_from,
 };
-pub use tools::{CLONE, MAX_CHILDREN};
+pub use tools::{CLONE, MAX_CHILDREN, MindTool, NoMindTool};

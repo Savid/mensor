@@ -34,7 +34,7 @@ mod provider;
 mod task;
 
 pub use host::{Config, Connection, Host, HostError, Rejected};
-pub use mensor_api::{MindStatus, NotRoot, Prompted, Token, mind_token};
+pub use mensor_api::{Made, MindStatus, NotRoot, Prompted, Token, mind_token};
 pub use model::{Model, ModelError, ModelFuture, Scripted, Wrote};
 pub use provider::Provider;
 pub use task::Outgoing;

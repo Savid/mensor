@@ -11,7 +11,7 @@ pub enum Refusal {
     UnknownMind,
     /// A newer connection for the same mind and hand took this one's place.
     Replaced,
-    /// The mind released this hand.
+    /// The mind released this hand, or has ended and takes none.
     Released,
     /// The hand names a mind that cannot be started: a new mind's name has
     /// no `.` and is at most [`Name::ROOT_MAX_LEN`](crate::Name::ROOT_MAX_LEN)
@@ -51,7 +51,7 @@ impl Refusal {
             Self::Protocol => "not a message of the protocol",
             Self::UnknownMind => "no mind of that name yet",
             Self::Replaced => "a newer connection has this mind and hand",
-            Self::Released => "the mind released this hand",
+            Self::Released => "the mind released this hand, or has ended",
             Self::Name => "a new mind's name has no '.' and is at most 55 bytes",
             Self::Forbidden => "this hand's token does not reach that mind",
         }

@@ -10,7 +10,7 @@ use futures_util::future::{Either, select};
 use futures_util::{StreamExt, stream};
 use mensor_api::{History, MindStatus, PAGE, Problem, PromptBody, PromptReply, Prompted};
 use mensor_hand::{Capabilities, Files};
-use mensor_mind::{MindRecord, Origin, Settings};
+use mensor_mind::{MindRecord, MindSettings, Settings};
 use mensor_object::{LOCAL, Object, PromptError, StorageError, step};
 use mensor_protocol::Name;
 // The object's attribute expands to code that names this crate.
@@ -170,7 +170,10 @@ impl Mind {
     fn settings(&self) -> Settings {
         let var = |name: &str| self.env.var(name).ok().map(|value| value.to_string());
         let mut settings = Settings {
-            system: var("MENSOR_SYSTEM").filter(|system| !system.is_empty()),
+            own: MindSettings {
+                system: var("MENSOR_SYSTEM").filter(|system| !system.is_empty()),
+                ..MindSettings::default()
+            },
             ..Settings::default()
         };
         if let Some(tokens) = var("MENSOR_COMPACT_AT").and_then(|tokens| tokens.parse().ok()) {
@@ -313,10 +316,7 @@ impl Mind {
         // A mind here is never a fork, its one hand is always with it, and
         // so its turn waits for no hand.
         let status = MindStatus {
-            mind: MindRecord {
-                name: object.name().clone(),
-                origin: Origin::Root,
-            },
+            mind: MindRecord::root(object.name().clone()),
             state: object.state(),
             hands: vec![Name::new(LOCAL).map_err(|error| Problem::new(500, error.to_string()))?],
             waiting: Vec::new(),

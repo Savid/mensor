@@ -22,3 +22,13 @@ forks, and the `Store` trait (`src/store.rs`).
 - `src/suite.rs` is what every store does, as functions over a new, empty
   store, behind the `suite` feature. `store_suite!` writes a test for each:
   a new function joins its list there.
+- A mind that has ended (`Item::Ended`) does nothing more: `next` is idle,
+  it asks no model, takes no prompt and refuses every hand. Whatever reads
+  hands, kin or the turn checks `ended` first.
+- A mind made from another's history starts with what `Mind::branch` gives,
+  as a fork's child starts with `Parted`: an unknown outcome for each clone
+  in flight and each call on a hand it left, `Released` for those hands,
+  then `Branched`, which resets its kin and numbers its calls above every
+  one its keeper made.
+- Which of the mind's own tools are offered is `Settings::tools`; when each
+  applies is `Table::new`.

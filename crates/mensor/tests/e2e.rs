@@ -1428,11 +1428,9 @@ async fn a_long_history_is_read_a_page_at_a_time() {
             from: None,
         })
         .collect();
-    let record = MindRecord {
-        name: name("m"),
-        origin: Origin::Root,
-    };
-    store.create(&record, &prompts).unwrap();
+    store
+        .create(&MindRecord::root(name("m")), &prompts)
+        .unwrap();
     let server = Server::over(store, Config::default(), "127.0.0.1:0").await;
     let http = client();
 
@@ -1640,8 +1638,8 @@ impl Store for StopsAfterFork {
         self.inner.read(name, from, limit)
     }
 
-    fn last(&self, name: &Name, kind: &str) -> Result<Option<Item>, StoreError> {
-        self.inner.last(name, kind)
+    fn last(&self, name: &Name, kind: &str, before: u64) -> Result<Option<Item>, StoreError> {
+        self.inner.last(name, kind, before)
     }
 
     fn prompt(&self, name: &Name, key: &str) -> Result<Option<String>, StoreError> {
@@ -1968,5 +1966,358 @@ async fn a_parent_that_rests_while_it_waits_hears_from_its_child() {
     assert_eq!(
         outcome(&server.history("m"), "tu_w"),
         &Outcome::Output(json!({child.as_str(): {"said": "Here."}}))
+    );
+}
+
+/// A host that offers two models.
+fn offering() -> Config {
+    Config {
+        models: vec!["claude-opus-5-5".into(), "claude-haiku-5-5".into()],
+        ..Config::default()
+    }
+}
+
+/// Asks the host to make `mind` with `body`: the answer's status, and what
+/// it said.
+async fn make(server: &Server, mind: &str, body: Value) -> (u16, Value) {
+    let path = format!("/minds/{mind}");
+    let answer = client().put(server.api(&path)).json(&body).send().await;
+    let answer = answer.unwrap();
+    let status = answer.status().as_u16();
+    (status, answer.json().await.unwrap_or_default())
+}
+
+/// Asks the host to end `mind`: the answer's status, and what it said.
+async fn end(server: &Server, mind: &str) -> (u16, Value) {
+    let path = format!("/minds/{mind}/end");
+    let answer = client().post(server.api(&path)).send().await.unwrap();
+    let status = answer.status().as_u16();
+    (status, answer.json().await.unwrap_or_default())
+}
+
+#[tokio::test]
+async fn a_mind_made_with_settings_of_its_own_asks_with_them_and_is_made_once() {
+    let server = Server::start(offering()).await;
+    server.model.then(vec![text("Hello.")]);
+    let body = json!({"model": "claude-haiku-5-5", "effort": "low", "system": "Play."});
+    let (status, made) = make(&server, "p1", body.clone()).await;
+    assert_eq!(status, 201);
+    assert_eq!(
+        (&made["origin"], &made["model"], &made["state"]),
+        (&json!("root"), &json!("claude-haiku-5-5"), &json!("idle"))
+    );
+    assert_eq!(make(&server, "p1", body).await.0, 200);
+    let other = json!({"model": "claude-opus-5-5"});
+    assert_eq!(make(&server, "p1", other).await.0, 409);
+
+    let (status, refused) = make(&server, "p2", json!({"model": "gpt-9"})).await;
+    assert_eq!(status, 400);
+    let detail = refused["detail"].as_str().unwrap();
+    assert!(detail.contains("claude-haiku-5-5"), "{detail}");
+    assert_eq!(make(&server, "p1.child", json!({})).await.0, 400);
+    assert!(server.status("p2").await.is_none());
+
+    let dir = tempfile::tempdir().unwrap();
+    let (_handle, _task) = server.hand(fresh("p1", "a1"), dir.path());
+    server.settled("p1").await;
+    server.prompt("p1", "hi").await;
+    eventually("the model is asked", || async {
+        server.model.requests().len() == 1
+    })
+    .await;
+    let asked = &server.model.requests()[0];
+    assert_eq!(asked.model.as_deref(), Some("claude-haiku-5-5"));
+    assert_eq!(asked.effort.as_deref(), Some("low"));
+    assert_eq!(asked.system.as_deref(), Some("Play."));
+}
+
+#[tokio::test]
+async fn a_mind_that_ends_lets_its_hands_go_and_takes_nothing_more() {
+    let server = Server::start(Config::default()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_handle, task) = server.hand(fresh("m", "a1"), dir.path());
+    server.settled("m").await;
+
+    let (status, ended_now) = end(&server, "m").await;
+    assert_eq!((status, &ended_now["state"]), (200, &json!("ended")));
+    assert_eq!(ended(task).await.unwrap(), Ended::Released);
+    let prompt = client()
+        .post(server.api("/minds/m/prompt"))
+        .json(&json!({"text": "more"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(prompt.status(), 409);
+    assert_eq!(end(&server, "m").await.0, 200);
+    // A hand that dials again, or a new one, is turned away for good.
+    let (_handle, task) = server.hand(fresh("m", "b2"), dir.path());
+    assert_eq!(ended(task).await.unwrap(), Ended::Released);
+    assert_eq!(server.status("m").await.unwrap().state, State::Ended);
+    assert_eq!(server.model.requests().len(), 0);
+}
+
+/// A host over `store` whose mind `k`, made to keep playing, saved then
+/// played on its hand `vm` in `dir`, then ended: and the index just after
+/// the save.
+async fn played_and_ended(store: Arc<dyn Store>, dir: &Path) -> (Server, usize) {
+    let server = Server::over(store, Config::default(), "127.0.0.1:0").await;
+    server
+        .model
+        .then(vec![
+            bash("tu_1", "echo saved > game.txt"),
+            bash("tu_2", "echo played >> game.txt"),
+        ])
+        .then(vec![text("Played.")])
+        .then(vec![text("Played again.")]);
+    assert_eq!(
+        make(&server, "k", json!({"system": "Keep playing."}))
+            .await
+            .0,
+        201
+    );
+    let (_handle, task) = server.hand(fresh("k", "vm"), dir);
+    eventually("vm joins k", || async {
+        server
+            .status("k")
+            .await
+            .is_some_and(|status| status.hands == [name("vm")])
+    })
+    .await;
+    server.prompt("k", "save, then play").await;
+    eventually("k has played", || async {
+        said(&server.history("k")) == ["Played."]
+    })
+    .await;
+    assert_eq!(end(&server, "k").await.0, 200);
+    assert_eq!(ended(task).await.unwrap(), Ended::Released);
+    let saved = server
+        .history("k")
+        .iter()
+        .position(|item| matches!(item, Item::Outcome { tool_use, .. } if tool_use == "tu_1"));
+    (server, saved.unwrap() + 1)
+}
+
+/// A mind made from just after `k`'s save, once `k` has ended, carries on
+/// from there on its hand, restored from then.
+async fn made_from_an_ended_mind(store: Arc<dyn Store>) {
+    let first = tempfile::tempdir().unwrap();
+    let (server, at) = played_and_ended(store, first.path()).await;
+    let keeper = server.history("k");
+    let ended_at = keeper.iter().position(|item| *item == Item::Ended).unwrap();
+    let from =
+        |mind: &str, at: usize, hand: &str| json!({"from": {"mind": mind, "at": at, "hand": hand}});
+    assert_eq!(
+        make(&server, "r", from("k", ended_at + 1, "vm")).await.0,
+        400
+    );
+    assert_eq!(make(&server, "r", from("nobody", 1, "vm")).await.0, 404);
+    assert_eq!(make(&server, "r", from("k", at, "b2")).await.0, 400);
+
+    // From just after the save: the VM as it was then is restored, and
+    // says hello to the new mind as the hand it was.
+    let (status, made) = make(&server, "r", from("k", at, "vm")).await;
+    assert_eq!(status, 201);
+    assert_eq!(
+        (&made["origin"], &made["from"]),
+        (
+            &json!("from"),
+            &json!({"mind": "k", "at": at, "hand": "vm"})
+        )
+    );
+    assert_eq!(made["system"], "Keep playing.");
+    let restored = tempfile::tempdir().unwrap();
+    std::fs::write(restored.path().join("game.txt"), "saved\n").unwrap();
+    let (_handle, _task) = server.hand(fresh("r", "vm"), restored.path());
+    eventually("r has played again", || async {
+        said(&server.history("r")) == ["Played again."]
+    })
+    .await;
+    let game = std::fs::read_to_string(restored.path().join("game.txt")).unwrap();
+    assert_eq!(game, "saved\nplayed\n");
+    let history = server.history("r");
+    assert_eq!(history[..at], keeper[..at]);
+    assert!(stdout(outcome(&history, "tu_2")).is_empty());
+    let asked = server.model.requests();
+    let last = asked.last().unwrap();
+    assert_eq!(last.system.as_deref(), Some("Keep playing."));
+    // It is no kin of the mind it was made from.
+    assert!(last.tools.iter().all(|tool| tool.name != "tell"));
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn a_mind_made_from_an_ended_minds_history_carries_on_with_its_hand() {
+    made_from_an_ended_mind(Arc::new(MemoryStore::new())).await;
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+#[ignore = "needs Postgres: make test-postgres"]
+async fn a_mind_made_over_postgres_from_an_ended_minds_history_carries_on_with_its_hand() {
+    made_from_an_ended_mind(postgres("e2e_from")).await;
+}
+
+#[tokio::test]
+async fn a_body_the_api_cannot_read_is_a_problem() {
+    let server = Server::start(Config::default()).await;
+    let http = client();
+    let misspelt = http
+        .put(server.api("/minds/m"))
+        .json(&json!({"modle": "scripted"}))
+        .send()
+        .await
+        .unwrap();
+    let plain = http
+        .post(server.api("/minds/m/prompt"))
+        .body(r#"{"text": "hi"}"#)
+        .send()
+        .await
+        .unwrap();
+    let extra = http
+        .post(server.api("/minds/m/release"))
+        .json(&json!({"hand": "a1", "why": "done"}))
+        .send()
+        .await
+        .unwrap();
+    for answer in [misspelt, plain, extra] {
+        assert_eq!(answer.status(), 400);
+        let kind = answer.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(kind, "application/problem+json");
+        let problem: Value = answer.json().await.unwrap();
+        assert_eq!(problem["status"], 400);
+    }
+}
+
+#[tokio::test]
+async fn a_minds_token_makes_and_ends_only_minds_it_reaches() {
+    let host_token = "fake-host-token";
+    let token = Token::new(host_token).unwrap();
+    let config = Config {
+        token: Some(token.clone()),
+        ..Config::default()
+    };
+    let server = Server::start(config).await;
+    let m_token = mind_token(&token, &name("m")).unwrap();
+    let http = client();
+    let as_m = |request: reqwest::RequestBuilder| request.bearer_auth(&m_token).send();
+    let made = as_m(http.put(server.api("/minds/m")).json(&json!({}))).await;
+    assert_eq!(made.unwrap().status(), 201);
+    let other = as_m(http.put(server.api("/minds/n")).json(&json!({}))).await;
+    assert_eq!(other.unwrap().status(), 403);
+    let ended = as_m(http.post(server.api("/minds/n/end"))).await;
+    assert_eq!(ended.unwrap().status(), 403);
+    let n = http
+        .put(server.api("/minds/n"))
+        .bearer_auth(host_token)
+        .json(&json!({}))
+        .send()
+        .await;
+    assert_eq!(n.unwrap().status(), 201);
+    let from_n = json!({"from": {"mind": "n", "at": 0, "hand": "a1"}});
+    let made = as_m(http.put(server.api("/minds/m")).json(&from_n)).await;
+    assert_eq!(made.unwrap().status(), 403);
+}
+
+#[tokio::test]
+async fn the_list_of_minds_leaves_out_each_ones_system_prompt() {
+    let server = Server::start(Config::default()).await;
+    let body = json!({"model": "scripted", "effort": "turbo", "system": "Play."});
+    assert_eq!(make(&server, "p1", body).await.0, 201);
+    let listed: Value = client()
+        .get(server.api("/minds"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed[0]["model"], "scripted");
+    assert!(listed[0].get("system").is_none(), "{listed}");
+    let one: Value = client()
+        .get(server.api("/minds/p1"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(one["system"], "Play.");
+    // An effort is not empty.
+    assert_eq!(make(&server, "p2", json!({"effort": ""})).await.0, 400);
+}
+
+#[tokio::test]
+async fn a_fork_child_is_made_with_its_parents_settings() {
+    let server = Server::start(offering()).await;
+    for _ in 0..6 {
+        server.model.then_with(forking);
+    }
+    let haiku = json!({"model": "claude-haiku-5-5"});
+    assert_eq!(make(&server, "m", haiku).await.0, 201);
+    let root = tempfile::tempdir().unwrap();
+    let (dir, clones) = (root.path().join("work"), root.path().join("clones"));
+    std::fs::create_dir(&dir).unwrap();
+    let _a1 = server.cloning_hand("m", "a1", &dir, &clones);
+    server.settled("m").await;
+    server.prompt("m", "write a note, then fork").await;
+    eventually("the child is done", || async {
+        let minds = server.host.minds().await;
+        minds.len() == 2 && minds.iter().all(|status| status.state == State::Idle)
+    })
+    .await;
+    for status in server.host.minds().await {
+        let model = status.mind.settings.model;
+        assert_eq!(model.as_deref(), Some("claude-haiku-5-5"));
+    }
+    let asked = server.model.requests();
+    assert!(asked.len() >= 4);
+    let models = asked.iter().map(|request| request.model.as_deref());
+    assert!(
+        models
+            .into_iter()
+            .all(|model| model == Some("claude-haiku-5-5"))
+    );
+}
+
+#[tokio::test]
+async fn a_message_to_a_parent_that_has_ended_does_not_run() {
+    let server = Server::start(Config::default()).await;
+    // The parent writes, forks and says so; its child writes and is done.
+    for _ in 0..5 {
+        server.model.then_with(forking);
+    }
+    server
+        .model
+        .then(vec![own(
+            "tu_t",
+            "tell",
+            json!({"mind": "m", "text": "all done"}),
+        )])
+        .then(vec![text("Told.")]);
+    let root = tempfile::tempdir().unwrap();
+    let (dir, clones) = (root.path().join("work"), root.path().join("clones"));
+    std::fs::create_dir(&dir).unwrap();
+    let _a1 = server.cloning_hand("m", "a1", &dir, &clones);
+    server.settled("m").await;
+    server.prompt("m", "write a note, then fork").await;
+    eventually("the child is done", || async {
+        let minds = server.host.minds().await;
+        minds.len() == 2 && minds.iter().all(|status| status.state == State::Idle)
+    })
+    .await;
+    let child = server.host.minds().await[1].mind.name.clone();
+
+    assert_eq!(end(&server, "m").await.0, 200);
+    server.prompt(child.as_str(), "tell your parent").await;
+    eventually("the child has told", || async {
+        said(&server.history(child.as_str())).contains(&"Told.")
+    })
+    .await;
+    assert_eq!(
+        outcome(&server.history(child.as_str()), "tu_t"),
+        &Outcome::NotRun("m has ended".into())
     );
 }
