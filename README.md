@@ -86,14 +86,16 @@ hand's process can, so confining it is up to whoever runs it.
 - Calls to different hands run at once. Calls to one hand run in order.
 - Every hand tool takes a `hand` argument, which may be left out while the
   mind has one hand.
-- A call waits, unsent, while its hand is away. An interrupt ends it.
 - The mind asks its model only while a hand is connected, or once it has let
   every hand go.
-- No call runs twice. A call that may have run without a result, because
-  its hand restarted, is recorded as unknown, and the model is told to check.
-- A hand that dies mid-call can be let go with `POST .../release`. Its calls
-  are recorded as unknown, and the turn goes on. The mind refuses that hand
-  from then on.
+
+### When something fails
+
+![When something fails. A connection drops: the hand holds the result, and the mind gets it when the hand reconnects. A hand restarts mid-call: the call's outcome is unknown, and the model is told to check. A hand is away: the call waits, and is sent when the hand is back. A hand dies: release it, its call is unknown, and the turn goes on. An interrupt: a running call is cancelled, and one not yet sent does not run. The host stops mid-fork: the children are made first, so the fork completes once.](docs/images/failures.svg)
+
+A call is stored before it is sent, and one that may have run is never sent
+again: no call runs twice. A dead hand is let go with `POST .../release`, and
+refused from then on.
 
 ## The mind's own tools
 
