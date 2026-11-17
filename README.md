@@ -282,6 +282,12 @@ names more a mind may be made with, through the same API and credential. A
 request Claude declines may be answered by a fallback model, unless
 `--no-fallbacks` is set.
 
+- `ANTHROPIC_AUTH_TOKEN` goes on `Authorization` as a plain bearer, as a
+  gateway in front of the API takes it. A Claude.ai OAuth token is not one.
+- A fork's child, or a mind made `from` another, leaves out the reasoning in
+  the steps it carries from that mind: it was made under that mind's prompt
+  and tools, so the API would refuse it, or drop it and every block after
+  it. The mind's own reasoning goes back to the model as usual.
 - `--max-tokens` (16,000) caps one reply: the Messages API's `max_tokens`,
   and Chat Completions' `max_completion_tokens`, which OpenAI and
   OpenRouter both honour. A reply cut off while it asks for a tool is

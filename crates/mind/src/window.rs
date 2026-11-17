@@ -102,6 +102,8 @@ fn conversation(
         None => (0, 0),
     };
 
+    let own_from = carried(items);
+
     let mut messages = Vec::new();
     let mut prompts: VecDeque<(u64, Cow<'_, str>)> = VecDeque::new();
     // The tool asked of the last step, each with its outcome once one is read.
@@ -120,7 +122,7 @@ fn conversation(
                 }
                 push_user(&mut messages, std::mem::take(&mut user));
 
-                let said: Vec<Content> = content.iter().map(said).collect();
+                let said = spoken(content, at < own_from);
                 if !said.is_empty() {
                     messages.push(Message {
                         role: Role::Assistant,
@@ -275,6 +277,28 @@ fn push_user(messages: &mut Vec<Message>, content: Vec<Content>) {
             content,
         }),
     }
+}
+
+/// How many of `items` were carried from the mind this one was forked or
+/// made from: those before its `Parted` or `Branched`, or none.
+fn carried(items: &[Item]) -> usize {
+    items
+        .iter()
+        .rposition(|item| matches!(item, Item::Parted { .. } | Item::Branched { .. }))
+        .unwrap_or(0)
+}
+
+/// What a step said, as the model is shown it again. A step `carried` from
+/// the mind this one was forked or made from is shown without its
+/// reasoning: that is bound to the other mind's prompt and tools, so the
+/// API would refuse it, or drop it and every block after it, this mind's
+/// own included.
+fn spoken(content: &[Block], carried: bool) -> Vec<Content> {
+    content
+        .iter()
+        .filter(|block| !(carried && matches!(block, Block::Other { .. })))
+        .map(said)
+        .collect()
 }
 
 fn said(block: &Block) -> Content {

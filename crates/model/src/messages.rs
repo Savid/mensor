@@ -12,8 +12,6 @@ pub const VERSION: &str = "2026-10-21";
 pub const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
 /// Lets a request say what happens to reasoning bound to an edited history.
 pub const BINDING_BETA: &str = "thinking-binding-controls-2026-08-01";
-/// Marks an OAuth token, which goes on `Authorization` and not `x-api-key`.
-pub const OAUTH_BETA: &str = "oauth-2025-04-20";
 
 pub(crate) fn post(config: &Config, request: &ModelRequest, drop_reasoning: bool) -> Post {
     let url = format!("{}/v1/messages", config.base_url.trim_end_matches('/'));
@@ -21,10 +19,7 @@ pub(crate) fn post(config: &Config, request: &ModelRequest, drop_reasoning: bool
     let mut betas = Vec::new();
     match &config.credential {
         Credential::ApiKey(key) => headers.push(("x-api-key", key.clone())),
-        Credential::Token(token) => {
-            headers.push(("authorization", format!("Bearer {token}")));
-            betas.push(OAUTH_BETA);
-        }
+        Credential::Token(token) => headers.push(("authorization", format!("Bearer {token}"))),
     }
     if config.fallbacks {
         betas.push(FALLBACK_BETA);
@@ -521,7 +516,7 @@ mod tests {
     }
 
     #[test]
-    fn a_token_goes_on_authorization_with_its_beta() {
+    fn a_token_goes_on_authorization_as_a_bearer_and_nothing_more() {
         let config = Config {
             fallbacks: false,
             ..Config::messages(Credential::Token("tok".into()), "claude-opus-5-5")
@@ -529,7 +524,7 @@ mod tests {
         let request = request();
         let post = Exchange::new(&config, &request).post();
         assert_eq!(post.header("authorization"), Some("Bearer tok"));
-        assert_eq!(post.header("anthropic-beta"), Some(OAUTH_BETA));
+        assert_eq!(post.header("anthropic-beta"), None);
         assert_eq!(post.header("x-api-key"), None);
         assert_eq!(post.header("anthropic-version"), Some(VERSION));
         assert_eq!(body_of(&post)["model"], json!("claude-opus-5-5"));

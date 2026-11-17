@@ -54,7 +54,7 @@ use std::time::Duration;
 use mensor_mind::{ModelError, ModelReply, ModelRequest};
 use serde::Deserialize;
 
-pub use messages::{BINDING_BETA, FALLBACK_BETA, OAUTH_BETA, VERSION};
+pub use messages::{BINDING_BETA, FALLBACK_BETA, VERSION};
 
 /// The API a model is asked through.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,7 +86,7 @@ pub enum Credential {
     /// An API key. The Messages API takes it as `x-api-key`, Chat
     /// Completions as a bearer token.
     ApiKey(String),
-    /// An OAuth access token, sent as a bearer token.
+    /// A token sent as a plain bearer, as a gateway in front of the API takes it.
     Token(String),
 }
 

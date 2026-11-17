@@ -2583,6 +2583,58 @@ fn just_after(stored: &[Item], tool_use: &str) -> usize {
         .unwrap()
 }
 
+/// A block of the model's own reasoning, as the Messages API writes it.
+fn reasoning(text: &str) -> Block {
+    Block::Other {
+        value: json!({"type": "thinking", "thinking": text, "signature": "signed"}),
+    }
+}
+
+/// The reasoning the mind last sent the model, in order.
+fn reasons(host: &Host) -> Vec<String> {
+    let asked = host.asked.last().unwrap();
+    asked
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|content| match content {
+            Content::Other(value) => value["thinking"].as_str().map(str::to_owned),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_mind_leaves_out_the_reasoning_it_carries_from_another_and_keeps_its_own() {
+    // m reasons as it forks, and is shown its reasoning again.
+    let mut host = Host::new();
+    host.attach(&cloning("a1", "boot-a"));
+    host.prompt("try two ways");
+    host.reply(vec![
+        reasoning("why fork"),
+        own(
+            "tu_1",
+            "fork",
+            json!({"hand": "a1", "prompts": ["one", "two"]}),
+        ),
+    ]);
+    let (id, _) = clone_call(&mut host, "a1");
+    host.result_from("a1", id, Reply::Output(json!({})));
+    assert_eq!(reasons(&host), ["why fork"]);
+
+    // Its child carries that step, but not reasoning made under m's tools,
+    // and keeps its own.
+    let mut child = first_child(&host);
+    assert!(reasons(&child).is_empty());
+    child.reply(vec![reasoning("why ls"), bash("tu_2", "ls")]);
+    child.result(id + 1, json!("a.txt"));
+    assert_eq!(reasons(&child), ["why ls"]);
+
+    // So does a mind made from m's history.
+    let (_, made) = made_from(&host, host.stored.len(), "a1");
+    assert!(reasons(&made).is_empty());
+}
+
 #[test]
 fn a_mind_made_from_another_runs_the_rest_of_its_step_on_the_hand_it_keeps() {
     let mut host = Host::new();
