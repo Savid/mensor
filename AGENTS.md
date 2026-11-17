@@ -1,14 +1,10 @@
 # mensor
 
-An agent as a mind with hands. A mind holds the history, calls the model and
-drives its hands. A hand runs anywhere (its own machine, the host's process,
-a Durable Object) and declares capabilities, whose operations become the
-model's tools. The mind has tools of its own: `tell` and `wait` need no
-hand, `fork` and `clone_hand` have a hand clone itself, and `release_hand`
-lets one go. `--max-clones` caps the unreleased clones `clone_hand` made.
-`mensor serve` hosts minds, `mensor hand` runs a hand that dials them, and
-`mensor run` does both in one process. `crates/cloudflare` runs a mind and
-its one hand as a Durable Object. The protocol is `docs/protocol.md`.
+An agent as a mind with hands, in Rust. `mensor serve` hosts minds,
+`mensor hand` runs a hand that dials one, and `mensor run` does both in one
+process. `crates/cloudflare` runs a mind and its one hand as a Durable
+Object. `README.md` says what a mind and a hand are, and `docs/protocol.md`
+what they say to each other.
 
 ## Commands
 
@@ -35,82 +31,24 @@ While iterating, test the crate you touched: `cargo test -p mensor-mind`.
   no I/O, no clock, no randomness, no Tokio, and they build for
   `wasm32-unknown-unknown`. A decision goes there, as a function of what it
   is given, and is tested there.
-- `crates/mind-host` and `crates/hand-host` own the tasks, sockets and
-  files, and perform what the pure crates decide, in the order given. A
-  mind's host stores `Output::Append` and makes `Output::Fork` before the
-  outputs after them: never send what is not stored, and never store a
-  fork before its children exist. `Store` calls never run on a runtime
-  thread: they go through `blocking` (`crates/mind-host/src/task.rs`) or
-  `spawn_blocking`.
-- `crates/mind/src/tools.rs` is what the model is shown and what each tool
-  does. A tool use for a hand that is away waits unissued. The mind's own
-  tools run after their step's hand tools, one at a time, and a fork runs
-  alone among them. Child names and fork budgets are decided in the pure
-  mind (`fork.rs`).
-- Minds talk only to their parent and children. `Output::Tell` is a prompt
-  under a key made from the tool use, so a message sent again is the same
-  prompt. The host delivers it on a task of its own: a mind's task never
-  awaits another mind's. `Output::Watch` lives in the host's memory only:
-  a mind watches again when it loads (`Mind::start`), and `Host::open` wakes
-  every mind with work that needs no hand. A resting mind's status comes
-  from `Store::recent`, which includes the items that name its hands and kin.
-- A transport is two halves: a hand dials through a `Dial`, which returns a
-  `Link`; a host takes it through `Host::connect`, which returns a
-  `Connection`. The WebSocket joins them over a network, and
-  `crates/mensor/src/local.rs` in memory.
+- The hosts (`crates/mind-host`, `hand-host` and `cloudflare`) own the
+  tasks, sockets and files, and perform what the pure crates decide, in the
+  order given: never send what is not stored, and never store a fork before
+  its children exist.
 - A capability implements `mensor_hand::Capability`, names its operations
-  and bounds its own output. `clone`
-  (`crates/hand-host/src/capabilities/clone.rs`)
-  is never shown to the model. It makes every copy or none, under a `.part`
-  name until the copy is whole. `Hands` (`crates/mensor/src/hand.rs`) runs
-  a hand and all its clones as tasks of one process; the copies under
-  `--clones` are the process's only record of its clones, and one is
-  deleted only when its mind releases its clone.
-- `crates/model` builds each API's requests and reads its answers
-  (`messages.rs`, `chat.rs`), retries included. Hosts only send. A request
-  is written from structs that borrow the conversation, never through a
-  `serde_json::Value`. Every request streams, and `Reading` turns the
-  events back into one answer.
+  and bounds its own output.
 - `crates/api` holds the HTTP bodies both hosts serve: neither declares a
   shape of its own.
-- What a mind tells its followers goes down one ordered channel each, so a
-  reply's text always comes before the step that holds it.
-- `crates/mensor` is three binaries over one library: `host.rs` is all a
-  host needs and `hand.rs` all a hand needs. Nothing in `hand.rs` may name
-  `mensor-mind-host`, `mensor-model` or `mensor-store-sqlite`.
-- `crates/store-sqlite` implements the `Store` trait in
-  `crates/mind/src/store.rs`. Appends commit in groups, and one returns only
-  once its commit has. Reads go through a second, read-only connection
-  (`reading()`), writes through `lock()`. `create` writes a mind and its
-  first items in one transaction, and a mind that exists with the same
-  origin counts as made.
-- `crates/object` is a mind and its hand `local` over a `Storage`, and
-  `crates/cloudflare` its only host. Put what does not need the platform in
-  `crates/object` or `crates/cloudflare/src/api.rs`, where native tests
-  reach it.
 - A protocol change updates `docs/protocol.md`, `crates/protocol` and both
   hosts.
-
-## Size and speed
-
-- A mind holds only the end of its history: everything after its last
-  summary, which carries what it needs from before (`from`, `hands`,
-  `lastCall`, `forksLeft`, `parent`, `children`). What reaches further back
-  asks the store, a page at a time.
-- What a mind looks up (a call, an outcome, the last step) is in the round
-  in progress. Only a prompt's key and the last call's id are looked for
-  further back.
-- A child shares its parent's rows in the store without copying them.
-- A mind is in memory only while it is awake. The way to reach its task is
-  cloned only under the lock on the host's map of minds, and dropped once
-  used, except by a hand's `Connection`, which holds it until the hand
-  detaches. A task that rests relies on being the only holder.
-- The release profile is built for size. Before adding a dependency, compare
-  `target/release/mensor*` with and without it. TLS uses ring: a host, and
-  any test that makes a client, installs it first.
+- `crates/mind`, `mind-host`, `hand-host`, `model`, `store-sqlite`, `mensor`
+  and `cloudflare` each have an `AGENTS.md` with their own rules. Read it
+  before changing that crate.
 
 ## Dependencies and CI
 
+- The release profile is built for size. Before adding a dependency, compare
+  `target/release/mensor*` with and without it.
 - `deny.toml` is what `make deny` holds dependencies to. A new licence must
   be permissive. A second version of a crate fails until it is fixed or its
   older version joins `skip` with the reason.
@@ -122,13 +60,13 @@ While iterating, test the crate you touched: `cargo test -p mensor-mind`.
 
 - No `unsafe`, except glibc's `malloc_trim` in `crates/mensor/src/host.rs`.
   Add no other without asking.
-- Every public item has a doc comment.
 - Fix a lint rather than suppress it. A suppression is
   `#[expect(<lint>, reason = "why")]` on one item. The lints allowed
   everywhere are in the root `Cargo.toml`.
 - An error a caller tells apart is a `thiserror` enum. Only `crates/mensor`
   and the hosts' HTTP problems word an error for a person.
 - Log with `tracing`, with fields. The worker logs with `console_*!`.
+- TLS uses ring: a host, and any test that makes a client, installs it first.
 
 ## Tests
 
@@ -138,12 +76,11 @@ While iterating, test the crate you touched: `cargo test -p mensor-mind`.
 - Wait in a test by polling, as `eventually` does. Sleep only to show that
   something does not happen.
 - Tests that run commands use a `tempfile` directory.
-- A workerd test starts the worker with `--var` values made for it, in an
-  environment cleared down to `PATH`, `HOME` and `VOLTA_HOME`, with `CI`
-  and `WRANGLER_SEND_METRICS` set.
 
 ## Docs
 
+- A change to a flag, endpoint, default or behaviour that `README.md`
+  describes updates the README in the same change.
 - Diagrams are plain SVGs in `docs/images`: colours are CSS variables,
   redefined under `prefers-color-scheme: dark`, background included. No
   mermaid. A change to what a diagram shows updates it.
