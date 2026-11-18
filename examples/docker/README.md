@@ -20,7 +20,7 @@ compose runs, `mensor-example`. Its tags have no `v`.
 
 ```bash
 docker build -t mensor-example .
-# or: docker pull ghcr.io/savid/mensor:0.1.0 && docker tag ghcr.io/savid/mensor:0.1.0 mensor-example
+# or: docker pull ghcr.io/savid/mensor:0.1.1 && docker tag ghcr.io/savid/mensor:0.1.1 mensor-example
 export COMPOSE_FILE=examples/docker/compose.yaml
 export MENSOR_TOKEN="$(openssl rand -hex 32)"   # the host's: it reaches every mind
 export MENSOR_M_TOKEN="$(docker run --rm -e MENSOR_TOKEN mensor-example token --mind m)"

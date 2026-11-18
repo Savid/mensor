@@ -13,7 +13,7 @@ call.
 
 Each release has static binaries for Linux on x86-64 and arm64, and an
 image for both, `ghcr.io/savid/mensor`, all built with the `postgres`
-feature. Image tags have no `v`: `0.1.0`, `0.1`, and `latest`, which exists
+feature. Image tags have no `v`: `0.1.1`, `0.1`, and `latest`, which exists
 once a stable release does.
 
 With the GitHub CLI, which needs `gh auth login` even for a public repo,
@@ -21,7 +21,7 @@ download a release's binaries and check they were built by its workflow
 from its tag:
 
 ```bash
-version=0.1.0 file="mensor-$version-$(uname -m)-unknown-linux-musl.tar.gz"
+version=0.1.1 file="mensor-$version-$(uname -m)-unknown-linux-musl.tar.gz"
 gh release download "v$version" -R Savid/mensor -p "$file"
 gh attestation verify "$file" -R Savid/mensor \
   --signer-workflow Savid/mensor/.github/workflows/release.yml --source-ref "refs/tags/v$version"
@@ -30,7 +30,7 @@ gh attestation verify "$file" -R Savid/mensor \
 Or with curl alone, checking the download against the release's checksums:
 
 ```bash
-version=0.1.0 file="mensor-$version-$(uname -m)-unknown-linux-musl.tar.gz"
+version=0.1.1 file="mensor-$version-$(uname -m)-unknown-linux-musl.tar.gz"
 curl -fLO "https://github.com/Savid/mensor/releases/download/v$version/$file"
 curl -fLO "https://github.com/Savid/mensor/releases/download/v$version/SHA256SUMS"
 sha256sum -c --ignore-missing SHA256SUMS
@@ -46,9 +46,9 @@ export MENSOR_TOKEN="$(openssl rand -hex 32)"
 export MENSOR_POSTGRES="postgres://mensor:$(cat path/to/db.password)@db.example/mensor"
 export ANTHROPIC_API_KEY="$(cat path/to/anthropic.key)"
 docker run -d -p 127.0.0.1:7878:7878 -e MENSOR_TOKEN -e MENSOR_POSTGRES -e ANTHROPIC_API_KEY \
-  ghcr.io/savid/mensor:0.1.0 serve --listen 0.0.0.0:7878
-gh attestation verify oci://ghcr.io/savid/mensor:0.1.0 -R Savid/mensor \
-  --signer-workflow Savid/mensor/.github/workflows/release.yml --source-ref refs/tags/v0.1.0
+  ghcr.io/savid/mensor:0.1.1 serve --listen 0.0.0.0:7878
+gh attestation verify oci://ghcr.io/savid/mensor:0.1.1 -R Savid/mensor \
+  --signer-workflow Savid/mensor/.github/workflows/release.yml --source-ref refs/tags/v0.1.1
 ```
 
 ## Quick start

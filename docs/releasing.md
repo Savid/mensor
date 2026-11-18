@@ -10,8 +10,8 @@ only secret.
    `X.Y.Z-rc.N` for a pre-release. Run `cargo update --workspace`, which
    writes it into `Cargo.lock`.
 2. Commit that to master, and wait for CI to pass.
-3. Tag the commit with a message, which becomes the release's notes, and
-   push the tag:
+3. Tag the commit with a message, which becomes the release's notes
+   (verify refuses a tag without one), and push the tag:
 
 ```bash
 git tag -a v0.2.0 -m "What changed, as the release's notes."

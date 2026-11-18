@@ -983,7 +983,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mensor"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "clap",
@@ -1007,7 +1007,7 @@ dependencies = [
 
 [[package]]
 name = "mensor-api"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hmac 0.12.1",
  "mensor-mind",
@@ -1020,7 +1020,7 @@ dependencies = [
 
 [[package]]
 name = "mensor-cloudflare"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "futures-channel",
@@ -1042,7 +1042,7 @@ dependencies = [
 
 [[package]]
 name = "mensor-hand"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "mensor-protocol",
  "serde",
@@ -1051,7 +1051,7 @@ dependencies = [
 
 [[package]]
 name = "mensor-hand-host"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "futures-util",
  "getrandom 0.3.4",
@@ -1071,7 +1071,7 @@ dependencies = [
 
 [[package]]
 name = "mensor-mind"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "mensor-protocol",
  "serde",
@@ -1081,7 +1081,7 @@ dependencies = [
 
 [[package]]
 name = "mensor-mind-host"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "futures-util",
@@ -1101,7 +1101,7 @@ dependencies = [
 
 [[package]]
 name = "mensor-model"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "mensor-mind",
  "serde",
@@ -1110,7 +1110,7 @@ dependencies = [
 
 [[package]]
 name = "mensor-object"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "mensor-hand",
  "mensor-mind",
@@ -1121,7 +1121,7 @@ dependencies = [
 
 [[package]]
 name = "mensor-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1130,7 +1130,7 @@ dependencies = [
 
 [[package]]
 name = "mensor-store-postgres"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "mensor-mind",
  "mensor-protocol",
@@ -1146,7 +1146,7 @@ dependencies = [
 
 [[package]]
 name = "mensor-store-sqlite"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "mensor-mind",
  "mensor-protocol",

@@ -49,6 +49,8 @@ jobs:
           [[ $TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || fail "$TAG is not vX.Y.Z or vX.Y.Z-pre"
           [[ $TAG == "v$version" ]] || fail "$TAG does not name the workspace's version, $version"
           git merge-base --is-ancestor "$GITHUB_SHA" origin/master || fail "$TAG is not on master"
+          kind=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" -q .object.type) || fail "could not read $TAG"
+          [[ $kind == tag ]] || fail "$TAG has no message for the release's notes: tag with git tag -a"
           if found=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json tagName 2>&1); then
             fail "$TAG is released already: release the next version"
           elif [[ $found != "release not found" ]]; then
@@ -168,7 +170,11 @@ jobs:
           BUNDLE: ${{ steps.attest.outputs.bundle-path }}
         run: |
           cp "$BUNDLE" "dist/mensor-$VERSION-binaries.sigstore.json"
+          # The tag's message, read through the API: --notes-from-tag reads
+          # a clone, and this job has none.
+          tag=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" -q .object.sha)
+          gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag" -q .message > "$RUNNER_TEMP/notes.md"
           pre=()
           if [[ $TAG == *-* ]]; then pre=(--prerelease); fi
-          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --notes-from-tag \
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --notes-file "$RUNNER_TEMP/notes.md" \
             --latest="$LATEST" "${pre[@]}" dist/*.tar.gz dist/SHA256SUMS dist/*.sigstore.json
