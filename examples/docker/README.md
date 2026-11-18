@@ -1,9 +1,9 @@
 # Hands in containers
 
 A host, and hands for two minds: `a1` and `b2` for `m`, `c3` for `n`, each
-in a container of its own. They share one image, which has `git`,
+in a container of its own. They share the repo's image, which has `git`,
 `ripgrep`, `python3`, `jq` and `curl` for the model's commands: add what
-your work needs to the [`Dockerfile`](Dockerfile). The hands dial the host
+your work needs to the [`Dockerfile`](../../Dockerfile). The hands dial the host
 over the compose network, and run the model's commands in their own
 containers.
 
@@ -15,8 +15,12 @@ every hand's output, and say hello as any of their hands, which takes that
 hand's place. The model's commands cannot read it from the hand's process,
 but a `docker exec` shell has it in its environment.
 
+Build the image from the repo, or take a release's and give it the name
+compose runs, `mensor-example`. Its tags have no `v`.
+
 ```bash
-docker build -f examples/docker/Dockerfile -t mensor-example .
+docker build -t mensor-example .
+# or: docker pull ghcr.io/savid/mensor:0.1.0 && docker tag ghcr.io/savid/mensor:0.1.0 mensor-example
 export COMPOSE_FILE=examples/docker/compose.yaml
 export MENSOR_TOKEN="$(openssl rand -hex 32)"   # the host's: it reaches every mind
 export MENSOR_M_TOKEN="$(docker run --rm -e MENSOR_TOKEN mensor-example token --mind m)"
@@ -64,14 +68,19 @@ running once it ends: it stays a zombie until the hand ends.
 ## Postgres
 
 [`compose.postgres.yaml`](compose.postgres.yaml) keeps the histories in
-Postgres in place of SQLite: it adds a Postgres container, and builds the
-host with the `postgres` feature.
+Postgres in place of SQLite: it adds a Postgres container, which the
+image's `postgres` feature reaches.
+
+Compose runs whatever `mensor-example` it finds, so build or pull it again
+first: an image built without the `postgres` feature refuses
+`MENSOR_POSTGRES`, saying so.
 
 ```bash
 docker compose down
+docker build -t mensor-example .   # or pull and tag a release's, as above
 export COMPOSE_FILE=examples/docker/compose.yaml:examples/docker/compose.postgres.yaml
 export MENSOR_DB_PASSWORD="$(openssl rand -hex 24)"
-docker compose up -d --build
+docker compose up -d
 ```
 
 The host reaches this Postgres plainly (`sslmode=disable`): it has no

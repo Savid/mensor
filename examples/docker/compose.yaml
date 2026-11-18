@@ -5,10 +5,10 @@
 # alone.
 name: mensor
 
+# The image built from the repo's Dockerfile, or a release's tagged as
+# mensor-example: see README.md.
 x-mensor: &mensor
-  build:
-    context: ../..
-    dockerfile: examples/docker/Dockerfile
+  build: ../..
   image: mensor-example
 
 services:

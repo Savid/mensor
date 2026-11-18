@@ -18,6 +18,7 @@ make test     # every native test, the end-to-end ones included
 make deny     # cargo-deny: advisories, licences, duplicate versions, sources
 make tools    # installs the pinned cargo-deny and worker-build
 make build    # target/release/mensor, mensor-mind and mensor-hand
+make image    # the image, from the root Dockerfile, for this machine's arch (needs Docker)
 make test-cloudflare    # builds the worker and runs it on workerd under wrangler (needs Node)
 make test-postgres      # the Postgres store, and the end-to-end tests over it, in Docker (needs Docker)
 ```
@@ -62,8 +63,17 @@ While iterating, test the crate you touched: `cargo test -p mensor-mind`.
   be permissive. A second version of a crate fails until it is fixed or its
   older version joins `skip` with the reason.
 - `.github/workflows/ci.yml` runs `make check`, `make test-cloudflare`,
-  `make test-postgres`, and actionlint and zizmor. Actions are pinned by
-  commit, tools and images by version.
+  `make test-postgres`, actionlint and zizmor, builds the static binaries
+  for amd64 and arm64, and builds the image from them without pushing it.
+  Actions are pinned by commit, tools by version, and the images a release
+  is built from by digest.
+- A release is a `vX.Y.Z` tag on master. `.github/workflows/release.yml`
+  runs CI on it, then publishes CI's binaries in a GitHub Release and the
+  image built from them to `ghcr.io/savid/mensor`, and attests the tarballs
+  and the image. Nothing is published from a machine. See
+  `docs/releasing.md`.
+- The root `Dockerfile` is the one image. Its header says how it gets the
+  same static binary whether built from the repo or for a release.
 - MCP is not wanted here, in any form. A capability is a Rust trait.
 
 ## Rust

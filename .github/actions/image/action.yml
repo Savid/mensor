@@ -1,0 +1,65 @@
+name: Image
+description: >-
+  Builds the image for amd64 and arm64 from the static binaries this run's
+  binaries jobs uploaded, with provenance and an SBOM, and pushes it when
+  asked; when not, writes it to a file in job temp. Only the image's tools
+  are installed under emulation. Every tool image is pinned by digest, and
+  none is cached.
+inputs:
+  push:
+    description: Whether to push the image.
+    default: "false"
+  tags:
+    description: Its tags, one a line.
+    default: ""
+  labels:
+    description: Its labels, one a line.
+    default: ""
+  annotations:
+    description: Its annotations, one a line.
+    default: ""
+outputs:
+  digest:
+    description: The image's digest.
+    value: ${{ steps.build.outputs.digest }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        pattern: mensor-*
+        path: ${{ runner.temp }}/dist
+    # mensor for each architecture, where the Dockerfile's binaries stage
+    # would put it.
+    - name: Unpack
+      shell: bash
+      env:
+        DIST: ${{ runner.temp }}/dist
+        BINARIES: ${{ runner.temp }}/binaries
+      run: |
+        for arch in amd64 arm64; do
+          mkdir -p "$BINARIES/$arch"
+          tar -xzf "$DIST/mensor-$arch"/*.tar.gz -C "$BINARIES/$arch" --strip-components=1 --wildcards '*/mensor'
+        done
+    - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      with:
+        image: docker.io/tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+        platforms: arm64
+        cache-image: false
+    - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      with:
+        driver-opts: image=moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
+        cache-binary: false
+    - id: build
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+      with:
+        context: .
+        build-contexts: binaries=${{ runner.temp }}/binaries
+        platforms: linux/amd64,linux/arm64
+        push: ${{ inputs.push }}
+        outputs: ${{ inputs.push != 'true' && format('type=oci,dest={0}/mensor.oci.tar', runner.temp) || '' }}
+        tags: ${{ inputs.tags }}
+        labels: ${{ inputs.labels }}
+        annotations: ${{ inputs.annotations }}
+        provenance: mode=max
+        sbom: generator=docker/buildkit-syft-scanner:1.12.1@sha256:873a7458c3c8ac8e32c7b796c10e1600b07b963d2aa000a72a2d97aaaa2d6315

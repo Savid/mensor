@@ -8,7 +8,7 @@ edition = "2024"
 rust-version = "1.97"
 license = "MIT"
 publish = false
-repository = "https://github.com/Savid/todo"
+repository = "https://github.com/Savid/mensor"
 
 [workspace.dependencies]
 mensor-api = { path = "crates/api" }

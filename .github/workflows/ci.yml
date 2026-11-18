@@ -4,8 +4,10 @@ on:
   push:
     branches: [master]
   pull_request:
+  # A release runs these jobs on its tag before it publishes anything.
+  workflow_call:
 
-# One run per branch or PR; a newer push cancels the older run.
+# One run per branch, PR or release tag; a newer push cancels the older run.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref_name }}
   cancel-in-progress: true
@@ -17,7 +19,7 @@ jobs:
   # What a change must pass: rustfmt, clippy, the docs, every native test,
   # and cargo-deny over the dependencies.
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -30,7 +32,7 @@ jobs:
   # The worker, built for wasm and run on workerd under wrangler, with a
   # scripted model beside it. Nothing is deployed and no secret is read.
   cloudflare:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -47,7 +49,7 @@ jobs:
   # The Postgres store, and the end-to-end tests over it, against Postgres in
   # Docker with TLS from a root made for the run. No secret is read.
   postgres:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -56,10 +58,76 @@ jobs:
       - uses: ./.github/actions/setup-rust
       - run: make test-postgres
 
+  # Static (musl) binaries for amd64 and arm64, each built on its own
+  # architecture in the Dockerfile's build image, with no cache: a release
+  # publishes these very files.
+  binaries:
+    strategy:
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-24.04, target: x86_64-unknown-linux-musl }
+          - { arch: arm64, runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
+    runs-on: ${{ matrix.runner }}
+    container: rust:1.97.1-slim-trixie@sha256:8e8cf8f7fd54a2d23d5a743b3a03f56e26b6c774276c33fa0595111704ebb15c
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    env:
+      RUSTUP_TOOLCHAIN: 1.97.1
+      TARGET_CC: musl-gcc
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends musl-tools
+          rustup target add "$TARGET"
+          cargo build --release --locked -p mensor --features postgres --target "$TARGET"
+      # Each binary is static and says the workspace's version, or nothing
+      # is packed.
+      - name: Check and pack
+        run: |
+          version=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)
+          if [[ -z $version ]]; then echo "::error::no workspace version in Cargo.toml"; exit 1; fi
+          if ! command -v readelf >/dev/null; then echo "::error::readelf is missing"; exit 1; fi
+          name="mensor-$version-$TARGET"
+          mkdir -p "dist/$name"
+          for bin in mensor mensor-mind mensor-hand; do
+            cp "target/$TARGET/release/$bin" "dist/$name/"
+            dynamic=$(readelf -d "dist/$name/$bin")
+            if [[ $dynamic == *NEEDED* ]]; then echo "::error::$bin is not static"; exit 1; fi
+          done
+          says=$("dist/$name/mensor" --version)
+          if [[ $says != "mensor $version" ]]; then echo "::error::mensor says $says, not $version"; exit 1; fi
+          cp LICENSE README.md "dist/$name/"
+          tar -C dist --owner=0 --group=0 --numeric-owner -czf "dist/$name.tar.gz" "$name"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mensor-${{ matrix.arch }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  # The image for amd64 and arm64 from those binaries, built as a release
+  # builds it, attestations included, and pushed nowhere.
+  image:
+    needs: binaries
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/image
+
   # The runner's image has the shellcheck that actionlint checks each run:
   # script with.
   tooling:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -5,3 +5,4 @@ examples
 crates/cloudflare/build
 **/.wrangler
 *.sqlite*
+**/.env*

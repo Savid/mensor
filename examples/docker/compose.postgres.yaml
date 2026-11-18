@@ -2,9 +2,6 @@
 # compose.yaml: COMPOSE_FILE=compose.yaml:compose.postgres.yaml.
 services:
   host:
-    build:
-      args: { FEATURES: postgres }
-    image: mensor-example-postgres
     command: serve --listen 0.0.0.0:7878 --model ${MENSOR_MODEL:-claude-opus-5-5}
     environment:
       # Plain, because this Postgres has no certificate and its traffic stays

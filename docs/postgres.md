@@ -7,7 +7,8 @@ with the process. Both set is an error. This page is the Postgres one.
 ## Run it
 
 `mensor` and `mensor-mind` reach Postgres when built with the `postgres`
-feature, which makes each 0.9 MB larger. `MENSOR_POSTGRES` names the
+feature, which makes each 0.9 MB larger. A release's binaries and the image
+`ghcr.io/savid/mensor` have it. `MENSOR_POSTGRES` names the
 database by a URL, and only it does, never a flag: the URL holds the
 password.
 

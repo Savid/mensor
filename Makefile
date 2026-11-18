@@ -36,6 +36,12 @@ tools: ## Install the pinned cargo-deny and worker-build
 build: ## The release binaries, at target/release: mensor, mensor-mind and mensor-hand
 	cargo build --release --locked -p mensor
 
+IMAGE ?= mensor
+
+.PHONY: image
+image: ## The image, with Postgres, built from this repo for this machine (needs Docker)
+	docker build -t $(IMAGE) .
+
 .PHONY: test-postgres
 test-postgres: ## The Postgres store, and the end-to-end tests over it, against Postgres in Docker (needs Docker)
 	crates/store-postgres/tests/postgres.sh

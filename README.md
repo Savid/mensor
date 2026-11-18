@@ -9,6 +9,48 @@ call.
 
 ![You prompt a mind over HTTP. The mind holds the history and calls the model. Its hand tools are whatever its hands say they can do, and run on those hands, which dial in from where they run. Of its own tools, tell and wait reach its parent or children and need no hand, fork and clone_hand have a hand clone itself, and release_hand lets one go.](docs/images/overview.svg)
 
+## Install
+
+Each release has static binaries for Linux on x86-64 and arm64, and an
+image for both, `ghcr.io/savid/mensor`, all built with the `postgres`
+feature. Image tags have no `v`: `0.1.0`, `0.1`, and `latest`, which exists
+once a stable release does.
+
+With the GitHub CLI, which needs `gh auth login` even for a public repo,
+download a release's binaries and check they were built by its workflow
+from its tag:
+
+```bash
+version=0.1.0 file="mensor-$version-$(uname -m)-unknown-linux-musl.tar.gz"
+gh release download "v$version" -R Savid/mensor -p "$file"
+gh attestation verify "$file" -R Savid/mensor \
+  --signer-workflow Savid/mensor/.github/workflows/release.yml --source-ref "refs/tags/v$version"
+```
+
+Or with curl alone, checking the download against the release's checksums:
+
+```bash
+version=0.1.0 file="mensor-$version-$(uname -m)-unknown-linux-musl.tar.gz"
+curl -fLO "https://github.com/Savid/mensor/releases/download/v$version/$file"
+curl -fLO "https://github.com/Savid/mensor/releases/download/v$version/SHA256SUMS"
+sha256sum -c --ignore-missing SHA256SUMS
+tar -xzf "$file" && "${file%.tar.gz}/mensor" --help
+```
+
+The image runs `mensor` as its entrypoint, as a user of its own. A host on
+Postgres, given its token, database and model key by name, so none is on a
+command line:
+
+```bash
+export MENSOR_TOKEN="$(openssl rand -hex 32)"
+export MENSOR_POSTGRES="postgres://mensor:$(cat path/to/db.password)@db.example/mensor"
+export ANTHROPIC_API_KEY="$(cat path/to/anthropic.key)"
+docker run -d -p 127.0.0.1:7878:7878 -e MENSOR_TOKEN -e MENSOR_POSTGRES -e ANTHROPIC_API_KEY \
+  ghcr.io/savid/mensor:0.1.0 serve --listen 0.0.0.0:7878
+gh attestation verify oci://ghcr.io/savid/mensor:0.1.0 -R Savid/mensor \
+  --signer-workflow Savid/mensor/.github/workflows/release.yml --source-ref refs/tags/v0.1.0
+```
+
 ## Quick start
 
 Needs Rust 1.97 (pinned in `rust-toolchain.toml`) and a model credential.
@@ -356,6 +398,7 @@ directly, and the Cloudflare worker reuses them unchanged.
 - [docs/security.md](docs/security.md): what commands are kept from, and tokens.
 - [docs/postgres.md](docs/postgres.md): a host on Postgres.
 - [docs/cloudflare.md](docs/cloudflare.md): a mind as one Durable Object.
+- [docs/releasing.md](docs/releasing.md): cutting a release, and what it publishes.
 - [examples/](examples): a hand of your own, hands in containers, and opencode as a hand.
 - [AGENTS.md](AGENTS.md): commands, layout and rules for working here.
 
