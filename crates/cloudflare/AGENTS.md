@@ -7,4 +7,6 @@ over `crates/object`, its only host. See `docs/cloudflare.md`.
   where native tests reach it.
 - A workerd test (`tests/workerd.rs`) starts the worker with `--var` values
   made for it, in an environment cleared down to `PATH`, `HOME` and
-  `VOLTA_HOME`, with `CI` and `WRANGLER_SEND_METRICS` set.
+  `VOLTA_HOME`, with `CI` and `WRANGLER_SEND_METRICS` set, beside a scripted
+  model. Two kill the runtime, mid-request and mid-fetch, to test what an
+  object does on waking.

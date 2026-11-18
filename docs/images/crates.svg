@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 472" width="880" height="472" role="img" aria-label="What each runtime is built from. At the bottom, the pure crates: protocol; mind and hand; model, api and object. Above them the hosts, which own tasks, sockets and files: mind-host and the stores, store-sqlite and store-postgres (behind mensor&#x27;s postgres feature), hand-host, and cloudflare. On top, the mensor crate&#x27;s two halves. mensor-mind is the host half, mensor-hand the hand half, and mensor both.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 472" width="880" height="472" role="img" aria-label="What each runtime is built from. At the bottom, the pure crates: protocol; mind and hand; model, api and object. Above them the hosts, which own tasks, sockets and files: mind-host and the stores, store-sqlite and store-postgres (behind mensor&#x27;s postgres feature), hand-host, and cloudflare. On top, the mensor crate&#x27;s two halves. mensor-mind (serve, 4.9 MB) is the host half, mensor-hand (hand, 2.5 MB) the hand half, and mensor (serve, hand, run and token, 5.4 MB) both.">
   <title>The crates</title>
   <style>
     svg {
@@ -88,9 +88,9 @@
 
   <!-- The binaries -->
   <path class="wire k-faint" d="M40,52 V44 H560 V52"/>
-  <text x="300" y="36" text-anchor="middle"><tspan class="mono b">mensor</tspan><tspan class="lbl">  serve, hand, run (both halves in one process) and token · 5.3 MB</tspan></text>
+  <text x="300" y="36" text-anchor="middle"><tspan class="mono b">mensor</tspan><tspan class="lbl">  serve, hand, run (both halves in one process) and token · 5.4 MB</tspan></text>
   <text x="160.0" y="80" class="mono title" text-anchor="middle">mensor-mind</text>
-  <text x="160.0" y="98" class="sub" text-anchor="middle">serve · 4.8 MB</text>
+  <text x="160.0" y="98" class="sub" text-anchor="middle">serve · 4.9 MB</text>
   <text x="440.0" y="80" class="mono title" text-anchor="middle">mensor-hand</text>
   <text x="440.0" y="98" class="sub" text-anchor="middle">hand · 2.5 MB</text>
   <text x="720.0" y="80" class="mono title" text-anchor="middle">worker</text>

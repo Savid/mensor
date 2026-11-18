@@ -1,6 +1,6 @@
 # A hand of your own
 
-[`hand.py`](hand.py) is a hand that rolls dice. It speaks
+[`hand.py`](hand.py) is a hand that rolls dice, in Python. It speaks
 [the protocol](../../docs/protocol.md) and nothing more: a hello with one
 capability, `dice`, and a result for each call.
 
@@ -18,11 +18,7 @@ dice said hello to m
 2 {'count': 4, 'sides': 6} -> {'rolls': [2, 1, 3, 1], 'total': 7}
 ```
 
-The model is shown one more tool, `roll`. With `MENSOR_TOKEN` set, the hand
-sends it, as `mensor hand` does: the host's token, or one `mensor token`
-made for its mind.
-
-To stay short, it leaves out what lets a hand outlive its connection: it
-does not dial again, and holds no result for a later hello. Run again, it is
-a new boot, so the mind takes a call it left unfinished as unknown.
-`crates/hand-host` does all of that.
+The model gains one tool, `roll`. With `MENSOR_TOKEN` set, the hand sends
+it, as `mensor hand` does. To stay short it neither dials again nor holds a
+result for a later hello, so a call it leaves unfinished is unknown;
+`crates/hand-host` does both.

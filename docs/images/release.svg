@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 404" width="880" height="404" role="img" aria-label="How a hello settles the mind&#x27;s pending call 42. A new boot: unknown, nothing sent again. 42 in held: the mind takes its result. 42 in running: it waits. lastId 41, below 42: it never arrived, so it is sent again. lastId 42 with 42 in neither list: unknown, it may have run.">
-  <title>Settling a hello</title>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 324" width="880" height="324" role="img" aria-label="A release, from a pushed tag vX.Y.Z. verify checks the tag names the workspace&#x27;s version, is annotated and on master, and is not released yet. ci runs every CI job, building static musl binaries for amd64 and arm64 and the image without pushing it. image pushes ghcr.io/savid/mensor as X.Y.Z, X.Y and latest, attested. release makes the GitHub Release: a tarball per architecture, SHA256SUMS, the attestation bundles, and the tag&#x27;s message as notes. A failure before the push publishes nothing: delete the tag, fix master and tag again. After it the version is out: re-run the failed jobs, or release the next patch.">
+  <title>Releasing</title>
   <style>
     svg {
       --bg: #f8f8fb; --frame: #e3e3ec; --panel: #f0f0f6; --surface: #ffffff;
@@ -26,16 +26,12 @@
     text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif; font-size: 13px; fill: var(--ink); }
     .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace; }
     .title { font-size: 14px; font-weight: 600; }
-    .sub { font-size: 12px; fill: var(--muted); }
     .lbl { font-size: 11.5px; fill: var(--muted); }
-    .note { font-size: 11.5px; fill: var(--muted); font-style: italic; }
     .eyebrow { font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em; fill: var(--muted); }
     .b { font-weight: 600; }
-    .mind { fill: var(--mind); } .hand { fill: var(--hand); } .model { fill: var(--model); }
-    .ok { fill: var(--ok); } .warn { fill: var(--warn); } .muted { fill: var(--muted); } .faint { fill: var(--faint); }
+    .model { fill: var(--model); }
+    .ok { fill: var(--ok); } .warn { fill: var(--warn); } .muted { fill: var(--muted); }
     .bg { fill: var(--bg); stroke: var(--frame); }
-    .panel { fill: var(--panel); stroke: var(--line); }
-    .slot { fill: none; stroke: var(--line); stroke-dasharray: 4 4; }
     .node { fill: var(--surface); stroke: var(--line); }
     .node.k-mind { stroke: var(--mind-edge); } .node.k-hand { stroke: var(--hand-edge); } .node.k-model { stroke: var(--model-edge); }
     .soft.k-mind { fill: var(--mind-soft); stroke: var(--mind-edge); }
@@ -44,22 +40,10 @@
     .soft.k-ok { fill: var(--ok-soft); stroke: var(--ok-edge); }
     .soft.k-warn { fill: var(--warn-soft); stroke: var(--warn-edge); }
     .soft.k-plain { fill: var(--panel); stroke: var(--line); }
-    .badge.k-mind { fill: var(--mind-soft); } .badge.k-hand { fill: var(--hand-soft); }
-    .badge.k-model { fill: var(--model-soft); } .badge.k-plain { fill: var(--panel); }
-    .ic { color: var(--muted); } .ic.k-mind { color: var(--mind); } .ic.k-hand { color: var(--hand); }
-    .ic.k-model { color: var(--model); } .ic.k-warn { color: var(--warn); }
     .wire { fill: none; stroke: var(--wire); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
     .wire.k-mind { stroke: var(--mind); } .wire.k-hand { stroke: var(--hand); } .wire.k-model { stroke: var(--model); }
     .wire.k-warn { stroke: var(--warn); } .wire.k-faint { stroke: var(--faint); }
-    .dash { stroke-dasharray: 5 4; }
-    .dot { stroke-dasharray: 1 4; }
-    .track { fill: none; stroke: var(--mind); stroke-width: 2.5; stroke-linecap: round; }
-    .lane { fill: none; stroke: var(--hand); stroke-width: 1.5; stroke-linecap: round; }
-    .life { fill: none; stroke: var(--line); stroke-width: 1.25; stroke-dasharray: 3 4; }
-    .tick.p { fill: var(--muted); } .tick.s { fill: var(--mind); } .tick.o { fill: var(--hand); }
-    .bar.k-mind { fill: var(--mind-soft); stroke: var(--mind); } .bar.k-hand { fill: var(--hand-soft); stroke: var(--hand); }
-    .gem.k-mind { fill: var(--mind); } .gem.k-hand { fill: var(--hand); } .gem.k-warn { fill: var(--warn); }
-    .gem.k-bg { fill: var(--bg); }
+    .pill { font-size: 12px; font-weight: 600; }
     .shadow { flood-color: var(--shadow); }
     .tip { fill: var(--wire); } .tip.k-mind { fill: var(--mind); } .tip.k-hand { fill: var(--hand); }
     .tip.k-model { fill: var(--model); } .tip.k-faint { fill: var(--faint); } .tip.k-warn { fill: var(--warn); }
@@ -84,36 +68,56 @@
     <symbol id="i-alarm" viewBox="-8 -8 16 16"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle r="6"/><path d="M0,-3.5 V0 L2.6,1.8"/></g></symbol>
     <symbol id="i-cut" viewBox="-8 -8 16 16"><path d="M-4,-4 L4,4 M4,-4 L-4,4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
   </defs>
-  <rect class="bg" x="0.5" y="0.5" width="879" height="403" rx="16"/>
-  <text x="32" y="40" class="eyebrow">THE MIND'S PENDING CALL</text>
-  <rect class="soft k-mind" x="32" y="52" width="816" height="36" rx="10"/>
-  <text x="48" y="75" class="mono"><tspan class="mind b">call 42</tspan>  bash “cargo test”<tspan class="muted">   sent to a1, no outcome yet</tspan></text>
-  <text x="32" y="124"><tspan class="eyebrow">NEXT HELLO FROM  </tspan><tspan class="mono lbl b">a1</tspan></text>
-  <text x="472" y="124" class="eyebrow">SO THE MIND</text>
-  <rect class="soft k-hand" x="32" y="136" width="400" height="36" rx="10"/>
-  <text x="48" y="159" class="mono"><tspan class="muted">boot </tspan><tspan class="b">new</tspan><tspan class="muted">   the hand restarted</tspan></text>
-  <path class="wire k-faint" d="M440,154 L464,154" marker-end="url(#a-faint)"/>
-  <rect class="soft k-warn" x="472" y="136" width="376" height="36" rx="10"/>
-  <text x="488" y="159"><tspan class="b warn">records it unknown</tspan><tspan class="muted">  and sends nothing again</tspan></text>
-  <rect class="soft k-hand" x="32" y="182" width="400" height="36" rx="10"/>
-  <text x="48" y="205" class="mono"><tspan class="muted">held </tspan><tspan class="b">[42 and its result]</tspan></text>
-  <path class="wire k-faint" d="M440,200 L464,200" marker-end="url(#a-faint)"/>
-  <rect class="soft k-ok" x="472" y="182" width="376" height="36" rx="10"/>
-  <text x="488" y="205"><tspan class="b ok">takes the result</tspan></text>
-  <rect class="soft k-hand" x="32" y="228" width="400" height="36" rx="10"/>
-  <text x="48" y="251" class="mono"><tspan class="muted">running </tspan><tspan class="b">[42]</tspan></text>
-  <path class="wire k-faint" d="M440,246 L464,246" marker-end="url(#a-faint)"/>
-  <rect class="soft k-plain" x="472" y="228" width="376" height="36" rx="10"/>
-  <text x="488" y="251"><tspan class="b">waits for the result</tspan></text>
-  <rect class="soft k-hand" x="32" y="274" width="400" height="36" rx="10"/>
-  <text x="48" y="297" class="mono"><tspan class="muted">lastId </tspan><tspan class="b">41</tspan><tspan class="muted">   42 never arrived</tspan></text>
-  <path class="wire k-faint" d="M440,292 L464,292" marker-end="url(#a-faint)"/>
-  <rect class="soft k-mind" x="472" y="274" width="376" height="36" rx="10"/>
-  <text x="488" y="297"><tspan class="b mind">sends it again</tspan><tspan class="muted">  under the same id</tspan></text>
-  <rect class="soft k-hand" x="32" y="320" width="400" height="36" rx="10"/>
-  <text x="48" y="343" class="mono"><tspan class="muted">lastId </tspan><tspan class="b">42</tspan><tspan class="muted">   42 in neither list</tspan></text>
-  <path class="wire k-faint" d="M440,338 L464,338" marker-end="url(#a-faint)"/>
-  <rect class="soft k-warn" x="472" y="320" width="376" height="36" rx="10"/>
-  <text x="488" y="343"><tspan class="b warn">records it unknown</tspan><tspan class="muted">  it may have run</tspan></text>
-  <text x="32" y="384" class="lbl">The first row that matches decides. An interrupt while the hand was away cancels a running call, and records an unread one as not run.</text>
+  <rect class="bg" x="0.5" y="0.5" width="879" height="323" rx="16"/>
+  <text x="32" y="40" class="mono"><tspan class="muted">git push origin </tspan><tspan class="b">vX.Y.Z</tspan></text>
+  <text x="848" y="40" class="lbl" text-anchor="end">one release at a time · the job's token is its only secret</text>
+
+  <!-- verify -->
+  <rect class="node k-plain" x="32" y="64" width="183" height="156" rx="12" filter="url(#lift)"/>
+  <text x="48" y="90"><tspan class="eyebrow">1  </tspan><tspan class="eyebrow">CHECKS</tspan></text>
+  <text x="48" y="114" class="title mono">verify</text>
+  <text x="48" y="142" class="lbl">the tag is v + the version</text>
+  <text x="48" y="162" class="lbl">annotated, on master</text>
+  <text x="48" y="182" class="lbl">not released before</text>
+  <text x="48" y="202" class="lbl">decides latest and X.Y</text>
+  <path class="wire k-faint" d="M219,142.0 L239,142.0" marker-end="url(#a-faint)"/>
+
+  <!-- ci -->
+  <rect class="node k-plain" x="243" y="64" width="183" height="156" rx="12" filter="url(#lift)"/>
+  <text x="259" y="90"><tspan class="eyebrow">2  </tspan><tspan class="eyebrow">BUILDS</tspan></text>
+  <text x="259" y="114" class="title mono">ci</text>
+  <text x="259" y="142" class="lbl">every CI job</text>
+  <text x="259" y="162" class="lbl">static musl binaries</text>
+  <text x="259" y="182" class="lbl">for amd64 and arm64</text>
+  <text x="259" y="202" class="lbl">the image, not pushed</text>
+  <path class="wire k-faint" d="M430,142.0 L450,142.0" marker-end="url(#a-faint)"/>
+
+  <!-- image -->
+  <rect class="node k-model" x="454" y="64" width="183" height="156" rx="12" filter="url(#lift)"/>
+  <text x="470" y="90"><tspan class="eyebrow">3  </tspan><tspan class="eyebrow">PUBLISHES</tspan></text>
+  <text x="470" y="114" class="title mono model">image</text>
+  <text x="470" y="142" class="lbl mono">ghcr.io/savid/mensor</text>
+  <text x="470" y="162" class="lbl">X.Y.Z · X.Y · latest</text>
+  <text x="470" y="182" class="lbl">SBOM and provenance</text>
+  <text x="470" y="202" class="lbl">attested</text>
+  <path class="wire k-faint" d="M641,142.0 L661,142.0" marker-end="url(#a-faint)"/>
+
+  <!-- release -->
+  <rect class="node k-model" x="665" y="64" width="183" height="156" rx="12" filter="url(#lift)"/>
+  <text x="681" y="90"><tspan class="eyebrow">4  </tspan><tspan class="eyebrow">PUBLISHES</tspan></text>
+  <text x="681" y="114" class="title mono model">release</text>
+  <text x="681" y="142" class="lbl">the GitHub Release</text>
+  <text x="681" y="162" class="lbl">a tarball per arch</text>
+  <text x="681" y="182" class="lbl">SHA256SUMS, attested</text>
+  <text x="681" y="202" class="lbl">notes: the tag's message</text>
+
+  <!-- What a failure means, before and after the push -->
+  <path class="wire k-faint" d="M32,240 L32,246 L426,246 L426,240"/>
+  <rect class="soft k-ok" x="32" y="260" width="159" height="22" rx="11"/>
+  <text x="111.5" y="275.0" class="pill ok" text-anchor="middle">fails: nothing is out</text>
+  <text x="32" y="302" class="lbl">delete the tag, fix master, tag again</text>
+  <path class="wire k-faint" d="M454,240 L454,246 L848,246 L848,240"/>
+  <rect class="soft k-warn" x="454" y="260" width="284" height="22" rx="11"/>
+  <text x="596.0" y="275.0" class="pill warn" text-anchor="middle">fails after the push: the version is out</text>
+  <text x="454" y="302" class="lbl">never move its tag: re-run failed jobs, or release the next patch</text>
 </svg>

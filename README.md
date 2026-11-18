@@ -1,62 +1,26 @@
 # mensor
 
-mensor runs AI agents as a **mind** with **hands**. The mind holds the
-history and calls the model. A hand does the work: it connects to a mind,
-says what it can do, and runs what the mind asks. A hand can run on a
-machine or a VM, inside the host's own process, or in a Durable Object. A
-mind can drive several hands at once, and the model names the hand for each
-call.
+An AI agent split in two. The **mind** holds the history and calls the
+model; a host (`mensor serve`) runs minds and serves their HTTP API. A
+**hand** does the work: it connects to its mind, says what it can do, and
+runs the calls the mind sends it. One mind drives several hands at once.
 
-![You prompt a mind over HTTP. The mind holds the history and calls the model. Its hand tools are whatever its hands say they can do, and run on those hands, which dial in from where they run. Of its own tools, tell and wait reach its parent or children and need no hand, fork and clone_hand have a hand clone itself, and release_hand lets one go.](docs/images/overview.svg)
+- **Keys away from commands.** Run the host apart from its hands, and the
+  model's key and the history stay off the machines where commands run.
+- **No call runs twice.** Calls are stored before they are sent, and
+  survive dropped connections and restarts. One that may have run is
+  reported as unknown, never sent again.
+- **Forks run in parallel**, each child mind with the history so far and its
+  own copy of the workspace.
+- **A hand in any language**, over a small JSON protocol.
 
-## Install
-
-Each release has static binaries for Linux on x86-64 and arm64, and an
-image for both, `ghcr.io/savid/mensor`, all built with the `postgres`
-feature. Image tags have no `v`: `0.1.1`, `0.1`, and `latest`, which exists
-once a stable release does.
-
-With the GitHub CLI, which needs `gh auth login` even for a public repo,
-download a release's binaries and check they were built by its workflow
-from its tag:
-
-```bash
-version=0.1.1 file="mensor-$version-$(uname -m)-unknown-linux-musl.tar.gz"
-gh release download "v$version" -R Savid/mensor -p "$file"
-gh attestation verify "$file" -R Savid/mensor \
-  --signer-workflow Savid/mensor/.github/workflows/release.yml --source-ref "refs/tags/v$version"
-```
-
-Or with curl alone, checking the download against the release's checksums:
-
-```bash
-version=0.1.1 file="mensor-$version-$(uname -m)-unknown-linux-musl.tar.gz"
-curl -fLO "https://github.com/Savid/mensor/releases/download/v$version/$file"
-curl -fLO "https://github.com/Savid/mensor/releases/download/v$version/SHA256SUMS"
-sha256sum -c --ignore-missing SHA256SUMS
-tar -xzf "$file" && "${file%.tar.gz}/mensor" --help
-```
-
-The image runs `mensor` as its entrypoint, as a user of its own. A host on
-Postgres, given its token, database and model key by name, so none is on a
-command line:
-
-```bash
-export MENSOR_TOKEN="$(openssl rand -hex 32)"
-export MENSOR_POSTGRES="postgres://mensor:$(cat path/to/db.password)@db.example/mensor"
-export ANTHROPIC_API_KEY="$(cat path/to/anthropic.key)"
-docker run -d -p 127.0.0.1:7878:7878 -e MENSOR_TOKEN -e MENSOR_POSTGRES -e ANTHROPIC_API_KEY \
-  ghcr.io/savid/mensor:0.1.1 serve --listen 0.0.0.0:7878
-gh attestation verify oci://ghcr.io/savid/mensor:0.1.1 -R Savid/mensor \
-  --signer-workflow Savid/mensor/.github/workflows/release.yml --source-ref refs/tags/v0.1.1
-```
+![You prompt a mind over HTTP. The mind holds the history and calls the model. Its hand tools are whatever its hands say they can do, and run on those hands, which dial in from where they run. Of its own tools, tell and wait reach its parent or children and need no hand, fork and clone_hand have a hand clone itself, and release_hand releases one.](docs/images/overview.svg)
 
 ## Quick start
 
-Needs Rust 1.97 (pinned in `rust-toolchain.toml`) and a model credential.
-
-One process that hosts the minds and runs one hand, `local`, for the mind
-`main`:
+From source, with Rust 1.97 (pinned in `rust-toolchain.toml`), or a
+[release](#install)'s `mensor` in place of `cargo run -p mensor --`. `run`
+hosts the mind `main` and its one hand, `local`, in one process:
 
 ```bash
 export ANTHROPIC_API_KEY="$(cat path/to/anthropic.key)"
@@ -64,343 +28,198 @@ mkdir -p build /tmp/demo
 cargo run -p mensor -- run --dir /tmp/demo --store build/mensor.sqlite
 ```
 
-Its commands run on this machine as you, next to the process that holds the
-model's credential. To keep them apart, run the host and each hand on their
-own, or each in a container as [examples/docker](examples/docker) does. The
-first hand to name a mind starts it:
+```bash
+api=127.0.0.1:7878/v1/minds
+curl -s -X POST $api/main/prompt -H 'content-type: application/json' \
+  -d '{"text":"Write a haiku to haiku.txt. Then fork: one child translates it into French, one into German. Wait for both and pick one."}'
+curl -sN $api/main/events   # the history as it grows, and each reply as it streams
+curl -s $api                # main and its children
+```
+
+`run`'s commands run as you, beside the model's key: use it only on a
+machine you trust the model with. A hand is no sandbox; see
+[docs/security.md](docs/security.md).
+
+## Split the mind from its hands
+
+Run the host and each hand on their own, here or on other machines, or in
+containers as [examples/docker](examples/docker) does. The first hand to
+name a mind starts it:
 
 ```bash
-mkdir -p /tmp/a1 /tmp/b2
+mkdir -p build /tmp/a1 /tmp/b2
 cargo run -p mensor -- serve --store build/mensor.sqlite
 cargo run -p mensor -- hand --mind m --hand a1 --dir /tmp/a1   # another shell
 cargo run -p mensor -- hand --mind m --hand b2 --dir /tmp/b2   # and another
 ```
 
-Then talk to it:
-
 ```bash
 api=127.0.0.1:7878/v1/minds
 curl -s -X POST $api/m/prompt -H 'content-type: application/json' \
   -d '{"text":"Write a haiku in a1 and a limerick in b2."}'
-curl -sN $api/m/events   # the history as it grows, and each reply as it is written
-curl -s -X POST $api/m/prompt -H 'content-type: application/json' \
-  -d '{"text":"Fork from a1: one child translates the haiku into French, one into German. Wait for both and pick one."}'
-curl -s $api             # m and its children
+curl -sN $api/m/events
 ```
 
 ## Hands
 
-A hand belongs to one mind and has a name in it. When it connects, it
-declares its capabilities, and each of their operations, but `clone`,
-becomes a tool the model can call. The mind drives every hand the same way:
-only what it can do, where it runs and how it reaches the mind differ.
+| Hand | Runs | Reaches its mind by | Can do |
+| --- | --- | --- | --- |
+| `mensor hand` | in its own process, anywhere | WebSocket | `commands`, `files`, `clone` |
+| `local` of `mensor run` | in the host | memory | `commands`, `files`, `clone` |
+| `local` on Cloudflare | in the mind's Durable Object | memory | `files`, `fetch` |
+| your own program | anywhere | WebSocket, speaking [the protocol](docs/protocol.md) | what it declares |
 
-![A hand runs wherever its work is: on its own machine, dialling the host over a WebSocket; inside mensor run, in memory; or in a Durable Object with its mind. Each says what it can do, and the messages are the same in every place.](docs/images/hands.svg)
-
-| Hand | Runs in | Reaches its mind | Can do | Started by |
-| --- | --- | --- | --- | --- |
-| `mensor hand` | its own process, on any machine | a WebSocket | `commands`, `files`, `clone` | you |
-| `local` in `mensor run` | the host's process | memory | `commands`, `files`, `clone` | `mensor run` |
-| a clone | its original's process | as its original does | what its original can | its original, for `fork` or `clone_hand` |
-| `local` on Cloudflare | the mind's Durable Object | memory | `files`, `fetch` | the object |
-
-### Capabilities
-
-| Capability | Operations | Does |
+| Capability | Tools | Does |
 | --- | --- | --- |
-| `commands` | `bash` | Runs a command with a timeout. Cancelling it kills everything it started. |
-| `files` | `read`, `write`, `edit`, `list` | Reads and changes files. A relative path starts at the hand's directory. |
-| `fetch` | `fetch` | Makes an HTTP request, and returns its status and the start of its body. Cloudflare's hand only. |
-| `clone` | `clone` | Copies the hand's directory. Used by `fork` and `clone_hand`; never shown as a tool. |
+| `commands` | `bash` | A command: 10 minutes unless `timeoutMs` says, 64 KiB of output a stream. |
+| `files` | `read`, `write`, `edit`, `list` | A relative path starts at `--dir`; nothing confines it. `read` returns at most 256 KiB. |
+| `fetch` | `fetch` | An HTTP request. Cloudflare only. |
+| `clone` | | Copies the hand, for `fork` and `clone_hand`. |
 
-`--capabilities` picks what the hand of `mensor hand` or `mensor run` can do
-(`commands,files,clone` by default). A capability is a Rust trait, `mensor_hand::Capability`:
-implement it, and run it in a hand built on `mensor-hand-host`, to give a
-hand something new, or to back the same names with something else. Any
-program that speaks [the protocol](docs/protocol.md) can be a hand too, in
-any language: [examples/own-hand](examples/own-hand) is one in Python, and
-[examples/opencode](examples/opencode) makes opencode one.
-
-Commands start without the host's token, the model's credentials or the
-store's URL in their environment, and what they leave running dies with
-their hand. A hand is not a sandbox: a command can reach whatever the hand's
-process can, so confining it is up to whoever runs it. `mensor run` is for
-one person, on a machine they trust the model with. See
-[docs/security.md](docs/security.md) for what is kept from commands and what
-is not.
-
-### How calls run
-
-- Calls to different hands run at once. Calls to one hand run in order.
-- Every hand tool takes a `hand` argument, which may be left out while the
-  mind has one hand.
-- The mind asks its model only while a hand is connected, or once it has let
-  every hand go.
-
-### When something fails
+- Every hand tool takes `hand`, optional while the mind has one. Calls to
+  different hands run at once; calls to one hand, in order.
+- A new capability is a `mensor_hand::Capability`. A hand in another
+  language speaks the protocol, as [examples/own-hand](examples/own-hand)
+  and [examples/opencode](examples/opencode) do.
 
 ![When something fails. A connection drops: the hand holds the result, and the mind gets it when the hand reconnects. A hand restarts mid-call: the call's outcome is unknown, and the model is told to check. A hand is away: the call waits, and is sent when the hand is back. A hand dies: release it, its call is unknown, and the turn goes on. An interrupt: a running call is cancelled, and one not yet sent does not run. The host stops mid-fork: the children are made first, so the fork completes once.](docs/images/failures.svg)
 
-A call is stored before it is sent, and one that may have run is never sent
-again: no call runs twice. A dead hand is let go with `POST .../release`, and
-refused from then on.
+The mind asks its model only while a hand is connected, or once it has
+released every hand: release a dead one with `POST /v1/minds/{m}/release`.
 
 ## The mind's own tools
 
-These act on the mind itself, its hands and its family, so no hand declares
-them:
-
 | Tool | Does |
 | --- | --- |
-| `fork` | Clones a hand once per prompt. Each clone starts a child mind that shares the history so far and works on its own prompt. |
-| `wait` | Waits until children end their turns, for `seconds` at most, and returns what each said last or is still doing. |
-| `tell` | Sends a message to the mind's parent or one of its children. |
+| `fork` | Takes 1 to 8 prompts. Clones a hand per prompt, and starts a child mind on each copy with the history so far and its prompt. |
+| `wait` | Waits up to `seconds` (600, at most 3600) for children to end their turns, and returns what each said or is doing. |
+| `tell` | Prompts the parent or a child, marked "(From m:)". |
 | `clone_hand` | Clones a hand into the same mind, as another hand. |
-| `release_hand` | Lets a hand go. |
+| `release_hand` | Releases a hand. A clone's copy is deleted. |
 
-`fork`, `clone_hand` and `release_hand` are offered while a hand can clone,
-and `tell` and `wait` while a hand can clone or the mind has kin. A `tell`
-with no parent or child, or a `wait` with no children, does not run, and
-says why. Forking needs a hand that can clone, so a fork leaves a mind's
-tools as they were, and its children start with the same. `--mind-tools`,
-a comma list, picks which of them a host offers at all
-(`fork,clone_hand,release_hand,tell,wait` by default): `--mind-tools fork`
-lets a mind fork, and neither clone a hand nor let one go, and
-`--mind-tools ''` offers none.
+![fork branches the history into a child mind per prompt, each with a hand on a copy of the directory. clone_hand gives the same mind a second hand on a copy, until release_hand releases it and deletes the copy.](docs/images/fork.svg)
 
-## Forks and clones
+![A parent forks two children, waits without a hand while they work, hears what each said, tells one to add a title, and waits for that one alone.](docs/images/talk.svg)
 
-![fork branches the history into a child mind per prompt, each with a hand on a copy of the directory. clone_hand gives the same mind a second hand on a copy, until release_hand lets it go and deletes the copy.](docs/images/fork.svg)
+- They are offered while they apply: `fork`, `clone_hand` and
+  `release_hand` while a hand can clone, `tell` and `wait` while a hand can
+  clone or the mind has a parent or children.
+- A child is `<root>.<code>`, such as `m.d3342iuj`, where the root is the
+  mind it descends from, and has its parent's settings. A waiting parent
+  needs no hand, and survives a host restart.
 
-- The mind's own tools run after the hand tools of their step, one at a
-  time. A fork runs alone: no other tool of the mind's runs in its step.
-- `fork` and `clone_hand` use a hand's `clone` capability, which copies the
-  hand's directory and starts a hand on each copy. One fork takes 1 to 8
-  prompts.
-- A child is made before the fork is recorded, so a host that stops in
-  between completes the fork once when it is back.
-- A child is named `<root>.<code>`, such as `m.d3342iuj`. Only a fork makes
-  a name with a `.`.
-- `--max-forks` (64) caps how many minds a root and its descendants may
-  fork. Each fork splits what remains between the parent and its children.
-  `--max-forks unlimited` splits nothing: whether a fork is made is then for
-  the cloning hand to say, by its `clone` succeeding or failing.
-- A child is made with its parent's model, effort and system prompt.
-- `--max-clones` (4) caps the clones a mind has made with `clone_hand` and
-  not released. Hands that join by themselves, and the hand a child was
-  forked onto, are not counted.
-- Copies are kept in `--clones` (`<dir>.clones` by default) as
-  `<mind>/<hand>.<code>`. A clone runs in its original's process and stops
-  with it; starting the process again starts a hand on every copy of its
-  mind and that mind's descendants. A copy is deleted when its mind releases
-  its clone, and kept otherwise. The original directory is never deleted.
-  Run one process per directory and clones directory.
+## Configuration
 
-## Parents and children
+| `serve` and `run` | Default | |
+| --- | --- | --- |
+| `--listen` | `127.0.0.1:7878` | Anything else needs `MENSOR_TOKEN`. Plain HTTP: put TLS in front off loopback. |
+| `--store` | memory | A SQLite file. `MENSOR_POSTGRES` names a Postgres database instead: [docs/postgres.md](docs/postgres.md). |
+| `--model` | `claude-opus-5-5` | The model. `--models a,b` adds others a mind may be made with. |
+| `--effort` | the API's | `low`, `medium`, `high`, `xhigh` or `max` for Claude. |
+| `--system-file` | none | The system prompt. |
+| `--max-tokens` | `16000` | Caps one reply, reasoning included. `none` for a Chat or Responses server that refuses a cap. |
+| `--compact-at` | `150000` | Tokens before the mind summarises the conversation and carries on. `0` never does. |
+| `--no-fallbacks` | off | Turns off the API's fallback model for a request Claude declines. |
+| `--mind-tools` | all five | A comma list of the mind's own tools to offer. `''` offers none. |
+| `--max-forks` | `64` | Total forks under one root; each fork splits what's left between parent and children. `0` none; `unlimited` leaves it to the hand's `clone`. |
+| `--max-clones` | `4` | A mind's `clone_hand` clones not yet released. |
 
-![A parent forks two children, waits at rest while they work, hears what each said, tells one to add a title, and waits for that one alone.](docs/images/talk.svg)
+| `hand` and `run` | Default | |
+| --- | --- | --- |
+| `--url` | `ws://127.0.0.1:7878/v1/attach` | Where the host is. `hand` only. |
+| `--mind`, `--hand` | | Its mind and its name in it. `run` uses `--mind main` and the hand `local`. |
+| `--dir` | `.` | Where commands run. One process per directory. |
+| `--clones` | `<dir>.clones` | Where clones are copied. A process starts a hand on every copy there for its mind, so give each process its own. |
+| `--capabilities` | `commands,files,clone` | What it can do. |
 
-- `tell` reaches the other mind as a prompt marked with the sender's name,
-  "(From m:)" or "(From m.d3342iuj:)", the same for every mind that shares
-  it. A message sent again after a restart is stored once.
-- `wait` returns what each child said last, or that it was stopped, its
-  model failed, or it ended. `seconds` (600, at most 3600) bounds a wait: a
-  child still going then is reported as working, or with its hands that
-  are away. Only a parent waits, so two minds never wait on each other. An
-  interrupt ends a wait.
-- A message to a mind that has ended does not run, and the model is told
-  so.
-- A waiting parent needs no hand. It may rest, or its host may restart: it
-  watches its children again when it wakes. A host that restarts gives a
-  wait its full time again.
+| Variable | Default | |
+| --- | --- | --- |
+| `MENSOR_TOKEN` | none | The host's bearer token, or a hand's. |
+| `MENSOR_POSTGRES` | none | A Postgres URL, in place of `--store`. |
+| `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` | none | Claude's Messages API. The auth token goes as a plain bearer, for a gateway. `ANTHROPIC_BASE_URL` moves it. |
+| `OPENAI_API_KEY` | none | Chat Completions (OpenAI, OpenRouter, most others). `OPENAI_BASE_URL` moves it. Name a `--model` other than Claude's. |
+| `MENSOR_API` | by the keys | `messages`, `chat`, or `responses` for OpenAI's Responses API. Unset, Messages if a Claude key is set, else Chat. |
+| `MENSOR_LOG` | `info` | The log level, on standard error. |
+
+The Messages API needs Claude 4.6 or later. The model sees at most 96 KiB
+of a step's results, a long one losing its middle; the history keeps them
+whole.
 
 ## API
 
 | Request | Does |
 | --- | --- |
-| `GET /v1/minds` | Lists every mind, each without its system prompt. |
-| `GET /v1/minds/{m}` | `{name, origin, state, hands, waiting, watching, length}`, and the settings it was made with: what it is doing, its connected hands, and the hands and children its turn waits for. `state` is `idle`, `thinking`, `working`, `waiting` (it can go on only when a hand connects: one named in `waiting`, or its first if it has none) or `ended`. `origin` is `root`, `fork` with `parent` and `inherited`, or `from` with `from`. |
-| `PUT /v1/minds/{m}` | Makes `m` with settings of its own, and maybe from another mind's history. See [Making a mind](#making-a-mind). |
-| `POST /v1/minds/{m}/prompt` | Stores `{"text", "key"?}`. 202 if new, 200 if the key is already stored, 409 if the key holds other text or the mind has ended. |
+| `GET /v1/minds` | Every mind you may reach. |
+| `GET /v1/minds/{m}` | `state`, `hands`, `waiting`, `watching`, `length`, `origin` and its settings. |
+| `PUT /v1/minds/{m}` | Makes `m` with settings of its own: [below](#making-a-mind). |
+| `POST /v1/minds/{m}/prompt` | `{"text", "key"?}`: 202 stored, 409 if `m` ended. A `key` makes retries safe: 200 if stored already, 409 if with other text. |
 | `POST /v1/minds/{m}/interrupt` | Stops the turn. |
-| `POST /v1/minds/{m}/release` | Lets a hand go: `{"hand": "a1"}`. |
-| `POST /v1/minds/{m}/end` | Ends `m`: its turn stops, every hand is let go (4004), and it asks its model nothing more and takes no prompt it does not hold already. Its history stays, for its children and for minds made from it. |
+| `POST /v1/minds/{m}/release` | `{"hand"}`: releases that hand. |
+| `POST /v1/minds/{m}/end` | Stops the turn, releases every hand and takes no new prompt. Ending a fork's child deletes its copy of the directory. The history stays. |
 | `GET /v1/minds/{m}/history?after=` | Up to 512 items from index `after`, and the next cursor. |
-| `GET /v1/minds/{m}/events?after=` | The same as server-sent events, live, with `writing` events that carry each reply as the model writes it. An event's id is its item's index: resume with `after` set to the last id plus one. |
-| `GET /v1/attach` | The WebSocket a hand dials. See [docs/protocol.md](docs/protocol.md). |
+| `GET /v1/minds/{m}/events?after=` | The same as server-sent events, live, plus `writing` events that stream each reply. Resume with `after` as the last id plus one. |
+| `GET /v1/attach` | The WebSocket hands dial. |
 
-With `MENSOR_TOKEN` set, every request needs `Authorization: Bearer <token>`,
-and a hand sends the one in its own `MENSOR_TOKEN`. The host's token reaches
-every mind; `mensor token --mind m` prints one that reaches only `m` and its
-children, to give `m`'s hands. Without `MENSOR_TOKEN`, the host listens only
-on loopback and trusts every process on its machine. See
-[docs/security.md](docs/security.md).
-
-`--listen` sets where the host listens (`127.0.0.1:7878`), and a hand's
-`--url` where it dials. The host speaks plain HTTP: off loopback, put TLS in
-front of it and have hands dial `wss://`.
+- `state` is `idle`, `thinking`, `working`, `waiting` (for a hand named in
+  `waiting`, or for its first) or `ended`. `origin` is `root`, `fork` (with
+  `parent` and `inherited`) or `from` (with `from`).
+- With `MENSOR_TOKEN`, send `Authorization: Bearer <token>`; `mensor token
+  --mind m` makes one for `m` and its children alone. See
+  [docs/security.md](docs/security.md).
 
 ### Making a mind
 
-A hand that says hello to a root no one made starts it, with the host's
-settings. `PUT /v1/minds/{m}` makes it first, with its own, which are fixed
-from then on:
+A hand that connects to a root no one made starts it with the host's
+settings. `PUT` first to give it its own, fixed from then on:
 
-| Field | Is |
+| Field | |
 | --- | --- |
-| `model` | The model it asks: `--model`, or one of `--models`. |
-| `effort` | How hard that model works: for the Messages API `low`, `medium`, `high`, `xhigh` or `max`, and for the others any the server takes. |
-| `system` | Its system prompt, in place of `--system-file`'s. |
-| `from` | `{"mind", "at", "hand"}`: start from the first `at` items of `mind`'s history, keeping its hand `hand`. |
+| `model` | `--model` or one of `--models`. |
+| `effort` | For the Messages API `low` to `max`; for the others any the server takes. |
+| `system` | The system prompt. |
+| `from` | `{"mind", "at", "hand"}`: start from `mind`'s first `at` items, keeping its hand `hand`, such as a VM restored from a snapshot taken then. The other hands stay behind. |
 
-- A setting left out is the host's, or with `from`, that mind's. A fork's
-  children are made with their parent's.
-- With `from`, the mind shares those items, as a fork's child does, and
-  none stored after them. To start just after an item, `at` is its index
-  plus one. `mind` may have ended, so long as `at` falls before its end.
-- It keeps `hand`, which says hello to it as that hand again: a hand that
-  can stand at `at`, such as a VM restored from a snapshot taken then. A
-  new process's hello makes a call that hand had not answered unknown; the
-  same process's settles it by what it has read, runs and holds, as any
-  hello does. The rest of the step then runs on it. Its calls are numbered
-  above every one `mind` had made, so a hand restored from later than `at`
-  reads them as new.
-- Every other hand stays behind, and so does a clone in flight at `at`,
-  whose outcome is unknown. The mind is no kin of `mind`, and forks as one
-  that starts from nothing.
-- 201 when made, 200 when made the same way before, 409 when made another
-  way, 404 when `from` names no mind. 400 for a name with a `.` or of more
-  than 55 bytes, a model the host does not offer, an effort its model's API
-  does not take, or a `from` it cannot be made from. With a token for one
-  mind, `from` must name one it reaches, or it is 403.
-- `PUT` comes before the hand's hello: once a hello has started the mind
-  with the host's settings, a `PUT` with others is 409.
+A setting left out is the host's, or with `from`, that mind's. It answers
+201 made, 200 made the same way before, 409 made otherwise, 404 no such
+`from`, 403 a `from` the token does not reach, and 400 a bad name (a `.`,
+or over 55 bytes), model, effort or `from`.
 
-`POST /v1/minds/{m}/end` releases every hand of the mind, as
-`POST /release` does each: `mensor hand` deletes a released clone's copy,
-so ending a fork's child deletes its directory. A mind made `from` an
-ended one needs a hand that can stand where it starts.
+## Install
 
-## Models
+Each release has static Linux binaries for x86-64 and arm64:
 
-| Credential | API | Address |
-| --- | --- | --- |
-| `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` | Claude's Messages API | `ANTHROPIC_BASE_URL`, or Anthropic's |
-| `OPENAI_API_KEY` | Chat Completions (OpenAI, OpenRouter and most others), or with `MENSOR_API=responses` OpenAI's Responses API | `OPENAI_BASE_URL`, or OpenAI's |
+```bash
+v=0.1.1 f="mensor-$v-$(uname -m)-unknown-linux-musl.tar.gz"
+curl -fLO "https://github.com/Savid/mensor/releases/download/v$v/$f"
+curl -fLO "https://github.com/Savid/mensor/releases/download/v$v/SHA256SUMS"
+sha256sum -c --ignore-missing SHA256SUMS && tar -xzf "$f" && "${f%.tar.gz}/mensor" --version
+```
 
-With both set it is the Messages API, unless `MENSOR_API` is `chat` or
-`responses`. `--model` picks the model (`claude-opus-5-5` by default, so
-name another for the others), and `--effort` how hard it works. `--models`,
-a comma list, names more a mind may be made with, through the same API and
-credential. A request Claude declines may be answered by a fallback model,
-unless `--no-fallbacks` is set.
+The image, for both, is `ghcr.io/savid/mensor` (`0.1.1`, `0.1`, `latest`):
+[examples/docker](examples/docker) runs a host and hands from it. Binaries
+and image are built with Postgres, and attested:
+[verify them](docs/releasing.md#verify).
 
-- `ANTHROPIC_AUTH_TOKEN` goes on `Authorization` as a plain bearer, as a
-  gateway in front of the API takes it. A Claude.ai OAuth token is not one.
-- The Messages API is asked to think on every request, as hard as the
-  effort says, and to summarise its reasoning, which otherwise streams as
-  empty text. Its models must be Claude 4.6 or later: older ones refuse
-  adaptive thinking.
-- A step's `usage` counts its tokens by price: `input` (neither read from
-  nor written to the cache), `cacheRead`, `cacheWritten` and `output`. It
-  counts only the attempt that answered, whose `model` the step names: with
-  fallbacks, an attempt the first model declined is billed but not
-  counted.
-- Each step is stored with a fingerprint of the model, system prompt and
-  tools it was asked under, and its reasoning goes back to the model only
-  under the same: under any other the API would refuse it, or drop it and
-  every block after it. What the history says is written the same for every
-  mind that shares it, so a fork's child on its parent's setup starts with
-  its parent's last request, reasoning and all, and reads its cache.
-- The Responses API stores nothing (`store: false`): each request carries
-  the conversation, and a step's output items go back as they came, its
-  reasoning encrypted and its messages with their phase. Items the API
-  refuses, such as another organization's reasoning, are left out once and
-  the request sent again. With an effort it is also asked for a summary of
-  the reasoning, which OpenAI may give only to a verified organization.
-- `--max-tokens` (16,000, at least 16) caps one reply: the Messages API's
-  `max_tokens`, Chat Completions' `max_completion_tokens`, which OpenAI
-  and OpenRouter both honour, and the Responses API's `max_output_tokens`.
-  `none` sends no cap, for a server that refuses one; the Messages API
-  needs one. A reply cut off while it asks for a tool is asked for again,
-  with that tool not run; one cut off in its text ends the turn. Every API
-  counts reasoning in it, so a model at a high effort can spend it all
-  thinking.
-- Replies stream. `/events` carries each one as `writing` events before its
-  step is stored.
-- At `--compact-at` tokens (150,000; 0 turns it off) the model sums the
-  conversation up, and the mind carries on from the summary. The store keeps
-  the whole history.
-- A hand cuts `bash` output to 64 KB a stream, and a `read` to 256 KB. The
-  model is then shown at most 96 KB of a step's results, shared between its
-  tools, and a longer result loses its middle. The history keeps what the
-  hand returned.
+## Building
 
-## Storage and memory
+`make build` makes `mensor`, and its halves `mensor-mind` (`serve`) and
+`mensor-hand` (`hand`), so a machine carries only what it runs. The
+`postgres` feature adds 0.9 MB to a host.
 
-- A host keeps every history in one store: a SQLite file (`--store`), a
-  Postgres database (`MENSOR_POSTGRES`), or, with neither, memory that ends
-  with the process. Both set is an error. A child shares its parent's rows
-  instead of copying them.
-- A store serves one host at a time. Postgres enforces it: a second host is
-  refused while the first holds the database.
-- Postgres needs `mensor` built with the `postgres` feature, and its URL in
-  `MENSOR_POSTGRES`, never a flag, since it holds the password. See
-  [docs/postgres.md](docs/postgres.md).
-- A mind is loaded when something concerns it, and unloaded a minute after
-  it has no hand, no follower and no model call. A host that starts wakes
-  only the minds with work that needs no hand.
-
-## Binaries
-
-`make build` makes three, so that a machine carries only the half it runs:
-
-| Binary | Runs | Size |
-| --- | --- | --- |
-| `mensor` | `serve`, `hand`, `run` and `token` | 5.4 MB |
-| `mensor-mind` | what `serve` does, with its flags | 4.9 MB |
-| `mensor-hand` | what `hand` does, with its flags | 2.5 MB |
-
-Sizes are for x86-64 Linux, stripped, without the `postgres` feature. Each
-logs to standard error at `info`, or at the level `MENSOR_LOG` names.
-
-## Cloudflare
-
-A mind can also run as one Durable Object that holds its history, one hand
-(`local`) and the hand's files, behind the same API. It cannot fork. See
-[docs/cloudflare.md](docs/cloudflare.md).
-
-## Layout
-
-![What each runtime is built from: the hosts on top, and under them the pure crates, the same ones wherever they are needed.](docs/images/crates.svg)
-
-| Crate | Holds |
-| --- | --- |
-| `mensor-protocol` | The messages between a mind and a hand, and how a connection is settled. Pure. |
-| `mensor-mind` | The history, the turn loop, the tools and forks, as a state machine, and the store trait with the tests every store passes. Pure. |
-| `mensor-hand` | A hand's memory, the capability trait, and `files` over any byte store. Pure. |
-| `mensor-model` | Requests and answers for the Messages API, Chat Completions and the Responses API, with retries. Pure. |
-| `mensor-api` | The HTTP API's bodies, which both hosts serve. Pure. |
-| `mensor-object` | A mind and its one hand as one object over a storage trait. Pure. |
-| `mensor-mind-host` | The server: a task per mind, the attach endpoint, the API, the model client. |
-| `mensor-hand-host` | A hand on a machine: the driver, the WebSocket dial, `commands`, `files` on disk, `clone`. |
-| `mensor-cloudflare` | The Cloudflare worker. |
-| `mensor-store-sqlite` | The SQLite store. |
-| `mensor-store-postgres` | The Postgres store, behind `mensor`'s `postgres` feature. |
-| `mensor` | The three binaries, the in-memory dial, and the end-to-end tests. |
+![What each runtime is built from: the hosts on top, and under them the pure crates, the same ones wherever they are needed. mensor is 5.4 MB, mensor-mind 4.9 MB and mensor-hand 2.5 MB, stripped, for x86-64.](docs/images/crates.svg)
 
 The pure crates do no I/O and read no clock, so their tests drive them
-directly, and the Cloudflare worker reuses them unchanged.
+directly and the Cloudflare worker reuses them unchanged.
+[AGENTS.md](AGENTS.md) has the commands and rules for working here.
 
 ## Docs
 
-- [docs/protocol.md](docs/protocol.md): what a mind and its hands say to each other.
+- [docs/protocol.md](docs/protocol.md): what a mind and its hands say.
 - [docs/security.md](docs/security.md): what commands are kept from, and tokens.
 - [docs/postgres.md](docs/postgres.md): a host on Postgres.
-- [docs/cloudflare.md](docs/cloudflare.md): a mind as one Durable Object.
-- [docs/releasing.md](docs/releasing.md): cutting a release, and what it publishes.
-- [examples/](examples): a hand of your own, hands in containers, and opencode as a hand.
-- [AGENTS.md](AGENTS.md): commands, layout and rules for working here.
+- [docs/cloudflare.md](docs/cloudflare.md): a mind as one Durable Object. It cannot fork.
+- [docs/releasing.md](docs/releasing.md): verifying and cutting a release.
+- [examples/](examples): your own hand, hands in containers, opencode as a hand.
 
 ## License
 
