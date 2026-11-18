@@ -231,8 +231,11 @@ impl<S: Storage> Object<S> {
                 }
                 // The hand cannot clone, so its mind forks nothing, lets no
                 // hand go, and has no parent or children to talk to.
-                Output::Close { .. } | Output::Fork(_) | Output::Tell { .. } | Output::Watch(_) => {
-                }
+                Output::Close { .. }
+                | Output::Fork(_)
+                | Output::Tell { .. }
+                | Output::Watch { .. }
+                | Output::Unwatch { .. } => {}
             }
         }
         self.store(&mut items)?;

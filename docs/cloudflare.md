@@ -147,8 +147,6 @@ checks what the restarted object does with nobody prompting it.
 - An object that is awake holds the end of its history: the items from
   its last summary, or all of it until there is one. The rest is read from
   its database when it is asked for.
-- Not built: forks, a remote hand attaching to an object's mind, listing
-  minds, and deleting one.
 - The recovery alarm is tested on workerd only: a deploy on Cloudflare's
   network has not stopped an object mid-request.
 

@@ -1,5 +1,8 @@
 //! What a mind does, driven the way a host drives it.
 
+use std::collections::BTreeMap;
+use std::time::Duration;
+
 use mensor_mind::{
     Block, CLONE, Conflict, Content, Fork, HandRecord, Item, MadeFrom, MemoryStore, Message, Mind,
     MindRecord, MindSettings, MindTool, ModelReply, ModelRequest, Outcome, Output, Report, Role,
@@ -25,6 +28,10 @@ struct Host {
     told: Vec<(Name, String, String)>,
     /// Each list of minds the mind watched.
     watched: Vec<Vec<Name>>,
+    /// The key of each of those watches, and how long it was to last.
+    waits: Vec<(String, Duration)>,
+    /// The key of each wait that ended.
+    unwatched: Vec<String>,
 }
 
 impl Host {
@@ -46,6 +53,8 @@ impl Host {
             asked: Vec::new(),
             told: Vec::new(),
             watched: Vec::new(),
+            waits: Vec::new(),
+            unwatched: Vec::new(),
         }
     }
 
@@ -68,7 +77,15 @@ impl Host {
                 Output::Fork(fork) => self.forks.push(fork),
                 Output::Ask(request) => self.asked.push(request),
                 Output::Tell { to, key, text } => self.told.push((to, key, text)),
-                Output::Watch(minds) => self.watched.push(minds),
+                Output::Watch {
+                    key,
+                    minds,
+                    timeout,
+                } => {
+                    self.watched.push(minds);
+                    self.waits.push((key, timeout));
+                }
+                Output::Unwatch { key } => self.unwatched.push(key),
             }
         }
         // The mind holds the end of what is stored.
@@ -83,6 +100,30 @@ impl Host {
     fn attach(&mut self, hello: &Hello) {
         let outputs = self.mind.attach(hello).expect("the hand is refused");
         self.perform(outputs);
+    }
+
+    /// The key of the last wait the mind watched for.
+    fn key(&self) -> String {
+        let (key, _) = self.waits.last().expect("the mind waited for nothing");
+        key.clone()
+    }
+
+    /// Says a mind the last wait watches is at rest, and said `report`.
+    fn rested(&mut self, mind: &Name, report: Report) {
+        let outputs = self.mind.rested(&self.key(), mind, report);
+        self.perform(outputs);
+    }
+
+    /// Says the last wait has run out of time, and what the minds it waits
+    /// for do now.
+    fn time_out(&mut self, now: BTreeMap<Name, Report>) {
+        let outputs = self.mind.timed_out(&self.key(), now);
+        self.perform(outputs);
+    }
+
+    /// How long the last wait was to last.
+    fn timeout(&self) -> Duration {
+        self.waits.last().expect("the mind waited for nothing").1
     }
 
     fn prompt(&mut self, text: &str) {
@@ -2124,15 +2165,9 @@ fn a_parent_tells_a_child_and_waits_for_what_its_children_say() {
     assert_eq!(host.watched, std::slice::from_ref(&children));
     assert_eq!(host.mind.watching(), children);
 
-    let outputs = host
-        .mind
-        .rested(&children[1], Report::Failed("no model".into()));
-    host.perform(outputs);
+    host.rested(&children[1], Report::Failed("no model".into()));
     assert_eq!(host.mind.watching(), [children[0].clone()]);
-    let outputs = host
-        .mind
-        .rested(&children[0], Report::Said("They pass.".into()));
-    host.perform(outputs);
+    host.rested(&children[0], Report::Said("They pass.".into()));
     assert_eq!(
         outcome(&host.stored, "tu_3"),
         &Outcome::Output(json!({
@@ -2237,6 +2272,8 @@ fn a_mind_loaded_mid_wait_watches_again_and_says_a_message_again_as_the_same_pro
     let outputs = later.mind.start();
     later.perform(outputs);
     assert_eq!(later.watched, [vec![children[1].clone()]]);
+    assert_eq!(later.timeout(), Duration::from_mins(10), "its full time");
+    assert_eq!(later.waits[0].0, again.waits[0].0, "the same wait");
 }
 
 #[test]
@@ -2245,8 +2282,13 @@ fn an_interrupt_ends_a_wait_and_lets_a_message_on_its_way_arrive() {
     host.reply(vec![own("tu_2", "wait", json!({}))]);
     host.interrupt();
     assert!(matches!(outcome(&host.stored, "tu_2"), Outcome::NotRun(_)));
-    let outputs = host.mind.rested(&children[0], Report::Said("late".into()));
+    let key = host.key();
+    let outputs = host
+        .mind
+        .rested(&key, &children[0], Report::Said("late".into()));
     assert!(outputs.is_empty());
+    assert!(host.mind.timed_out(&key, BTreeMap::new()).is_empty());
+    assert_eq!(host.unwatched, [key], "the host is told the wait ended");
 
     host.prompt("tell the first");
     host.reply(vec![own(
@@ -2429,8 +2471,7 @@ fn a_fork_that_ended_does_not_end_the_minds_other_tools() {
     host.attach(&cloning("c3", "boot-c"));
     assert_eq!(host.mind.watching(), children);
     for child in &children {
-        let outputs = host.mind.rested(child, Report::Said("done".into()));
-        host.perform(outputs);
+        host.rested(child, Report::Said("done".into()));
     }
     assert!(matches!(outcome(&host.stored, "tu_2"), Outcome::Output(_)));
 }
@@ -2540,8 +2581,7 @@ fn a_parent_that_waits_hears_a_child_ended() {
     let (mut host, children) = forked();
     host.reply(vec![own("tu_2", "wait", json!({}))]);
     for child in &children {
-        let outputs = host.mind.rested(child, Report::Ended);
-        host.perform(outputs);
+        host.rested(child, Report::Ended);
     }
     assert_eq!(
         outcome(&host.stored, "tu_2"),
@@ -2550,6 +2590,121 @@ fn a_parent_that_waits_hears_a_child_ended() {
             children[1].as_str(): "ended",
         }))
     );
+}
+
+#[test]
+fn a_wait_that_runs_out_of_time_says_what_each_child_still_going_is_doing() {
+    let (mut host, children) = forked();
+    host.reply(vec![own("tu_2", "wait", json!({"seconds": 30}))]);
+    assert_eq!(host.timeout(), Duration::from_secs(30));
+    host.rested(&children[0], Report::Said("done".into()));
+    // A child heard from is reported as it said, whatever it does now.
+    host.time_out(BTreeMap::from([
+        (children[0].clone(), Report::Working),
+        (children[1].clone(), Report::HandsAway(vec![name("a1")])),
+    ]));
+    assert_eq!(
+        outcome(&host.stored, "tu_2"),
+        &Outcome::Output(json!({
+            children[0].as_str(): {"said": "done"},
+            children[1].as_str(): {"hands_away": ["a1"]},
+        }))
+    );
+    assert_eq!(host.asked(), 3, "the parent goes on");
+
+    // One the host could say nothing of is working.
+    host.reply(vec![own("tu_3", "wait", json!({"minds": [children[1]]}))]);
+    host.time_out(BTreeMap::new());
+    assert_eq!(
+        outcome(&host.stored, "tu_3"),
+        &Outcome::Output(json!({children[1].as_str(): "working"}))
+    );
+}
+
+#[test]
+fn a_wait_hears_only_what_is_said_under_its_key() {
+    let (mut host, children) = forked();
+    host.reply(vec![own("tu_2", "wait", json!({}))]);
+    for child in &children {
+        host.rested(child, Report::Ended);
+    }
+    let ended = host.key();
+    assert!(host.mind.timed_out(&ended, BTreeMap::new()).is_empty());
+
+    // A later wait under the same tool use id is another wait: what is said
+    // under the first's key, a rest or a time out, is not for it.
+    host.reply(vec![own("tu_2", "wait", json!({}))]);
+    assert_ne!(host.key(), ended);
+    let late = host
+        .mind
+        .rested(&ended, &children[0], Report::Said("old".into()));
+    assert!(late.is_empty());
+    assert!(host.mind.timed_out(&ended, BTreeMap::new()).is_empty());
+    assert_eq!(host.mind.watching(), children);
+    host.time_out(BTreeMap::new());
+    assert!(host.mind.watching().is_empty());
+}
+
+#[test]
+fn a_wait_that_ends_tells_its_host_however_it_ends() {
+    let (mut host, children) = forked();
+    // Every child heard from.
+    host.reply(vec![own("tu_2", "wait", json!({}))]);
+    for child in &children {
+        host.rested(child, Report::Ended);
+    }
+    // Its time run out.
+    host.reply(vec![own("tu_3", "wait", json!({}))]);
+    host.time_out(BTreeMap::new());
+    // The mind ended.
+    host.reply(vec![own("tu_4", "wait", json!({}))]);
+    let outputs = host.mind.end();
+    host.perform(outputs);
+    let keys: Vec<String> = host.waits.iter().map(|(key, _)| key.clone()).collect();
+    assert_eq!(host.unwatched, keys);
+}
+
+#[test]
+fn a_wait_lasts_ten_minutes_unless_given_from_one_second_to_an_hour() {
+    let (mut host, children) = forked();
+    for (seconds, lasts) in [(json!(null), 600), (json!(1), 1), (json!(3600), 3600)] {
+        host.reply(vec![own(
+            "tu_2",
+            "wait",
+            json!({"minds": [children[0]], "seconds": seconds}),
+        )]);
+        assert_eq!(host.timeout(), Duration::from_secs(lasts));
+        host.time_out(BTreeMap::new());
+    }
+    for seconds in [json!(0), json!(3601), json!("soon"), json!(-1), json!(1.5)] {
+        host.reply(vec![own("tu_3", "wait", json!({"seconds": seconds}))]);
+        assert_eq!(
+            host.stored.last(),
+            Some(&Item::Outcome {
+                tool_use: "tu_3".into(),
+                call: None,
+                outcome: Outcome::NotRun("seconds is a whole number from 1 to 3600".into()),
+            })
+        );
+    }
+    assert_eq!(host.waits.len(), 3);
+}
+
+#[test]
+fn a_mind_waited_for_works_or_has_hands_away_until_it_rests() {
+    let mut host = waiting_on_a_call();
+    assert_eq!(host.mind.status_now().report_now(), Report::Working);
+    host.mind.detach(&name("a1"));
+    let away = Report::HandsAway(vec![name("a1")]);
+    assert_eq!(host.mind.status_now().report_now(), away);
+    assert_eq!(told_from_store(&host.stored).report_now(), away);
+    assert!(!away.rests() && !Report::Working.rests());
+
+    let mut idle = Host::new();
+    idle.attach(&hello("boot-1"));
+    let said = idle.mind.status_now().report_now();
+    assert_eq!(said, Report::Said(String::new()));
+    assert!(said.rests());
 }
 
 #[test]

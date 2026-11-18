@@ -5,7 +5,7 @@ use std::time::Duration;
 use mensor_api::Writing;
 use mensor_mind::{
     Conflict, Fork, Item, Mind, MindRecord, MindSettings, ModelReply, ModelRequest, NoHand, Origin,
-    Output, Report, Settings, State, Store, StoreError, Untold,
+    Output, Report, Settings, Store, StoreError, Untold,
 };
 use mensor_protocol::{FromHand, FromMind, Hello, Name, Refusal};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -51,10 +51,17 @@ pub(crate) enum Command {
         key: String,
         result: Result<(), Untold>,
     },
-    /// A mind this one watches is at rest.
+    /// A mind the wait under `key` watches is at rest.
     Rested {
+        key: String,
         mind: Name,
         report: Report,
+    },
+    /// The wait under `key` has run out of time, and this is what each mind
+    /// it waits for is doing.
+    TimedOut {
+        key: String,
+        now: BTreeMap<Name, Report>,
     },
     Interrupt,
     Release {
@@ -74,17 +81,10 @@ pub(crate) enum Command {
 
 /// What a mind is doing.
 pub(crate) struct Status {
-    pub(crate) state: State,
+    /// What its history says.
+    pub(crate) status: mensor_mind::Status,
     /// The hands connected.
     pub(crate) hands: Vec<Name>,
-    /// The hands its turn waits for.
-    pub(crate) waiting: Vec<Name>,
-    /// The children its turn waits for.
-    pub(crate) watching: Vec<Name>,
-    /// How many items of its history are stored.
-    pub(crate) length: u64,
-    /// What it said when it came to rest, while it is at rest.
-    pub(crate) report: Option<Report>,
 }
 
 /// What those following a mind are told, in the order it happened.
@@ -320,8 +320,12 @@ impl Task {
                 let outputs = self.mind.told(&key, result);
                 self.perform(outputs).await?;
             }
-            Command::Rested { mind, report } => {
-                let outputs = self.mind.rested(&mind, report);
+            Command::Rested { key, mind, report } => {
+                let outputs = self.mind.rested(&key, &mind, report);
+                self.perform(outputs).await?;
+            }
+            Command::TimedOut { key, now } => {
+                let outputs = self.mind.timed_out(&key, now);
                 self.perform(outputs).await?;
             }
             Command::Interrupt => {
@@ -344,14 +348,9 @@ impl Task {
                 }
             },
             Command::Status { reply } => {
-                let status = self.mind.status_now();
                 let _ = reply.send(Status {
-                    state: status.state,
+                    status: self.mind.status_now(),
                     hands: self.mind.connected(),
-                    waiting: status.waiting,
-                    watching: status.watching,
-                    length: status.length,
-                    report: status.report,
                 });
             }
             Command::Follow { reply } => {
@@ -466,10 +465,20 @@ impl Task {
                     self.store(&mut items).await?;
                     self.tell(to, key, text);
                 }
-                Output::Watch(minds) => {
+                Output::Watch {
+                    key,
+                    minds,
+                    timeout,
+                } => {
                     self.store(&mut items).await?;
                     if let Some(host) = self.host.upgrade() {
-                        Host::from(host).watch(&self.name, minds);
+                        Host::from(host).watch(&self.name, key, &minds, timeout);
+                    }
+                }
+                Output::Unwatch { key } => {
+                    self.store(&mut items).await?;
+                    if let Some(host) = self.host.upgrade() {
+                        Host::from(host).unwatch(&self.name, &key);
                     }
                 }
             }

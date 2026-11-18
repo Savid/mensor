@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
 
 use mensor_protocol::{
     Call, CallId, CallResult, FromMind, Hello, Name, Refusal, Reply, Settled, settle,
@@ -6,7 +7,7 @@ use mensor_protocol::{
 use serde_json::{Value, json};
 
 use crate::fork::{Fork, child_name, shares};
-use crate::tools::{CLONE, Does, HAND, MAX_CHILDREN, MindTool, Table, split};
+use crate::tools::{CLONE, Does, HAND, MAX_CHILDREN, MindTool, Table, split, wait_time};
 use crate::window::{to_summarise, window};
 use crate::{
     Block, Content, HandRecord, Item, Latest, MadeFrom, Message, MindSettings, ModelReply,
@@ -50,9 +51,23 @@ pub enum Output {
         /// The message.
         text: String,
     },
-    /// Answer with [`Mind::rested`] for each of these minds once it is at
-    /// rest: at once for one that already is.
-    Watch(Vec<Name>),
+    /// Answer under `key` with [`Mind::rested`] for each of these minds
+    /// once it is at rest, at once for one that already is, and with
+    /// [`Mind::timed_out`] once `timeout` has passed. A mind loaded mid-wait
+    /// watches again under the same key: its wait keeps the time it had.
+    Watch {
+        /// Which wait this is.
+        key: String,
+        /// The minds.
+        minds: Vec<Name>,
+        /// How long the wait lasts.
+        timeout: Duration,
+    },
+    /// The wait under `key` has ended: answer nothing more for it.
+    Unwatch {
+        /// Which wait it was.
+        key: String,
+    },
 }
 
 /// What the model is asked for a summary. A fact the user gave for later has
@@ -126,8 +141,20 @@ pub struct Status {
     pub report: Option<Report>,
 }
 
-/// What a mind said when it last came to rest, as a parent that waits for
-/// it is told.
+impl Status {
+    /// What a parent that waits for the mind is told of it now: what it
+    /// said, if it is at rest, or else what it is doing.
+    pub fn report_now(&self) -> Report {
+        match (&self.report, self.state) {
+            (Some(report), _) => report.clone(),
+            (None, State::Waiting) => Report::HandsAway(self.waiting.clone()),
+            (None, _) => Report::Working,
+        }
+    }
+}
+
+/// What a parent that waits for a mind is told of it: what it said when it
+/// came to rest, or, when the wait runs out of time first, what it is doing.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Report {
@@ -143,6 +170,19 @@ pub enum Report {
     Missing,
     /// It has ended.
     Ended,
+    /// It is still working, or asking its model.
+    Working,
+    /// It can go on only when one of these hands of its own, which are
+    /// away, connects again: only whoever runs them can bring them back.
+    HandsAway(Vec<Name>),
+}
+
+impl Report {
+    /// Whether the mind it tells of is at rest, or does not exist: it says
+    /// nothing more until it is prompted.
+    pub fn rests(&self) -> bool {
+        !matches!(self, Self::Working | Self::HandsAway(_))
+    }
 }
 
 /// What became of a prompt.
@@ -313,6 +353,7 @@ struct Telling {
 #[derive(Clone, Debug)]
 struct Watching {
     tool_use: String,
+    key: String,
     reports: BTreeMap<Name, Report>,
 }
 
@@ -373,7 +414,9 @@ enum Next {
     },
     Watch {
         tool_use: String,
+        key: String,
         minds: Vec<Name>,
+        timeout: Duration,
     },
     Waited {
         tool_use: String,
@@ -894,7 +937,7 @@ impl Mind {
         if self.asking.take().is_none() && matches!(self.next(), Next::Idle) {
             return outputs;
         }
-        self.watching = None;
+        self.unwatch(&mut outputs);
         // A message on its way may have arrived: its outcome is what the
         // mind it went to says.
         let telling = self
@@ -956,14 +999,49 @@ impl Mind {
         outputs
     }
 
-    /// A mind this one watches is at rest, and said `report`.
-    pub fn rested(&mut self, mind: &Name, report: Report) -> Vec<Output> {
+    /// A mind the wait under `key` watches is at rest, and said `report`.
+    /// A wait that has ended does nothing.
+    pub fn rested(&mut self, key: &str, mind: &Name, report: Report) -> Vec<Output> {
         let mut outputs = Vec::new();
-        if let Some(watching) = &mut self.watching {
-            watching.reports.insert(mind.clone(), report);
-            self.drive(&mut outputs);
-        }
+        let Some(watching) = self
+            .watching
+            .as_mut()
+            .filter(|watching| watching.key == key)
+        else {
+            return outputs;
+        };
+        watching.reports.insert(mind.clone(), report);
+        self.drive(&mut outputs);
         outputs
+    }
+
+    /// The `wait` under `key` has run out of time: `now` says what each
+    /// mind it waits for is doing, as [`Status::report_now`] says it. What a
+    /// mind said when it came to rest is kept, and one `now` leaves out is
+    /// said to be working. A wait that has ended does nothing.
+    pub fn timed_out(&mut self, key: &str, mut now: BTreeMap<Name, Report>) -> Vec<Output> {
+        let mut outputs = Vec::new();
+        let unheard = self.watching();
+        let Some(watching) = self
+            .watching
+            .as_mut()
+            .filter(|watching| watching.key == key)
+        else {
+            return outputs;
+        };
+        for mind in unheard {
+            let report = now.remove(&mind).unwrap_or(Report::Working);
+            watching.reports.insert(mind, report);
+        }
+        self.drive(&mut outputs);
+        outputs
+    }
+
+    /// Ends the wait in progress, if there is one.
+    fn unwatch(&mut self, outputs: &mut Vec<Output>) {
+        if let Some(watching) = self.watching.take() {
+            outputs.push(Output::Unwatch { key: watching.key });
+        }
     }
 
     /// Lets a hand go from outside the conversation: a hand that died while
@@ -996,7 +1074,7 @@ impl Mind {
             return outputs;
         }
         self.asking = None;
-        self.watching = None;
+        self.unwatch(&mut outputs);
         if let Some(telling) = self.telling.take()
             && self.outcome_of(&telling.tool_use).is_none()
         {
@@ -1255,15 +1333,25 @@ impl Mind {
                     });
                     outputs.push(Output::Tell { to, key, text });
                 }
-                Next::Watch { tool_use, minds } => {
+                Next::Watch {
+                    tool_use,
+                    key,
+                    minds,
+                    timeout,
+                } => {
                     self.watching = Some(Watching {
                         tool_use,
+                        key: key.clone(),
                         reports: BTreeMap::new(),
                     });
-                    outputs.push(Output::Watch(minds));
+                    outputs.push(Output::Watch {
+                        key,
+                        minds,
+                        timeout,
+                    });
                 }
                 Next::Waited { tool_use, reports } => {
-                    self.watching = None;
+                    self.unwatch(outputs);
                     let item = Item::Outcome {
                         tool_use,
                         call: None,
@@ -1682,7 +1770,7 @@ impl Mind {
         let (named, rest) = split(input);
         match tool {
             MindTool::Tell => return self.tell(id, &rest, step_at),
-            MindTool::Wait => return self.wait(id, &rest),
+            MindTool::Wait => return self.wait(id, &rest, step_at),
             MindTool::Fork | MindTool::CloneHand | MindTool::ReleaseHand => {}
         }
         if tool == MindTool::ReleaseHand {
@@ -1810,10 +1898,14 @@ impl Mind {
         }
     }
 
-    /// What `wait`, used as `id` with `input`, does next.
-    fn wait(&self, id: &str, input: &Value) -> Next {
-        let minds = match self.waited_for(input) {
-            Ok(minds) => minds,
+    /// What `wait`, used as `id` with `input` in the step at `step_at`,
+    /// does next.
+    fn wait(&self, id: &str, input: &Value, step_at: usize) -> Next {
+        let waited = self
+            .waited_for(input)
+            .and_then(|minds| Ok((minds, wait_time(input)?)));
+        let (minds, timeout) = match waited {
+            Ok(waited) => waited,
             Err(why) => {
                 return Next::Skip {
                     tool_use: id.to_owned(),
@@ -1828,7 +1920,9 @@ impl Mind {
         else {
             return Next::Watch {
                 tool_use: id.to_owned(),
+                key: format!("{}/{id}", self.before + index(step_at)),
                 minds,
+                timeout,
             };
         };
         let reports: Option<BTreeMap<Name, Report>> = minds

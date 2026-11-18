@@ -11,7 +11,7 @@ use std::time::Duration;
 use mensor::hand::{Does, Hands};
 use mensor::local::Local;
 use mensor_hand::{Capabilities, Core, Limits};
-use mensor_hand_host::capabilities::{Commands, Disk, Files};
+use mensor_hand_host::capabilities::{Cloning, Commands, Disk, Files, Spawn, Started};
 use mensor_hand_host::{
     Backoff, BoxFuture, Dial, DialError, Ended, Error, Handle, Link, WebSocket, boot, start,
 };
@@ -197,6 +197,15 @@ fn hand_through(
     let capabilities = Capabilities::new()
         .with(Commands::new(dir))
         .with(Files::new(Disk::new(dir)));
+    hand_doing(dial, core, capabilities)
+}
+
+/// Starts a hand with these capabilities.
+fn hand_doing(
+    dial: impl Dial + 'static,
+    core: Core,
+    capabilities: Capabilities,
+) -> (Handle, JoinHandle<Result<Ended, Error>>) {
     let mut config = mensor_hand_host::Config::new(dial, capabilities);
     config.backoff = Backoff {
         min: Duration::from_millis(10),
@@ -1565,6 +1574,226 @@ async fn a_parent_waits_for_its_child_and_tells_it_more() {
     let copy = only_in(&clones.join(child.as_str()));
     assert!(copy.join("a.txt").exists() && copy.join("b.txt").exists());
     assert!(!dir.join("a.txt").exists());
+}
+
+/// Starts no hand for a clone, as a machine that went away would.
+struct Unstarted;
+
+struct Nothing;
+
+impl Started for Nothing {
+    fn stop(self: Box<Self>) {}
+}
+
+impl Spawn for Unstarted {
+    fn spawn(
+        &self,
+        _: Name,
+        _: Name,
+        _: std::path::PathBuf,
+    ) -> BoxFuture<'_, Result<Box<dyn Started>, String>> {
+        Box::pin(async { Ok(Box::new(Nothing) as Box<dyn Started>) })
+    }
+}
+
+/// Answers a parent that forks two children and, told to, waits two
+/// seconds for them; and its first child, which runs a long command.
+fn waiting_two_seconds(request: &ModelRequest) -> ModelReply {
+    let told = told(request);
+    reply(if told.contains("\"you\"") {
+        vec![bash("tu_s", "sleep 30")]
+    } else if told.contains("\"working\"") {
+        vec![text("Moved on.")]
+    } else if told.contains("wait now") {
+        vec![own("tu_w", "wait", json!({"seconds": 2}))]
+    } else if told.contains("\"children\"") {
+        vec![text("Forked.")]
+    } else {
+        vec![own("tu_f", "fork", json!({"prompts": ["sleep", "rest"]}))]
+    })
+}
+
+#[tokio::test]
+async fn a_wait_that_runs_out_of_time_wakes_its_parent_and_says_what_each_child_is_doing() {
+    let server = Server::start(Config {
+        rest_after: Duration::from_millis(50),
+        ..Config::default()
+    })
+    .await;
+    for _ in 0..5 {
+        server.model.then_with(waiting_two_seconds);
+    }
+    let root = tempfile::tempdir().unwrap();
+    let (dir, clones) = (root.path().join("work"), root.path().join("clones"));
+    std::fs::create_dir(&dir).unwrap();
+    let capabilities = Capabilities::new()
+        .with(Commands::new(&dir))
+        .with(Cloning::new(&dir, &clones, Arc::new(Unstarted)));
+    let dial = WebSocket::new(server.attach());
+    let (_hand, _task) = hand_doing(dial, fresh("m", "a1"), capabilities);
+    server.settled("m").await;
+    server.prompt("m", "split the work").await;
+    server.settled("m").await;
+    let parent = server.history("m");
+    let Outcome::Output(forked) = outcome(&parent, "tu_f") else {
+        panic!("the fork did not run");
+    };
+    let children: Vec<Name> = serde_json::from_value(forked["children"].clone()).unwrap();
+
+    // The first child's hand starts by hand, and runs its long command. The
+    // second's never starts.
+    let (_child, _child_task) = server.hand(fresh(children[0].as_str(), "a1"), root.path());
+    eventually("the first child runs its command", || async {
+        server
+            .status(children[0].as_str())
+            .await
+            .is_some_and(|status| status.state == State::Working && status.hands == [name("a1")])
+    })
+    .await;
+
+    // The parent waits, lets its hand go, and rests: its wait running out
+    // of time wakes it.
+    server.prompt("m", "wait now").await;
+    eventually("the parent waits", || async {
+        server
+            .status("m")
+            .await
+            .is_some_and(|status| !status.watching.is_empty())
+    })
+    .await;
+    server.host.release(&name("m"), name("a1")).await.unwrap();
+    eventually("the parent rests", || async {
+        server.host.awake().await == 1
+    })
+    .await;
+    let resting = server.status("m").await.unwrap();
+    assert_eq!(
+        (resting.state, resting.watching, resting.hands.len()),
+        (State::Working, children.clone(), 0),
+        "the parent rests mid-wait"
+    );
+    assert!(
+        !server
+            .history("m")
+            .iter()
+            .any(|item| matches!(item, Item::Outcome { tool_use, .. } if tool_use == "tu_w"))
+    );
+    eventually("the parent moves on", || async {
+        said(&server.history("m")) == ["Forked.", "Moved on."]
+    })
+    .await;
+    assert_eq!(
+        outcome(&server.history("m"), "tu_w"),
+        &Outcome::Output(json!({
+            children[0].as_str(): "working",
+            children[1].as_str(): {"hands_away": ["a1"]},
+        }))
+    );
+
+    // The first child rests once the wait is over: the parent, at rest
+    // again, is not woken for it.
+    eventually("the parent rests again", || async {
+        server.host.awake().await == 1
+    })
+    .await;
+    server.host.interrupt(&children[0]).await.unwrap();
+    eventually("the first child rests", || async {
+        server
+            .status(children[0].as_str())
+            .await
+            .is_some_and(|status| status.state == State::Idle)
+    })
+    .await;
+    stays_at_rest(&server, Duration::from_millis(300)).await;
+}
+
+/// Shows that no mind but one wakes for `quiet`: the one awake now.
+async fn stays_at_rest(server: &Server, quiet: Duration) {
+    let until = Instant::now() + quiet;
+    while Instant::now() < until {
+        assert_eq!(server.host.awake().await, 1, "a resting mind was woken");
+        sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// Answers a parent that forks a child, waits two seconds for it, then
+/// tells it to work on and waits again; and the child, which answers at
+/// once, then works on until the file `gate` exists.
+fn waiting_twice(gate: &Path) -> impl FnOnce(&ModelRequest) -> ModelReply + Send + 'static {
+    let held = format!("until [ -e '{}' ]; do sleep 0.01; done", gate.display());
+    move |request| {
+        let told = told(request);
+        reply(if told.contains("\"you\"") {
+            if told.contains("exit") {
+                vec![text("Worked.")]
+            } else if told.contains("work on") {
+                vec![bash("tu_s", &held)]
+            } else {
+                vec![text("Done.")]
+            }
+        } else if told.contains("Worked.") {
+            vec![text("All done.")]
+        } else if told.contains("Done.") {
+            let child = first_child(&told);
+            vec![
+                own("tu_t", "tell", json!({"mind": child, "text": "work on"})),
+                own("tu_w2", "wait", json!({})),
+            ]
+        } else if told.contains("\"children\"") {
+            vec![own("tu_w1", "wait", json!({"seconds": 2}))]
+        } else {
+            vec![own("tu_f", "fork", json!({"prompts": ["answer"]}))]
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_wait_that_ends_early_stops_its_timer() {
+    let server = Server::start(Config {
+        rest_after: Duration::from_millis(50),
+        ..Config::default()
+    })
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let gate = root.path().join("go");
+    for _ in 0..7 {
+        server.model.then_with(waiting_twice(&gate));
+    }
+    let (dir, clones) = (root.path().join("work"), root.path().join("clones"));
+    std::fs::create_dir(&dir).unwrap();
+    let _hands = server.cloning_hand("m", "a1", &dir, &clones);
+    server.settled("m").await;
+    server.prompt("m", "go").await;
+
+    // The child answers within the first wait's two seconds, so that wait
+    // ends early. The parent waits again, lets its hand go, and rests.
+    eventually("the parent waits again", || async {
+        let history = server.history("m");
+        history
+            .iter()
+            .any(|item| matches!(item, Item::Outcome { tool_use, .. } if tool_use == "tu_t"))
+            && server
+                .status("m")
+                .await
+                .is_some_and(|status| !status.watching.is_empty())
+    })
+    .await;
+    server.host.release(&name("m"), name("a1")).await.unwrap();
+    eventually("the parent rests", || async {
+        server.host.awake().await == 1
+    })
+    .await;
+
+    // The first wait's two seconds pass, and nothing wakes the parent.
+    stays_at_rest(&server, Duration::from_millis(2500)).await;
+    let parent = server.status("m").await.unwrap();
+    assert_eq!((parent.state, parent.watching.len()), (State::Working, 1));
+
+    std::fs::write(&gate, "").unwrap();
+    eventually("the parent hears from the child", || async {
+        said(&server.history("m")) == ["All done."]
+    })
+    .await;
 }
 
 #[tokio::test]

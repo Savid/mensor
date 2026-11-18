@@ -14,6 +14,7 @@
 //! ([`Settings::tools`](crate::Settings::tools)).
 
 use std::str::FromStr;
+use std::time::Duration;
 
 use mensor_protocol::{CapabilityDecl, Name, OperationDecl};
 use serde_json::{Map, Value, json};
@@ -29,6 +30,12 @@ pub const MAX_CHILDREN: usize = 8;
 
 /// The argument every hand tool takes.
 pub(crate) const HAND: &str = "hand";
+
+/// How many seconds a `wait` lasts when the model does not say.
+const WAIT_SECONDS: u64 = 600;
+
+/// The most seconds a `wait` lasts.
+const MAX_WAIT_SECONDS: u64 = 3600;
 
 /// One of the mind's own tools.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -126,13 +133,18 @@ impl MindTool {
                 }),
             ),
             Self::Wait => (
-                "Wait until children have ended their turns, and read what each said last. A \
-                 child that is still working is waited for, however long it takes.",
+                "Wait until children have ended their turns, and read what each said last. \
+                 Once its seconds have passed, a child still going is reported as working, or \
+                 as hands_away with the names of its own hands that are not connected: those \
+                 are the child's copies, not your hands, and only whoever runs them can bring \
+                 them back. Wait again to wait longer.",
                 json!({
                     "type": "object",
                     "properties": {
                         "minds": {"type": "array", "items": {"type": "string"}, "description":
                             "The children to wait for. Leave it out to wait for all of them."},
+                        "seconds": {"type": "integer", "minimum": 1, "maximum": MAX_WAIT_SECONDS,
+                            "description": format!("The most seconds to wait: {WAIT_SECONDS} when you leave it out.")},
                     },
                 }),
             ),
@@ -154,6 +166,19 @@ impl FromStr for MindTool {
             .find(|tool| tool.name() == name)
             .ok_or_else(|| NoMindTool(name.to_owned()))
     }
+}
+
+/// How long a `wait` given `input` lasts.
+pub(crate) fn wait_time(input: &Value) -> Result<Duration, String> {
+    let seconds = match &input["seconds"] {
+        Value::Null => Some(WAIT_SECONDS),
+        seconds => seconds
+            .as_u64()
+            .filter(|seconds| (1..=MAX_WAIT_SECONDS).contains(seconds)),
+    };
+    let seconds =
+        seconds.ok_or_else(|| format!("seconds is a whole number from 1 to {MAX_WAIT_SECONDS}"))?;
+    Ok(Duration::from_secs(seconds))
 }
 
 /// What a tool does.

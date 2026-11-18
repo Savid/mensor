@@ -111,7 +111,7 @@ them:
 | Tool | Does |
 | --- | --- |
 | `fork` | Clones a hand once per prompt. Each clone starts a child mind that shares the history so far and works on its own prompt. |
-| `wait` | Waits until children end their turns, and returns what each said last. |
+| `wait` | Waits until children end their turns, for `seconds` at most, and returns what each said last or is still doing. |
 | `tell` | Sends a message to the mind's parent or one of its children. |
 | `clone_hand` | Clones a hand into the same mind, as another hand. |
 | `release_hand` | Lets a hand go. |
@@ -162,12 +162,15 @@ lets a mind fork, and neither clone a hand nor let one go, and
   "(From m:)" or "(From m.d3342iuj:)", the same for every mind that shares
   it. A message sent again after a restart is stored once.
 - `wait` returns what each child said last, or that it was stopped, its
-  model failed, or it ended. Only a parent waits, so two minds never wait
-  on each other. An interrupt ends a wait.
+  model failed, or it ended. `seconds` (600, at most 3600) bounds a wait: a
+  child still going then is reported as working, or with its hands that
+  are away. Only a parent waits, so two minds never wait on each other. An
+  interrupt ends a wait.
 - A message to a mind that has ended does not run, and the model is told
   so.
 - A waiting parent needs no hand. It may rest, or its host may restart: it
-  watches its children again when it wakes.
+  watches its children again when it wakes. A host that restarts gives a
+  wait its full time again.
 
 ## API
 
@@ -346,21 +349,6 @@ A mind can also run as one Durable Object that holds its history, one hand
 
 The pure crates do no I/O and read no clock, so their tests drive them
 directly, and the Cloudflare worker reuses them unchanged.
-
-## Not built yet
-
-- A `wait` that times out.
-- Deleting a mind, beyond ending it.
-- Clones made outside the hand, such as VM snapshots.
-- Hands a host gives every mind, such as one that searches the web.
-- `fetch` for `mensor hand`.
-- Tokens that expire, or that can be taken back one at a time.
-- Several hosts over one Postgres database, each with minds of its own.
-- A fork's children with models of their own.
-- On Cloudflare: forks, remote hands, tokens for one mind, making or ending
-  a mind, and listing minds.
-
-MCP is not planned.
 
 ## Docs
 
