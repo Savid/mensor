@@ -175,13 +175,14 @@ pub(crate) fn spawn(record: &MindRecord, host: &Arc<Inner>) -> mpsc::UnboundedSe
     let (sender, commands) = mpsc::unbounded_channel();
     let name = &record.name;
     let settings = settings(&host.config.mind, &record.settings);
+    let model = Arc::clone(host.asking(settings.own.model.as_deref()));
     let task = Task {
         name: name.clone(),
         mind: Mind::new(name.clone(), settings.clone()),
         made: record.settings.clone(),
         settings,
         store: Arc::clone(&host.store),
-        model: Arc::clone(&host.model),
+        model,
         host: Arc::downgrade(host),
         rest_after: host.config.rest_after,
         commands,

@@ -38,7 +38,7 @@ npx wrangler@4.160.1 deploy
 
 | Variable | Default | |
 | --- | --- | --- |
-| `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY` | none | The model's credential, a secret. `MENSOR_API` picks the API as for [a host](../README.md#configuration). |
+| `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY` | none | The model's credential, a secret. The API is picked as for [a host's `--model`](../README.md#configuration). |
 | `MENSOR_TOKEN` | none | The bearer token every request needs, a secret. Without it only a loopback `Host` is answered, so a deployed worker refuses every request. Tokens for one mind are not taken. |
 | `MENSOR_MODEL` | `claude-opus-5-5` | The model every mind asks. |
 | `MENSOR_EFFORT`, `MENSOR_SYSTEM` | none | Its effort and system prompt. |

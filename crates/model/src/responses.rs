@@ -63,8 +63,6 @@ struct Body<'a> {
     tool_choice: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<Reasoning<'a>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_output_tokens: Option<u32>,
     stream: bool,
     store: bool,
     /// The model's reasoning, encrypted, which a server that stores
@@ -155,7 +153,6 @@ fn body<'a>(config: &'a Config, request: &'a ModelRequest, drop_items: bool) -> 
                 effort,
                 summary: "auto",
             }),
-        max_output_tokens: config.max_tokens,
         stream: true,
         store: false,
         include: ["reasoning.encrypted_content"],
@@ -672,21 +669,18 @@ mod tests {
                 "tools": [{"type": "function", "name": "bash", "description": "Run a command.",
                            "parameters": {"type": "object"}, "strict": false}],
                 "reasoning": {"effort": "high", "summary": "auto"},
-                "max_output_tokens": 16000,
                 "stream": true,
                 "store": false,
                 "include": ["reasoning.encrypted_content"],
             })
         );
 
-        // Text alone, at the model's own effort, with no cap.
+        // Text alone, at the model's own effort.
         config.effort = None;
-        config.max_tokens = None;
         request.text_only = true;
         let body = body_of(&Exchange::new(&config, &request).post());
         assert_eq!(body["tool_choice"], json!("none"));
         assert!(body.get("reasoning").is_none());
-        assert!(body.get("max_output_tokens").is_none());
     }
 
     #[test]

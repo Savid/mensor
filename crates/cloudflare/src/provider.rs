@@ -8,7 +8,7 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use futures_util::future::{Either, select};
 use mensor_mind::{ModelError, ModelReply, ModelRequest};
-use mensor_model::{Answer, Config, Exchange, Next};
+use mensor_model::{Answer, Api, Config, Exchange, Next};
 use mensor_object::Model;
 use worker::wasm_bindgen::JsValue;
 use worker::{
@@ -28,17 +28,23 @@ pub(crate) struct Provider<W> {
     wrote: W,
 }
 
-/// The model the object asks: `MENSOR_MODEL`, or Claude Opus 5.5.
-pub(crate) fn model(env: &Env) -> String {
+/// The model the object asks, as `MENSOR_MODEL` names it, with its API if
+/// it says one: Claude Opus 5.5 unless set.
+fn named(env: &Env) -> String {
     env.var("MENSOR_MODEL")
         .map_or_else(|_| "claude-opus-5-5".into(), |model| model.to_string())
+}
+
+/// The model the object asks, without its API.
+pub(crate) fn model(env: &Env) -> String {
+    Api::named(&named(env)).1.to_owned()
 }
 
 impl<W: Fn(u64, &str)> Provider<W> {
     /// The model the object's variables and secrets describe.
     pub(crate) fn from_env(env: &Env, wrote: W) -> Self {
         let var = |name: &str| env.var(name).ok().map(|value| value.to_string());
-        let config = Config::from_vars(model(env), var).map(|mut config| {
+        let config = Config::from_vars(&named(env), var).map(|mut config| {
             config.effort = var("MENSOR_EFFORT").filter(|effort| !effort.is_empty());
             config.fallbacks = var("MENSOR_FALLBACKS").as_deref() != Some("off");
             config.timeout = TIMEOUT;

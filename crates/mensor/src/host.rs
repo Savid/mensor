@@ -1,5 +1,6 @@
 //! Hosting minds: the flags, and the host they describe.
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -7,7 +8,7 @@ use std::time::Duration;
 
 use clap::Args;
 use mensor_mind::{MemoryStore, MindSettings, MindTool, NoMindTool, Settings, Store};
-use mensor_mind_host::{Config, Host, Provider, Token};
+use mensor_mind_host::{Config, Host, Model, Provider, Token};
 use mensor_store_sqlite::SqliteStore;
 use tokio::net::TcpListener;
 
@@ -39,25 +40,28 @@ pub struct Hosting {
     /// /v1/minds/{m}/release` lets a hand go whatever this says.
     #[arg(long, default_value = "fork,clone_hand,release_hand,tell,wait", value_parser = tools)]
     mind_tools: Tools,
-    /// The model every mind asks, unless it was made with its own.
-    /// `ANTHROPIC_API_KEY` reaches it through the Messages API,
-    /// `OPENAI_API_KEY` through Chat Completions, or the Responses API
-    /// with `MENSOR_API=responses`.
+    /// The model every mind asks, unless it was made with its own. A name
+    /// may start with the API it is asked through: `messages:`, `chat:` or
+    /// `responses:`. Without one it is the Messages API if
+    /// `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` is set, else Chat
+    /// Completions with `OPENAI_API_KEY`.
     #[arg(long, default_value = "claude-opus-5-5")]
     model: String,
     /// A comma list of more models a mind may be made with, beside
-    /// `--model`, through the same API and credential.
+    /// `--model`, each named as `--model` is. A mind made from another's
+    /// history may ask a model behind another API.
     #[arg(long, value_delimiter = ',', value_parser = model_name)]
     models: Vec<String>,
-    /// The most tokens one reply may hold, at least 16. A reply cut off
-    /// while it asks for a tool is asked for again, with that tool not run;
-    /// one cut off in its text ends the turn. A model's reasoning counts in
-    /// it. `none` sends no cap, for a server that refuses one: Chat
-    /// Completions and the Responses API only.
-    #[arg(long, default_value = "16000", value_parser = cap)]
-    max_tokens: Cap,
-    /// How hard the model works, in its API's words: for Claude low,
-    /// medium, high, xhigh or max.
+    /// The most tokens one reply through the Messages API may hold, at
+    /// least 16: that API needs a cap, and the others are sent none. A reply
+    /// cut off while it asks for a tool is asked for again, with that tool
+    /// not run; one cut off in its text ends the turn. A model's reasoning
+    /// counts in it.
+    #[arg(long, default_value_t = 16_000, value_parser = clap::value_parser!(u32).range(16..))]
+    max_tokens: u32,
+    /// How hard `--model`, and the models behind its API, work unless a
+    /// mind says, in that API's words: for Claude low, medium, high, xhigh
+    /// or max.
     #[arg(long)]
     effort: Option<String>,
     /// A file holding the system prompt a mind gives its model, unless it
@@ -85,22 +89,6 @@ fn forks(said: &str) -> Result<Forks, String> {
     said.parse()
         .map(|limit| Forks(Some(limit)))
         .map_err(|_| format!("{said} is neither a number nor unlimited"))
-}
-
-/// A cap on a reply's tokens, or none.
-#[derive(Clone, Copy, Debug)]
-struct Cap(Option<u32>);
-
-/// `none`, or a number of at least 16, the least the APIs take.
-fn cap(said: &str) -> Result<Cap, String> {
-    if said == "none" {
-        return Ok(Cap(None));
-    }
-    said.parse()
-        .ok()
-        .filter(|tokens| *tokens >= 16)
-        .map(|tokens| Cap(Some(tokens)))
-        .ok_or_else(|| format!("{said} is neither a number of at least 16 nor none"))
 }
 
 /// A model's name, which is not empty.
@@ -151,26 +139,7 @@ pub async fn open(hosting: Hosting) -> Result<(Host, TcpListener), String> {
         None => None,
     };
     let store = store(hosting.store.as_deref()).await?;
-    let mut model =
-        mensor_model::Config::from_vars(&hosting.model, |name| std::env::var(name).ok())
-            .map_err(|error| error.to_string())?;
-    if let Some(effort) = &hosting.effort {
-        let efforts = model.api.efforts();
-        if effort.is_empty() || efforts.is_some_and(|known| !known.contains(&effort.as_str())) {
-            let known = efforts.map_or_else(|| "any not empty".into(), |known| known.join(", "));
-            return Err(format!(
-                "--effort {effort} is not one the model's API takes: {known}"
-            ));
-        }
-    }
-    if hosting.max_tokens.0.is_none() && model.api == mensor_model::Api::Messages {
-        return Err("--max-tokens none is not one the Messages API takes: it needs a cap".into());
-    }
-    model.effort = hosting.effort;
-    model.fallbacks = !hosting.no_fallbacks;
-    model.max_tokens = hosting.max_tokens.0;
-    let model = Provider::new(model).map_err(|error| error.to_string())?;
-
+    let (model, models) = models(&hosting, |name| std::env::var(name).ok())?;
     let config = Config {
         token,
         mind: Settings {
@@ -184,10 +153,10 @@ pub async fn open(hosting: Hosting) -> Result<(Host, TcpListener), String> {
             tools: hosting.mind_tools.0,
             ..Settings::default()
         },
-        models: hosting.models,
+        models,
         ..Config::default()
     };
-    let host = Host::open(store, Arc::new(model), config)
+    let host = Host::open(store, model, config)
         .await
         .map_err(|error| error.to_string())?;
     let listener = TcpListener::bind(hosting.listen)
@@ -202,6 +171,55 @@ pub async fn open(hosting: Hosting) -> Result<(Host, TcpListener), String> {
         }
     });
     Ok((host, listener))
+}
+
+/// The models a host offers beside its own, by name.
+type Offered = BTreeMap<String, Arc<dyn Model>>;
+
+/// The host's own model, and every other it offers, each asked with the
+/// variables `var` gives. Models behind one API share a client.
+fn models(
+    hosting: &Hosting,
+    var: impl Fn(&str) -> Option<String>,
+) -> Result<(Arc<dyn Model>, Offered), String> {
+    let own =
+        mensor_model::Config::from_vars(&hosting.model, &var).map_err(|error| error.to_string())?;
+    if let Some(effort) = &hosting.effort {
+        let efforts = own.api.efforts();
+        if effort.is_empty() || efforts.is_some_and(|known| !known.contains(&effort.as_str())) {
+            let known = efforts.map_or_else(|| "any not empty".into(), |known| known.join(", "));
+            return Err(format!(
+                "--effort {effort} is not one the model's API takes: {known}"
+            ));
+        }
+    }
+    let mut clients: Vec<(mensor_model::Api, Arc<dyn Model>)> = Vec::new();
+    let mut client = |mut config: mensor_model::Config, effort: Option<String>| {
+        if let Some((_, model)) = clients.iter().find(|(api, _)| *api == config.api) {
+            return Ok(Arc::clone(model));
+        }
+        config.effort = effort;
+        config.fallbacks = !hosting.no_fallbacks;
+        config.max_tokens = hosting.max_tokens;
+        let api = config.api;
+        let model: Arc<dyn Model> =
+            Arc::new(Provider::new(config).map_err(|error| error.to_string())?);
+        clients.push((api, Arc::clone(&model)));
+        Ok::<_, String>(model)
+    };
+    let own_name = own.model.clone();
+    let model = client(own, hosting.effort.clone())?;
+    let mut models = BTreeMap::new();
+    for named in &hosting.models {
+        let config =
+            mensor_model::Config::from_vars(named, &var).map_err(|error| error.to_string())?;
+        let name = config.model.clone();
+        if name == own_name || models.contains_key(&name) {
+            return Err(format!("{name} is offered twice"));
+        }
+        models.insert(name, client(config, None)?);
+    }
+    Ok((model, models))
 }
 
 /// Where every history is kept: the `SQLite` file `path`, the Postgres
@@ -306,14 +324,7 @@ mod tests {
         assert_eq!(forks("64").unwrap().0, Some(64));
         assert_eq!(forks("unlimited").unwrap().0, None);
         assert!(forks("lots").is_err());
-        assert_eq!(
-            parsed(&["--max-tokens", "16"]).unwrap().max_tokens.0,
-            Some(16)
-        );
-        assert_eq!(
-            parsed(&["--max-tokens", "none"]).unwrap().max_tokens.0,
-            None
-        );
+        assert_eq!(parsed(&["--max-tokens", "16"]).unwrap().max_tokens, 16);
         assert!(parsed(&["--max-tokens", "15"]).is_err());
         let offered = parsed(&["--models", "claude-haiku-5-5, claude-sonnet-5-5"]).unwrap();
         assert_eq!(offered.models, ["claude-haiku-5-5", "claude-sonnet-5-5"]);
@@ -331,5 +342,40 @@ mod tests {
                 .is_empty()
         );
         assert!(tools("fork,bash").unwrap_err().contains("bash"));
+    }
+
+    #[test]
+    fn each_model_is_asked_through_the_api_its_name_says() {
+        let keys = |name: &str| match name {
+            "ANTHROPIC_API_KEY" => Some("sk-claude".to_owned()),
+            "OPENAI_API_KEY" => Some("sk-openai".to_owned()),
+            _ => None,
+        };
+        let hosting = parsed(&[
+            "--model",
+            "claude-opus-5-5",
+            "--models",
+            "claude-haiku-5-5,responses:gpt-6.2,chat:gpt-6.1",
+        ])
+        .unwrap();
+        let (own, offered) = models(&hosting, keys).unwrap();
+        let names: Vec<&str> = offered.keys().map(String::as_str).collect();
+        assert_eq!(names, ["claude-haiku-5-5", "gpt-6.1", "gpt-6.2"]);
+        // Models behind one API share its client; the others take any effort.
+        assert!(Arc::ptr_eq(&offered["claude-haiku-5-5"], &own));
+        assert!(!Arc::ptr_eq(&offered["gpt-6.1"], &offered["gpt-6.2"]));
+        assert!(own.efforts().is_some());
+        assert_eq!(offered["gpt-6.2"].efforts(), None);
+
+        let twice = parsed(&["--models", "claude-haiku-5-5,messages:claude-haiku-5-5"]);
+        let error = models(&twice.unwrap(), keys).unwrap_err();
+        assert!(
+            error.contains("claude-haiku-5-5 is offered twice"),
+            "{error}"
+        );
+        let claude_only = |name: &str| keys(name).filter(|_| name.starts_with("ANTHROPIC"));
+        let gpt = parsed(&["--models", "responses:gpt-6.2"]).unwrap();
+        let error = models(&gpt, claude_only).unwrap_err();
+        assert!(error.contains("OPENAI_API_KEY"), "{error}");
     }
 }

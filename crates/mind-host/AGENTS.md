@@ -29,8 +29,12 @@ client.
   that what it holds, the store among it, is let go.
 - A mind wakes with its record's settings over the host's (`settings` in
   `src/task.rs`), and a fork's child is made with its parent's.
+- A mind asks the `Model` its own model names in `Config::models`, or the
+  host's own (`Inner::asking`), so models behind several APIs share one
+  host.
 - `Host::make` refuses a model the host does not offer (its `Model`'s own,
-  or one of `Config::models`) and an effort its `Model` does not take. It
+  or one of `Config::models`) and an effort that model's `Model` does not
+  take, checked on the settings a mind made from another ends up with. It
   decides a mind made from another's history with `Mind::branch`, over the
   store's `tail_at` and the other's last call, under the lock on the host's
   minds, so that nothing else makes or joins it meanwhile.

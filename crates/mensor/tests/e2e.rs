@@ -20,7 +20,7 @@ use mensor_mind::{
     Settings, State, Stop, Store, StoreError, Usage,
 };
 use mensor_mind_host::{
-    Config, Host, HostError, MindStatus, Prompted, Scripted, Token, mind_token,
+    Config, Host, HostError, MindStatus, Model, Prompted, Scripted, Token, mind_token,
 };
 use mensor_protocol::{Hello, NOT_LOCAL, Name, Refusal};
 use mensor_store_sqlite::SqliteStore;
@@ -49,8 +49,17 @@ impl Server {
     /// listener, so the port stays bound between them and no other test
     /// can be given it.
     async fn over(store: Arc<dyn Store>, config: Config, listener: std::net::TcpListener) -> Self {
+        Self::asking(Arc::new(Scripted::new()), store, config, listener).await
+    }
+
+    /// A host whose own model is `model`.
+    async fn asking(
+        model: Arc<Scripted>,
+        store: Arc<dyn Store>,
+        config: Config,
+        listener: std::net::TcpListener,
+    ) -> Self {
         let held = Arc::downgrade(&store);
-        let model = Arc::new(Scripted::new());
         let host = Host::open(store, model.clone(), config).await.unwrap();
         listener.set_nonblocking(true).unwrap();
         let listener = TcpListener::from_std(listener).unwrap();
@@ -2211,12 +2220,17 @@ async fn a_parent_that_rests_while_it_waits_hears_from_its_child() {
     );
 }
 
-/// A host that offers two models.
-fn offering() -> Config {
-    Config {
-        models: vec!["claude-opus-5-5".into(), "claude-haiku-5-5".into()],
+/// A host that offers two models beside its own, all asked through its one
+/// scripted model.
+async fn offering() -> Server {
+    let model = Arc::new(Scripted::new());
+    let offered = ["claude-opus-5-5", "claude-haiku-5-5"]
+        .map(|name| (name.to_owned(), model.clone() as Arc<dyn Model>));
+    let config = Config {
+        models: offered.into(),
         ..Config::default()
-    }
+    };
+    Server::asking(model, Arc::new(MemoryStore::new()), config, loopback()).await
 }
 
 /// Asks the host to make `mind` with `body`: the answer's status, and what
@@ -2239,7 +2253,7 @@ async fn end(server: &Server, mind: &str) -> (u16, Value) {
 
 #[tokio::test]
 async fn a_mind_made_with_settings_of_its_own_asks_with_them_and_is_made_once() {
-    let server = Server::start(offering()).await;
+    let server = offering().await;
     server.model.then(vec![text("Hello.")]);
     let body = json!({"model": "claude-haiku-5-5", "effort": "low", "system": "Play."});
     let (status, made) = make(&server, "p1", body.clone()).await;
@@ -2301,8 +2315,8 @@ async fn a_mind_that_ends_lets_its_hands_go_and_takes_nothing_more() {
 /// A host over `store` whose mind `k`, made to keep playing, saved then
 /// played on its hand `vm` in `dir`, then ended: and the index just after
 /// the save.
-async fn played_and_ended(store: Arc<dyn Store>, dir: &Path) -> (Server, usize) {
-    let server = Server::over(store, Config::default(), loopback()).await;
+async fn played_and_ended(store: Arc<dyn Store>, dir: &Path, config: Config) -> (Server, usize) {
+    let server = Server::over(store, config, loopback()).await;
     server
         .model
         .then(vec![
@@ -2312,9 +2326,13 @@ async fn played_and_ended(store: Arc<dyn Store>, dir: &Path) -> (Server, usize) 
         .then(vec![text("Played.")])
         .then(vec![text("Played again.")]);
     assert_eq!(
-        make(&server, "k", json!({"system": "Keep playing."}))
-            .await
-            .0,
+        make(
+            &server,
+            "k",
+            json!({"effort": "low", "system": "Keep playing."})
+        )
+        .await
+        .0,
         201
     );
     let (_handle, task) = server.hand(fresh("k", "vm"), dir);
@@ -2343,7 +2361,7 @@ async fn played_and_ended(store: Arc<dyn Store>, dir: &Path) -> (Server, usize) 
 /// from there on its hand, restored from then.
 async fn made_from_an_ended_mind(store: Arc<dyn Store>) {
     let first = tempfile::tempdir().unwrap();
-    let (server, at) = played_and_ended(store, first.path()).await;
+    let (server, at) = played_and_ended(store, first.path(), Config::default()).await;
     let keeper = server.history("k");
     let ended_at = keeper.iter().position(|item| *item == Item::Ended).unwrap();
     let from =
@@ -2395,6 +2413,57 @@ async fn a_mind_made_from_an_ended_minds_history_carries_on_with_its_hand() {
 #[ignore = "needs Postgres: make test-postgres"]
 async fn a_mind_made_over_postgres_from_an_ended_minds_history_carries_on_with_its_hand() {
     made_from_an_ended_mind(postgres("e2e_from")).await;
+}
+
+#[tokio::test]
+async fn a_mind_made_from_another_may_ask_another_model() {
+    // Another model, as one behind another API is: it asks for itself.
+    let other = Arc::new(Scripted::new());
+    let config = Config {
+        models: [("other".to_owned(), other.clone() as Arc<dyn Model>)].into(),
+        ..Config::default()
+    };
+    let first = tempfile::tempdir().unwrap();
+    let store = Arc::new(MemoryStore::new());
+    let (server, at) = played_and_ended(store, first.path(), config).await;
+    let asked_before = server.model.requests().len();
+    other.then(vec![text("Played on.")]);
+
+    let from = json!({"model": "other", "from": {"mind": "k", "at": at, "hand": "vm"}});
+    let (status, made) = make(&server, "r", from).await;
+    assert_eq!(status, 201);
+    // Its effort went with the keeper's model; its system prompt is kept.
+    assert_eq!(
+        (&made["model"], made.get("effort"), &made["system"]),
+        (&json!("other"), None, &json!("Keep playing."))
+    );
+    let restored = tempfile::tempdir().unwrap();
+    std::fs::write(restored.path().join("game.txt"), "saved\n").unwrap();
+    let (_handle, _task) = server.hand(fresh("r", "vm"), restored.path());
+    eventually("r has played on", || async {
+        said(&server.history("r")) == ["Played on."]
+    })
+    .await;
+    assert_eq!(server.model.requests().len(), asked_before);
+    let asked = other.requests();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(
+        (asked[0].model.as_deref(), asked[0].effort.as_deref()),
+        (Some("other"), None)
+    );
+    // The keeper's step goes to the other model as its tool use.
+    let replayed = asked[0]
+        .messages
+        .iter()
+        .flat_map(|message| &message.content);
+    let calls: Vec<&str> = replayed
+        .filter_map(|content| match content {
+            Content::ToolUse { id, .. } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(calls, ["tu_1", "tu_2"]);
+    server.stop().await;
 }
 
 #[tokio::test]
@@ -2491,7 +2560,7 @@ async fn the_list_of_minds_leaves_out_each_ones_system_prompt() {
 
 #[tokio::test]
 async fn a_fork_child_is_made_with_its_parents_settings() {
-    let server = Server::start(offering()).await;
+    let server = offering().await;
     for _ in 0..6 {
         server.model.then_with(forking);
     }

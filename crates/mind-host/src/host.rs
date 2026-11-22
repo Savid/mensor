@@ -31,8 +31,9 @@ pub struct Config {
     /// these.
     pub mind: Settings,
     /// The models a mind may be made with beside the host's own, which it
-    /// may always be. One made with none asks the host's.
-    pub models: Vec<String>,
+    /// may always be, by name, each with the [`Model`] that asks it. One
+    /// made with none asks the host's.
+    pub models: BTreeMap<String, Arc<dyn Model>>,
     /// How long a new connection has to say hello.
     pub hello_timeout: Duration,
     /// How long a connection may stay silent before it is dropped. A hand
@@ -49,7 +50,7 @@ impl Default for Config {
         Self {
             token: None,
             mind: Settings::default(),
-            models: Vec::new(),
+            models: BTreeMap::new(),
             hello_timeout: Duration::from_secs(10),
             idle_timeout: Duration::from_mins(1),
             rest_after: Duration::from_mins(1),
@@ -84,6 +85,16 @@ pub(crate) struct Inner {
     /// Whether the host has stopped: every mind's task and hand's
     /// connection ends once it has.
     pub(crate) stopped: watch::Sender<bool>,
+}
+
+impl Inner {
+    /// What asks `model`: the host's own model for its own name, for none,
+    /// and for one it no longer offers.
+    pub(crate) fn asking(&self, model: Option<&str>) -> &Arc<dyn Model> {
+        model
+            .and_then(|model| self.config.models.get(model))
+            .unwrap_or(&self.model)
+    }
 }
 
 /// A mind's `wait`, as its host keeps it.
@@ -662,7 +673,6 @@ impl Host {
         if !name.is_root() {
             return Err(HostError::NotRoot(name.clone()));
         }
-        self.offers(&settings)?;
         let mut minds = self.inner.minds.lock().await;
         let record = match &from {
             None => MindRecord {
@@ -673,10 +683,22 @@ impl Host {
             Some(from) => {
                 let keeper = minds.get(&from.mind);
                 let keeper = keeper.ok_or_else(|| HostError::Missing(from.mind.clone()))?;
+                // An effort is in its model's words, so it goes with the
+                // model: one that names another model takes none from the
+                // keeper.
+                let mut kept = keeper.record.settings.clone();
+                let keepers = kept.model.as_deref().unwrap_or(self.inner.model.name());
+                if settings
+                    .model
+                    .as_deref()
+                    .is_some_and(|model| model != keepers)
+                {
+                    kept.effort = None;
+                }
                 MindRecord {
                     name: name.clone(),
                     origin: Origin::From { from: from.clone() },
-                    settings: settings.or(&keeper.record.settings),
+                    settings: settings.or(&kept),
                 }
             }
         };
@@ -687,6 +709,7 @@ impl Host {
                 Err(HostError::Exists(name.clone()))
             };
         }
+        self.offers(&record.settings)?;
         let items = match from {
             None => Vec::new(),
             Some(from) => {
@@ -725,19 +748,21 @@ impl Host {
     }
 
     /// Refuses settings the host cannot ask with: a model it does not
-    /// offer, or an effort its model's API does not take.
+    /// offer, or an effort the API of the model asked does not take.
     fn offers(&self, settings: &MindSettings) -> Result<(), HostError> {
-        let model = &self.inner.model;
-        if let Some(asked) = &settings.model {
-            let mut offered = vec![model.name().to_owned()];
-            offered.extend(self.inner.config.models.iter().cloned());
-            if !offered.contains(asked) {
-                return Err(HostError::Model {
-                    asked: asked.clone(),
-                    offered,
-                });
-            }
+        let (own, models) = (&self.inner.model, &self.inner.config.models);
+        if let Some(asked) = settings.model.as_deref()
+            && asked != own.name()
+            && !models.contains_key(asked)
+        {
+            return Err(HostError::Model {
+                asked: asked.to_owned(),
+                offered: std::iter::once(own.name().to_owned())
+                    .chain(models.keys().cloned())
+                    .collect(),
+            });
         }
+        let model = self.inner.asking(settings.model.as_deref());
         if let Some(effort) = &settings.effort {
             let taken = model.efforts();
             let known = taken.is_none_or(|taken| taken.contains(&effort.as_str()));
@@ -850,6 +875,7 @@ mod tests {
     }
 
     /// A model behind Claude's Messages API, which is never asked here.
+    #[derive(Debug)]
     struct Claude;
 
     impl Model for Claude {
@@ -866,44 +892,134 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn a_mind_is_made_only_with_a_model_and_effort_its_host_offers() {
-        let store = Arc::new(mensor_mind::MemoryStore::new());
+    fn name(name: &str) -> Name {
+        Name::new(name).unwrap()
+    }
+
+    fn with(model: Option<&str>, effort: Option<&str>) -> MindSettings {
+        MindSettings {
+            model: model.map(Into::into),
+            effort: effort.map(Into::into),
+            system: None,
+        }
+    }
+
+    /// A host on Claude that offers Haiku, and GPT behind an API that takes
+    /// any effort, over `store`.
+    async fn offering(store: Arc<mensor_mind::MemoryStore>) -> Host {
         let config = Config {
-            models: vec!["claude-haiku-5-5".into()],
+            models: BTreeMap::from([
+                (
+                    "claude-haiku-5-5".to_owned(),
+                    Arc::new(Claude) as Arc<dyn Model>,
+                ),
+                ("gpt-6.2-sol".to_owned(), Arc::new(crate::Scripted::new())),
+            ]),
             ..Config::default()
         };
-        let host = Host::open(store, Arc::new(Claude), config).await.unwrap();
-        let name = |name: &str| Name::new(name).unwrap();
-        let with = |model: &str, effort: &str| MindSettings {
-            model: Some(model.into()),
-            effort: Some(effort.into()),
-            system: None,
-        };
-        // Its own model, which it need not list, and one it lists.
-        let made = host
-            .make(&name("a"), with("claude-opus-5-5", "xhigh"), None)
-            .await;
-        assert!(made.is_ok(), "{made:?}");
-        let made = host
-            .make(&name("b"), with("claude-haiku-5-5", "low"), None)
-            .await;
-        assert!(made.is_ok(), "{made:?}");
-        let refused = host.make(&name("c"), with("gpt-9", "low"), None).await;
+        Host::open(store, Arc::new(Claude), config).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_mind_is_made_only_with_a_model_and_effort_its_host_offers() {
+        let host = offering(Arc::default()).await;
+        // Its own model, which it need not list, and ones it lists, each
+        // with an effort its API takes.
+        for (mind, model, effort) in [
+            ("a", "claude-opus-5-5", "xhigh"),
+            ("b", "claude-haiku-5-5", "low"),
+            ("g", "gpt-6.2-sol", "minimal"),
+        ] {
+            let made = host
+                .make(&name(mind), with(Some(model), Some(effort)), None)
+                .await;
+            assert!(made.is_ok(), "{made:?}");
+        }
+        let refused = host.make(&name("c"), with(Some("gpt-9"), None), None).await;
         assert!(
             matches!(refused, Err(HostError::Model { .. })),
             "{refused:?}"
         );
-        for effort in ["turbo", ""] {
-            let refused = host
-                .make(&name("d"), with("claude-opus-5-5", effort), None)
-                .await;
+        for effort in ["minimal", "turbo", ""] {
+            let asked = with(Some("claude-haiku-5-5"), Some(effort));
+            let refused = host.make(&name("d"), asked, None).await;
             assert!(
                 matches!(refused, Err(HostError::Effort { .. })),
                 "{refused:?}"
             );
         }
         assert!(host.mind(&name("d")).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_mind_made_from_another_is_checked_on_the_settings_it_ends_up_with() {
+        // Two minds a hand has joined: one on GPT, and one on a model the
+        // host no longer offers.
+        let store = Arc::new(mensor_mind::MemoryStore::new());
+        for (mind, model, effort) in [
+            ("gpt", "gpt-6.2-sol", Some("minimal")),
+            ("old", "gone", None),
+        ] {
+            let record = MindRecord {
+                name: name(mind),
+                origin: Origin::Root,
+                settings: with(Some(model), effort),
+            };
+            let joined = Item::Attached {
+                hand: name("vm"),
+                boot: "b".into(),
+                capabilities: Vec::new(),
+            };
+            store.create(&record, &[joined]).unwrap();
+        }
+        let host = offering(store).await;
+        let from = |mind: &str| {
+            Some(MadeFrom {
+                mind: name(mind),
+                at: 1,
+                hand: name("vm"),
+            })
+        };
+        let settings = async |mind: &str| host.mind(&name(mind)).await.unwrap().mind.settings;
+
+        // GPT's effort is checked as GPT's, on GPT.
+        let made = host
+            .make(&name("r1"), with(None, Some("minimal")), from("gpt"))
+            .await;
+        assert!(matches!(made, Ok(Made::Made)), "{made:?}");
+        let again = host
+            .make(&name("r1"), with(None, Some("minimal")), from("gpt"))
+            .await;
+        assert!(matches!(again, Ok(Made::Existing)), "{again:?}");
+        // An effort goes with its model.
+        let same = host
+            .make(&name("r2"), with(Some("gpt-6.2-sol"), None), from("gpt"))
+            .await;
+        assert!(matches!(same, Ok(Made::Made)), "{same:?}");
+        assert_eq!(
+            settings("r2").await,
+            with(Some("gpt-6.2-sol"), Some("minimal"))
+        );
+        let switched = host
+            .make(
+                &name("r3"),
+                with(Some("claude-haiku-5-5"), None),
+                from("gpt"),
+            )
+            .await;
+        assert!(matches!(switched, Ok(Made::Made)), "{switched:?}");
+        assert_eq!(settings("r3").await, with(Some("claude-haiku-5-5"), None));
+        // A model no longer offered is not made into another mind, but a
+        // mind made before is made, the same way.
+        let refused = host.make(&name("r4"), with(None, None), from("old")).await;
+        assert!(
+            matches!(refused, Err(HostError::Model { .. })),
+            "{refused:?}"
+        );
+        let again = host
+            .make(&name("old"), with(Some("gone"), None), None)
+            .await;
+        assert!(matches!(again, Ok(Made::Existing)), "{again:?}");
     }
 
     #[test]

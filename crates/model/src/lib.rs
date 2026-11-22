@@ -73,6 +73,17 @@ pub enum Api {
 pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 impl Api {
+    /// The API a model's name starts with, if any, and the name after it:
+    /// `responses:gpt-6.2` is `gpt-6.2` through the Responses API.
+    pub fn named(named: &str) -> (Option<Self>, &str) {
+        match named.split_once(':') {
+            Some(("messages", model)) => (Some(Self::Messages), model.trim()),
+            Some(("chat", model)) => (Some(Self::Chat), model.trim()),
+            Some(("responses", model)) => (Some(Self::Responses), model.trim()),
+            _ => (None, named),
+        }
+    }
+
     /// The efforts it takes: Claude's for the Messages API. Other servers
     /// and models differ in theirs, so any that is not empty is sent, and
     /// one a server does not take fails its request.
@@ -116,13 +127,10 @@ pub struct Config {
     /// The model's id, such as `claude-opus-5-5`, unless a request names
     /// its own.
     pub model: String,
-    /// The most tokens one reply may hold: the Messages API's
-    /// `max_tokens`, Chat Completions' `max_completion_tokens`, which
-    /// `OpenAI` and `OpenRouter` both honour, and the Responses API's
-    /// `max_output_tokens`. A reply that reaches it is cut off, and the
-    /// mind asks again. `None` sends no cap, for a server that refuses
-    /// one; the Messages API needs it.
-    pub max_tokens: Option<u32>,
+    /// The most tokens one reply through the Messages API may hold,
+    /// reasoning included: that API needs a cap. A reply that reaches it is
+    /// cut off, and the mind asks again. The other APIs are sent none.
+    pub max_tokens: u32,
     /// How hard the model works, in the API's own words: for Claude `low`,
     /// `medium`, `high`, `xhigh` or `max`, unless a request says. `None`
     /// leaves the model's own default.
@@ -145,7 +153,7 @@ impl Config {
             base_url: "https://api.anthropic.com".into(),
             credential,
             model: model.into(),
-            max_tokens: Some(16_000),
+            max_tokens: 16_000,
             effort: None,
             fallbacks: true,
             max_retries: 4,
@@ -170,52 +178,51 @@ impl Config {
         }
     }
 
-    /// The defaults for `model`, with the API, credential and address that
-    /// `var` gives. A host passes its own source of variables: its
-    /// environment, or the bindings a platform gives it.
+    /// The defaults for the model `named`, with the API, credential and
+    /// address that `var` gives. A host passes its own source of variables:
+    /// its environment, or the bindings a platform gives it.
     ///
-    /// `ANTHROPIC_API_KEY` or else `ANTHROPIC_AUTH_TOKEN` is the Messages
-    /// API, at `ANTHROPIC_BASE_URL` when that is set. `OPENAI_API_KEY` is
-    /// Chat Completions, or the Responses API if `MENSOR_API` is
-    /// `responses`, at `OPENAI_BASE_URL` when that is set. With both, it is
-    /// the Messages API unless `MENSOR_API` is `chat` or `responses`.
+    /// A name may start with the API it is asked through, `messages:`,
+    /// `chat:` or `responses:`, as `responses:gpt-6.2`. Without one it is
+    /// the Messages API if a Claude credential is set, else Chat
+    /// Completions. `ANTHROPIC_API_KEY` or else `ANTHROPIC_AUTH_TOKEN`
+    /// reaches the Messages API, at `ANTHROPIC_BASE_URL` when that is set,
+    /// and `OPENAI_API_KEY` the others, at `OPENAI_BASE_URL`.
     pub fn from_vars(
-        model: impl Into<String>,
+        named: &str,
         var: impl Fn(&str) -> Option<String>,
     ) -> Result<Self, ModelError> {
         let set = |name: &str| var(name).filter(|value| !value.is_empty());
-        let asked = match set("MENSOR_API").as_deref() {
-            None => None,
-            Some("messages") => Some(Api::Messages),
-            Some("chat") => Some(Api::Chat),
-            Some("responses") => Some(Api::Responses),
-            Some(other) => {
-                return Err(ModelError(format!(
-                    "MENSOR_API is messages, chat or responses, not {other}"
-                )));
-            }
-        };
         let claude = match (set("ANTHROPIC_API_KEY"), set("ANTHROPIC_AUTH_TOKEN")) {
             (Some(key), _) => Some(Credential::ApiKey(key)),
             (None, Some(token)) => Some(Credential::Token(token)),
             (None, None) => None,
         };
-        let (mut config, address) = match (asked, claude, set("OPENAI_API_KEY")) {
-            (None | Some(Api::Messages), Some(credential), _) => {
-                (Self::messages(credential, model), "ANTHROPIC_BASE_URL")
+        let (api, model) = match Api::named(named) {
+            (Some(api), model) => (api, model),
+            (None, model) if claude.is_some() => (Api::Messages, model),
+            (None, model) => (Api::Chat, model),
+        };
+        if model.is_empty() {
+            return Err(ModelError(format!("{named} names no model")));
+        }
+        let missing = |needs: &str| ModelError(format!("set {needs} to reach {model}"));
+        let mut config = match api {
+            Api::Messages => Self::messages(
+                claude.ok_or_else(|| missing("ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN"))?,
+                model,
+            ),
+            Api::Chat | Api::Responses => {
+                let key = set("OPENAI_API_KEY").ok_or_else(|| missing("OPENAI_API_KEY"))?;
+                Self {
+                    api,
+                    ..Self::chat(key, model)
+                }
             }
-            (None | Some(Api::Chat), _, Some(key)) => (Self::chat(key, model), "OPENAI_BASE_URL"),
-            (Some(Api::Responses), _, Some(key)) => {
-                (Self::responses(key, model), "OPENAI_BASE_URL")
-            }
-            _ => {
-                return Err(ModelError(
-                    "set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN to reach a model through the \
-                     Messages API, or OPENAI_API_KEY to reach one through Chat Completions or \
-                     the Responses API"
-                        .into(),
-                ));
-            }
+        };
+        let address = match api {
+            Api::Messages => "ANTHROPIC_BASE_URL",
+            Api::Chat | Api::Responses => "OPENAI_BASE_URL",
         };
         if let Some(base_url) = set(address) {
             config.base_url = base_url;
@@ -679,26 +686,37 @@ mod tests {
         let chat = Config::from_vars("gpt", vars(&[("OPENAI_API_KEY", "sk-openai")])).unwrap();
         assert_eq!(url(&chat), "https://api.openai.com/v1/chat/completions");
 
+        // A name that says its API is asked through it, whatever else is set.
         let both = [
             ("ANTHROPIC_API_KEY", "sk-claude"),
             ("OPENAI_API_KEY", "sk-openai"),
             ("OPENAI_BASE_URL", "http://127.0.0.1:9/v1"),
-            ("MENSOR_API", "chat"),
         ];
-        let chosen = Config::from_vars("gpt", vars(&both)).unwrap();
+        let chosen = Config::from_vars("chat:gpt", vars(&both)).unwrap();
         assert_eq!(url(&chosen), "http://127.0.0.1:9/v1/chat/completions");
-
-        let responses = [("OPENAI_API_KEY", "sk-openai"), ("MENSOR_API", "responses")];
-        let chosen = Config::from_vars("gpt", vars(&responses)).unwrap();
-        assert_eq!(url(&chosen), "https://api.openai.com/v1/responses");
+        let chosen = Config::from_vars("responses: openai/gpt-6.2", vars(&both)).unwrap();
+        assert_eq!(
+            (url(&chosen), chosen.model.as_str()),
+            ("http://127.0.0.1:9/v1/responses".into(), "openai/gpt-6.2")
+        );
+        let chosen = Config::from_vars("messages:claude-opus-5-5", vars(&both)).unwrap();
+        assert_eq!(chosen.api, Api::Messages);
+        // A colon in a model's own name is no API.
+        let free = Config::from_vars("vendor/model:free", vars(&both)).unwrap();
+        assert_eq!(
+            (free.api, free.model.as_str()),
+            (Api::Messages, "vendor/model:free")
+        );
 
         assert!(Config::from_vars("claude-opus-5-5", |_| None).is_err());
-        let unknown = [("ANTHROPIC_API_KEY", "sk-claude"), ("MENSOR_API", "soap")];
-        assert!(Config::from_vars("claude-opus-5-5", vars(&unknown)).is_err());
-        for api in ["chat", "responses"] {
-            let missing = [("ANTHROPIC_API_KEY", "sk-claude"), ("MENSOR_API", api)];
-            assert!(Config::from_vars("gpt", vars(&missing)).is_err());
+        assert!(Config::from_vars("responses:", vars(&both)).is_err());
+        let claude_only = [("ANTHROPIC_API_KEY", "sk-claude")];
+        for named in ["chat:gpt", "responses:gpt"] {
+            let error = Config::from_vars(named, vars(&claude_only)).unwrap_err();
+            assert!(error.0.contains("OPENAI_API_KEY"), "{error}");
         }
+        let openai_only = [("OPENAI_API_KEY", "sk-openai")];
+        assert!(Config::from_vars("messages:claude-opus-5-5", vars(&openai_only)).is_err());
     }
 
     #[test]

@@ -114,10 +114,10 @@ released every hand: release a dead one with `POST /v1/minds/{m}/release`.
 | --- | --- | --- |
 | `--listen` | `127.0.0.1:7878` | Anything else needs `MENSOR_TOKEN`. Plain HTTP: put TLS in front off loopback. |
 | `--store` | memory | A SQLite file. `MENSOR_POSTGRES` names a Postgres database instead: [docs/postgres.md](docs/postgres.md). |
-| `--model` | `claude-opus-5-5` | The model. `--models a,b` adds others a mind may be made with. |
-| `--effort` | the API's | `low`, `medium`, `high`, `xhigh` or `max` for Claude. |
+| `--model` | `claude-opus-5-5` | The model. A `messages:`, `chat:` or `responses:` prefix names its API; without one, Messages if a Claude key is set, else Chat. `--models a,responses:b` adds others a mind may be made with, on any API. |
+| `--effort` | the model's | For `--model` and the models behind its API: `low`, `medium`, `high`, `xhigh` or `max` for Claude. |
 | `--system-file` | none | The system prompt. |
-| `--max-tokens` | `16000` | Caps one reply, reasoning included. `none` for a Chat or Responses server that refuses a cap. |
+| `--max-tokens` | `16000` | Caps one Messages reply, reasoning included: that API needs a cap. Chat and Responses are sent none, so a server's own limit applies. |
 | `--compact-at` | `150000` | Tokens before the mind summarises the conversation and carries on. `0` never does. |
 | `--no-fallbacks` | off | Turns off the API's fallback model for a request Claude declines. |
 | `--mind-tools` | all five | A comma list of the mind's own tools to offer. `''` offers none. |
@@ -137,8 +137,7 @@ released every hand: release a dead one with `POST /v1/minds/{m}/release`.
 | `MENSOR_TOKEN` | none | The host's bearer token, or a hand's. |
 | `MENSOR_POSTGRES` | none | A Postgres URL, in place of `--store`. |
 | `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` | none | Claude's Messages API. The auth token goes as a plain bearer, for a gateway. `ANTHROPIC_BASE_URL` moves it. |
-| `OPENAI_API_KEY` | none | Chat Completions (OpenAI, OpenRouter, most others). `OPENAI_BASE_URL` moves it. Name a `--model` other than Claude's. |
-| `MENSOR_API` | by the keys | `messages`, `chat`, or `responses` for OpenAI's Responses API. Unset, Messages if a Claude key is set, else Chat. |
+| `OPENAI_API_KEY` | none | Chat Completions (OpenAI, OpenRouter, most others) and OpenAI's Responses API. `OPENAI_BASE_URL` moves it. |
 | `MENSOR_LOG` | `info` | The log level, on standard error. |
 
 The Messages API needs Claude 4.6 or later. The model sees at most 96 KiB
@@ -174,12 +173,13 @@ settings. `PUT` first to give it its own, fixed from then on:
 
 | Field | |
 | --- | --- |
-| `model` | `--model` or one of `--models`. |
+| `model` | `--model` or one of `--models`, without its API prefix. |
 | `effort` | For the Messages API `low` to `max`; for the others any the server takes. |
 | `system` | The system prompt. |
-| `from` | `{"mind", "at", "hand"}`: start from `mind`'s first `at` items, keeping its hand `hand`, such as a VM restored from a snapshot taken then. The other hands stay behind. |
+| `from` | `{"mind", "at", "hand"}`: start from `mind`'s first `at` items, keeping its hand `hand`, such as a VM restored from a snapshot taken then. The other hands stay behind. Its model may be behind another API than that mind's. |
 
-A setting left out is the host's, or with `from`, that mind's. It answers
+A setting left out is the host's, or with `from`, that mind's, except an
+effort when the body names another model. It answers
 201 made, 200 made the same way before, 409 made otherwise, 404 no such
 `from`, 403 a `from` the token does not reach, and 400 a bad name (a `.`,
 or over 55 bytes), model, effort or `from`.

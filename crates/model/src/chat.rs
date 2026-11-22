@@ -34,10 +34,6 @@ pub(crate) fn is_reasoning(block: &Value) -> bool {
 #[derive(Serialize)]
 struct Body<'a> {
     model: &'a str,
-    /// The cap on a reply: the name `OpenAI` asks for, and `OpenRouter`
-    /// takes as it takes `max_tokens`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_completion_tokens: Option<u32>,
     stream: bool,
     stream_options: StreamOptions,
     messages: Vec<Said<'a>>,
@@ -116,7 +112,6 @@ fn body<'a>(config: &'a Config, request: &'a ModelRequest) -> Body<'a> {
     }
     Body {
         model: request.model.as_deref().unwrap_or(&config.model),
-        max_completion_tokens: config.max_tokens,
         stream: true,
         stream_options: StreamOptions {
             include_usage: true,
@@ -570,7 +565,7 @@ mod tests {
 
     #[test]
     fn a_request_is_written_as_the_api_reads_it() {
-        let (mut config, mut request) = (config(), request());
+        let (config, mut request) = (config(), request());
         let post = Exchange::new(&config, &request).post();
         assert_eq!(post.url, "https://api.openai.com/v1/chat/completions");
         assert_eq!(post.header("authorization"), Some("Bearer sk-test"));
@@ -578,7 +573,6 @@ mod tests {
             body_of(&post),
             json!({
                 "model": "gpt",
-                "max_completion_tokens": 16000,
                 "stream": true,
                 "stream_options": {"include_usage": true},
                 "messages": [
@@ -600,23 +594,19 @@ mod tests {
             })
         );
 
-        // Arguments that were not JSON go back as the model wrote them, and
-        // a host may send no cap.
+        // Arguments that were not JSON go back as the model wrote them.
         if let Content::ToolUse { input, .. } = &mut request.messages[1].content[3] {
             *input = json!("cat x");
         }
-        config.max_tokens = None;
         let body = body_of(&Exchange::new(&config, &request).post());
         let called = &body["messages"][2]["tool_calls"][1]["function"]["arguments"];
         assert_eq!(called, &json!("cat x"));
-        assert!(body.get("max_completion_tokens").is_none());
     }
 
     #[test]
     fn a_mind_with_a_model_of_its_own_asks_it() {
         let mut config = config();
         config.effort = Some("high".into());
-        config.max_tokens = Some(24_000);
         let request = ModelRequest {
             model: Some("gpt-mini".into()),
             effort: Some("low".into()),
@@ -625,7 +615,6 @@ mod tests {
         let body = body_of(&Exchange::new(&config, &request).post());
         assert_eq!(body["model"], json!("gpt-mini"));
         assert_eq!(body["reasoning_effort"], json!("low"));
-        assert_eq!(body["max_completion_tokens"], json!(24_000));
     }
 
     #[test]

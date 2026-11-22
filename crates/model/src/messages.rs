@@ -1,5 +1,7 @@
 //! Claude's Messages API: `POST /v1/messages`.
 
+use std::sync::LazyLock;
+
 use mensor_mind::{Block, Content, Message, ModelReply, ModelRequest, Role, Stop, Usage};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -45,8 +47,7 @@ pub(crate) fn reasoning_is_unbound(failure: &Failure) -> bool {
 struct Body<'a> {
     model: &'a str,
     /// The API refuses a request without one.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_tokens: Option<u32>,
+    max_tokens: u32,
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     system: Option<&'a str>,
@@ -150,12 +151,21 @@ fn said(message: &Message) -> Option<Said<'_>> {
     (!content.is_empty()).then_some(Said { role, content })
 }
 
+/// The input of a tool use whose own is no object.
+static NO_INPUT: LazyLock<Value> = LazyLock::new(|| Value::Object(Map::new()));
+
 fn part(content: &Content) -> Option<Part<'_>> {
     Some(match content {
         // The API refuses a text block with nothing in it.
         Content::Text(text) if text.is_empty() => return None,
         Content::Text(text) => Part::Text { text },
-        Content::ToolUse { id, name, input } => Part::ToolUse { id, name, input },
+        // The API takes only an object, where another API's model may have
+        // written any JSON, or text that is not JSON.
+        Content::ToolUse { id, name, input } => Part::ToolUse {
+            id,
+            name,
+            input: if input.is_object() { input } else { &NO_INPUT },
+        },
         // What another API wrote means nothing to this one.
         Content::Other(block)
             if crate::chat::is_reasoning(block) || crate::responses::is_item(block) =>
@@ -448,7 +458,7 @@ mod tests {
     fn a_mind_with_a_model_of_its_own_asks_it() {
         let mut config = config();
         config.effort = Some("high".into());
-        config.max_tokens = Some(24_000);
+        config.max_tokens = 24_000;
         let request = ModelRequest {
             model: Some("claude-haiku-5-5".into()),
             effort: Some("low".into()),
@@ -559,16 +569,24 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_another_api_wrote_is_left_out() {
+    fn what_another_api_wrote_goes_as_this_one_takes_it() {
         let mut request = request();
         request.messages[1].content[0] =
             Content::Other(json!({"type": "reasoning_details", "details": [{"text": "hm"}]}));
+        // A call another API's model made with arguments that are not an
+        // object goes with none.
+        request.messages[1].content.push(Content::ToolUse {
+            id: "call_3".into(),
+            name: "bash".into(),
+            input: json!("not json"),
+        });
         let body = written(&config(), &request, false);
         assert_eq!(
             body["messages"][1]["content"],
             json!([
                 {"type": "tool_use", "id": "tu_1", "name": "bash", "input": {"command": "ls"}},
                 {"type": "tool_use", "id": "tu_2", "name": "bash", "input": {"command": "cat x"}},
+                {"type": "tool_use", "id": "call_3", "name": "bash", "input": {}},
             ])
         );
     }

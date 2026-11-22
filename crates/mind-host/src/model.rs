@@ -19,7 +19,7 @@ pub type Wrote = Box<dyn FnMut(u64, &str) + Send>;
 ///
 /// A model retries what is worth retrying itself. An error it returns ends
 /// the mind's turn until the next prompt.
-pub trait Model: Send + Sync {
+pub trait Model: Send + Sync + std::fmt::Debug {
     /// Asks the model once. It tells `wrote` the text of its reply as that
     /// comes, if it can.
     fn call(&self, request: ModelRequest, wrote: Wrote) -> ModelFuture<'_>;
