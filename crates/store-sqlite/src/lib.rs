@@ -538,6 +538,20 @@ impl Store for SqliteStore {
         })
     }
 
+    fn live(&self) -> Result<Vec<Name>, StoreError> {
+        let connection = self.reading();
+        let mut select = connection
+            .prepare_cached(
+                "SELECT name FROM minds WHERE NOT EXISTS (SELECT 1 FROM items \
+                 WHERE items.mind = minds.name AND items.kind = 'ended') ORDER BY made",
+            )
+            .map_err(backend)?;
+        let rows = select
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(backend)?;
+        rows.map(|row| stored_name(row.map_err(backend)?)).collect()
+    }
+
     fn minds(&self) -> Result<Vec<MindRecord>, StoreError> {
         let connection = self.reading();
         let mut select = connection

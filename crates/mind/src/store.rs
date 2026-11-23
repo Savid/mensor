@@ -232,6 +232,10 @@ pub trait Store: Send + Sync {
     /// The text of the prompt a mind's history holds under `key`.
     fn prompt(&self, name: &Name, key: &str) -> Result<Option<String>, StoreError>;
 
+    /// Every mind that has not ended, in the order they were made: those
+    /// whose own items hold no [`Item::Ended`].
+    fn live(&self) -> Result<Vec<Name>, StoreError>;
+
     /// Every mind, parents before their forks.
     fn minds(&self) -> Result<Vec<MindRecord>, StoreError>;
 }
@@ -363,6 +367,17 @@ impl Store for MemoryStore {
     fn prompt(&self, name: &Name, key: &str) -> Result<Option<String>, StoreError> {
         let items = self.lock().history(name, u64::MAX)?;
         Ok(prompt_under(&items, key).map(str::to_owned))
+    }
+
+    fn live(&self) -> Result<Vec<Name>, StoreError> {
+        let minds = self.lock();
+        let ended = |name: &Name| minds.by_name[name].own.contains(&Item::Ended);
+        Ok(minds
+            .order
+            .iter()
+            .filter(|name| !ended(name))
+            .cloned()
+            .collect())
     }
 
     fn minds(&self) -> Result<Vec<MindRecord>, StoreError> {

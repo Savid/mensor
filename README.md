@@ -148,7 +148,7 @@ whole.
 
 | Request | Does |
 | --- | --- |
-| `GET /v1/minds` | Every mind you may reach. |
+| `GET /v1/minds` | Every mind you may reach that has not ended. |
 | `GET /v1/minds/{m}` | `state`, `hands`, `waiting`, `watching`, `length`, `origin` and its settings. |
 | `PUT /v1/minds/{m}` | Makes `m` with settings of its own: [below](#making-a-mind). |
 | `POST /v1/minds/{m}/prompt` | `{"text", "key"?}`: 202 stored, 409 if `m` ended. A `key` makes retries safe: 200 if stored already, 409 if with other text. |

@@ -1890,6 +1890,10 @@ impl Store for StopsAfterFork {
         self.inner.prompt(name, key)
     }
 
+    fn live(&self) -> Result<Vec<Name>, StoreError> {
+        self.inner.live()
+    }
+
     fn minds(&self) -> Result<Vec<MindRecord>, StoreError> {
         self.inner.minds()
     }

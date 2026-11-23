@@ -493,6 +493,7 @@ pub fn what_a_mind_knows_includes_how_it_began_and_that_it_ended(store: &dyn Sto
         store.last(&name("r2"), "ended", u64::MAX).unwrap(),
         Some(Item::Ended)
     );
+    assert_eq!(store.live().unwrap(), [name("k")]);
 }
 
 /// A history read through tens of generations, each a fork or a mind made
