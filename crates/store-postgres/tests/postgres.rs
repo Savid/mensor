@@ -170,21 +170,6 @@ fn a_schema_that_holds_other_tables_is_refused() {
 
 #[test]
 #[ignore = "needs Postgres: make test-postgres"]
-fn a_schema_an_older_mensor_made_is_refused() {
-    let database = database();
-    connect(&database)
-        .batch_execute(
-            "CREATE TABLE minds (name text PRIMARY KEY, parent text, inherited bigint NOT NULL);
-             CREATE TABLE items (mind text, at bigint, item json);
-             CREATE TABLE hold (taken bigint NOT NULL)",
-        )
-        .unwrap();
-    let refused = PostgresStore::open(&plain(&database)).unwrap_err();
-    assert!(refused.to_string().contains("of its own"), "{refused}");
-}
-
-#[test]
-#[ignore = "needs Postgres: make test-postgres"]
 fn a_database_not_in_utf8_is_refused() {
     let name = format!("{}_latin1", database());
     connect("postgres")

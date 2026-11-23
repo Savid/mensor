@@ -144,17 +144,20 @@ impl SqliteStore {
                 .query_row(sql, [], |row| row.get(0))
                 .map_err(backend)
         };
-        let tables = count("SELECT COUNT(*) FROM sqlite_schema")?;
-        let settings =
-            count("SELECT COUNT(*) FROM pragma_table_info('minds') WHERE name = 'settings'")?;
-        match (tables, settings) {
-            (0, _) => connection.execute_batch(SCHEMA).map_err(backend)?,
-            (_, 1) => {}
-            _ => {
-                return Err(StoreError::Backend(
-                    "the file holds tables this store does not: start from a new file".into(),
-                ));
-            }
+        // SQLite's own tables, such as `sqlite_sequence`, aside.
+        let tables = count(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+        )?;
+        let ours = count(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' \
+             AND name IN ('minds', 'settings', 'items')",
+        )?;
+        if tables == 0 {
+            connection.execute_batch(SCHEMA).map_err(backend)?;
+        } else if (tables, ours) != (3, 3) {
+            return Err(StoreError::Backend(
+                "the file holds tables this store does not: start from a new file".into(),
+            ));
         }
         Ok(Self {
             connection: Mutex::new(connection),
@@ -748,21 +751,6 @@ mod tests {
         let old = Connection::open(&path).unwrap();
         old.execute_batch("CREATE TABLE items (owner TEXT, at INTEGER, item TEXT)")
             .unwrap();
-        drop(old);
-        let refused = SqliteStore::open(&path).unwrap_err();
-        assert!(refused.to_string().contains("new file"), "{refused}");
-    }
-
-    #[test]
-    fn a_file_an_older_mensor_made_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("older.sqlite");
-        let old = Connection::open(&path).unwrap();
-        old.execute_batch(
-            "CREATE TABLE minds (made INTEGER PRIMARY KEY, name TEXT, parent TEXT, \
-             inherited INTEGER)",
-        )
-        .unwrap();
         drop(old);
         let refused = SqliteStore::open(&path).unwrap_err();
         assert!(refused.to_string().contains("new file"), "{refused}");

@@ -25,7 +25,7 @@ The Postgres `Store` (`crates/mind/src/store.rs`), behind `mensor`'s
   `verify-full`, unless `disable` or a Unix socket. No error quotes the URL,
   which holds the password.
 - A mind's row holds its record in a `json` column, and its settings once
-  in `settings` by digest, as the SQLite store's does. A schema without
-  those is refused.
+  in `settings` by digest, as the SQLite store's does. A schema holding
+  other tables is refused.
 - Tests that need Postgres are `#[ignore]`d, and `make test-postgres` runs
   them against Postgres in Docker, a database each.

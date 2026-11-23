@@ -14,6 +14,6 @@ The SQLite `Store` (`crates/mind/src/store.rs`).
   (`MindSettings::digest`) and kept once for every mind made with them; the
   mind's row names the digest and its record leaves them out. `minds` reads
   each once and shares it.
-- A file whose minds name no settings is an older mensor's, and refused.
+- A file that holds tables other than these is refused.
 - It passes `mensor_mind::store_suite!`. Its own tests are of its file and
   rows.

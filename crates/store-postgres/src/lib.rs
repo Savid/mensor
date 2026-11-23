@@ -143,11 +143,6 @@ const LIVE: &str = "SELECT name FROM minds WHERE NOT EXISTS (SELECT 1 FROM items
      WHERE items.mind = minds.name AND items.kind = 'ended') ORDER BY made";
 const RECORD: &str = "SELECT minds.record::text, settings.settings::text FROM minds \
      JOIN settings ON settings.digest = minds.settings WHERE minds.name = $1";
-/// Whether the minds in the schema name their settings: an older mensor's
-/// did not.
-const RECORDS: &str = "SELECT count(*) FROM information_schema.columns \
-     WHERE table_schema = current_schema() AND table_name = 'minds' \
-     AND column_name = 'settings'";
 /// How long each of the minds `$1` is: each one's name, the items it
 /// shares, and the index of its last own item.
 const LENGTHS: &str = "SELECT minds.name, minds.inherited, \
@@ -223,17 +218,12 @@ fn prepare(session: &mut Session) -> Result<(), StoreError> {
             transaction.batch_execute(SCHEMA)?;
             transaction.commit()
         })?;
-    } else {
-        let records: i64 = session
-            .with(|client| client.query_one(RECORDS, &[]))?
-            .get(0);
-        if sorted != ours || records != 1 {
-            return Err(StoreError::Backend(
-                "the Postgres schema holds tables this store does not: give it a database, or a \
-                 schema, of its own"
-                    .into(),
-            ));
-        }
+    } else if sorted != ours {
+        return Err(StoreError::Backend(
+            "the Postgres schema holds tables this store does not: give it a database, or a \
+             schema, of its own"
+                .into(),
+        ));
     }
     session.take()
 }
