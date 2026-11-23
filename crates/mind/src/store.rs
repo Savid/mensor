@@ -57,7 +57,7 @@ impl Origin {
 
 /// What a mind is made with, beyond what its host gives every mind. A
 /// setting left out is the host's.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MindSettings {
     /// The model it asks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -82,21 +82,17 @@ impl MindSettings {
     }
 
     /// What a store keeps these under, once however many minds share
-    /// them: a SHA-256 of them, in hex.
+    /// them: the SHA-256 of their JSON, in hex.
+    ///
+    /// # Panics
+    ///
+    /// Never: settings are strings, which JSON always holds.
     pub fn digest(&self) -> String {
         use sha2::Digest;
         use std::fmt::Write;
-        let mut hash = sha2::Sha256::new();
-        // Whether each is set, and its length, so that no two settings
-        // are hashed alike.
-        for part in [&self.model, &self.effort, &self.system] {
-            hash.update([u8::from(part.is_some())]);
-            let part = part.as_deref().unwrap_or_default().as_bytes();
-            hash.update(u64::try_from(part.len()).unwrap_or(u64::MAX).to_le_bytes());
-            hash.update(part);
-        }
+        let written = serde_json::to_vec(self).expect("settings are always written");
         let mut digest = String::with_capacity(64);
-        for byte in hash.finalize() {
+        for byte in sha2::Sha256::digest(written) {
             let _ = write!(digest, "{byte:02x}");
         }
         digest

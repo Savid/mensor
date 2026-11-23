@@ -50,7 +50,7 @@ const SCHEMA: &str = "
     CREATE TABLE settings (
         digest   TEXT PRIMARY KEY, -- MindSettings::digest
         settings TEXT NOT NULL     -- as JSON
-    ) STRICT, WITHOUT ROWID;
+    ) STRICT;
     CREATE TABLE items (
         mind TEXT NOT NULL REFERENCES minds (name),
         at   INTEGER NOT NULL,
@@ -594,6 +594,17 @@ impl Store for SqliteStore {
 
     fn minds(&self) -> Result<Vec<MindRecord>, StoreError> {
         let connection = self.reading();
+        // The minds first: their settings were stored with them, so all
+        // are there when read after.
+        let mut select = connection
+            .prepare_cached("SELECT record, settings FROM minds ORDER BY made")
+            .map_err(backend)?;
+        let rows = select
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(backend)?;
+        let minds = rows.collect::<Result<Vec<_>, _>>().map_err(backend)?;
         // Each settings once, shared by every mind made with them.
         let mut shared = HashMap::new();
         let mut select = connection
@@ -609,22 +620,14 @@ impl Store for SqliteStore {
             let settings: MindSettings = serde_json::from_str(&settings).map_err(backend)?;
             shared.insert(digest, Arc::new(settings));
         }
-        let mut select = connection
-            .prepare_cached("SELECT record, settings FROM minds ORDER BY made")
-            .map_err(backend)?;
-        let rows = select
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        minds
+            .into_iter()
+            .map(|(record, digest)| {
+                let settings = shared.get(&digest).cloned();
+                let settings = settings.ok_or_else(|| backend("a mind's settings are missing"))?;
+                with_settings(&record, settings)
             })
-            .map_err(backend)?;
-        let mut minds = Vec::new();
-        for row in rows {
-            let (record, digest) = row.map_err(backend)?;
-            let settings = shared.get(&digest).cloned();
-            let settings = settings.ok_or_else(|| backend("a mind's settings are missing"))?;
-            minds.push(with_settings(&record, settings)?);
-        }
-        Ok(minds)
+            .collect()
     }
 }
 

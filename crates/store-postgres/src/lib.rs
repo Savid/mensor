@@ -143,9 +143,11 @@ const LIVE: &str = "SELECT name FROM minds WHERE NOT EXISTS (SELECT 1 FROM items
      WHERE items.mind = minds.name AND items.kind = 'ended') ORDER BY made";
 const RECORD: &str = "SELECT minds.record::text, settings.settings::text FROM minds \
      JOIN settings ON settings.digest = minds.settings WHERE minds.name = $1";
-/// Whether the minds in the schema have records: an older mensor's had none.
+/// Whether the minds in the schema name their settings: an older mensor's
+/// did not.
 const RECORDS: &str = "SELECT count(*) FROM information_schema.columns \
-     WHERE table_schema = current_schema() AND table_name = 'minds' AND column_name = 'record'";
+     WHERE table_schema = current_schema() AND table_name = 'minds' \
+     AND column_name = 'settings'";
 /// How long each of the minds `$1` is: each one's name, the items it
 /// shares, and the index of its last own item.
 const LENGTHS: &str = "SELECT minds.name, minds.inherited, \
@@ -571,6 +573,10 @@ impl Store for PostgresStore {
 
     fn minds(&self) -> Result<Vec<MindRecord>, StoreError> {
         self.reader.run(|session| {
+            // The minds first: their settings were stored with them, so
+            // all are there when read after.
+            let statement = session.statement(MINDS)?;
+            let minds = session.with(|client| client.query(&statement, &[]))?;
             // Each settings once, shared by every mind made with them.
             let statement = session.statement(SETTINGS)?;
             let rows = session.with(|client| client.query(&statement, &[]))?;
@@ -579,9 +585,8 @@ impl Store for PostgresStore {
                 let settings: MindSettings = serde_json::from_str(row.get(1)).map_err(backend)?;
                 shared.insert(row.get::<_, String>(0), Arc::new(settings));
             }
-            let statement = session.statement(MINDS)?;
-            let rows = session.with(|client| client.query(&statement, &[]))?;
-            rows.iter()
+            minds
+                .iter()
                 .map(|row| {
                     let settings = shared.get(row.get::<_, &str>(1)).cloned();
                     let settings =
