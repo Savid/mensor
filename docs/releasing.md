@@ -9,7 +9,7 @@ The binaries and the image are attested by that workflow. Check either
 with a logged-in `gh`:
 
 ```bash
-v=0.1.3 f="mensor-$v-$(uname -m)-unknown-linux-musl.tar.gz"
+v=0.1.4 f="mensor-$v-$(uname -m)-unknown-linux-musl.tar.gz"
 gh attestation verify "$f" -R Savid/mensor \
   --signer-workflow Savid/mensor/.github/workflows/release.yml --source-ref "refs/tags/v$v"
 gh attestation verify "oci://ghcr.io/savid/mensor:$v" -R Savid/mensor \

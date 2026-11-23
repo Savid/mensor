@@ -12,7 +12,7 @@ can't read it from the hand's process, but a `docker exec` shell has it.
 
 ```bash
 docker build -t mensor-example .
-# or: docker pull ghcr.io/savid/mensor:0.1.3 && docker tag ghcr.io/savid/mensor:0.1.3 mensor-example
+# or: docker pull ghcr.io/savid/mensor:0.1.4 && docker tag ghcr.io/savid/mensor:0.1.4 mensor-example
 export COMPOSE_FILE=examples/docker/compose.yaml
 export MENSOR_TOKEN="$(openssl rand -hex 32)"   # the host's: it reaches every mind
 export MENSOR_M_TOKEN="$(docker run --rm -e MENSOR_TOKEN mensor-example token --mind m)"

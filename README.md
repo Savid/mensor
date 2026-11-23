@@ -189,13 +189,13 @@ or over 55 bytes), model, effort or `from`.
 Each release has static Linux binaries for x86-64 and arm64:
 
 ```bash
-v=0.1.3 f="mensor-$v-$(uname -m)-unknown-linux-musl.tar.gz"
+v=0.1.4 f="mensor-$v-$(uname -m)-unknown-linux-musl.tar.gz"
 curl -fLO "https://github.com/Savid/mensor/releases/download/v$v/$f"
 curl -fLO "https://github.com/Savid/mensor/releases/download/v$v/SHA256SUMS"
 sha256sum -c --ignore-missing SHA256SUMS && tar -xzf "$f" && "${f%.tar.gz}/mensor" --version
 ```
 
-The image, for both, is `ghcr.io/savid/mensor` (`0.1.3`, `0.1`, `latest`):
+The image, for both, is `ghcr.io/savid/mensor` (`0.1.4`, `0.1`, `latest`):
 [examples/docker](examples/docker) runs a host and hands from it. Binaries
 and image are built with Postgres, and attested:
 [verify them](docs/releasing.md#verify).
