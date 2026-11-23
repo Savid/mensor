@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::convert::Infallible;
+use std::sync::Arc;
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Extension, FromRequest, FromRequestParts, Path, Query, Request, State};
@@ -17,7 +18,7 @@ use mensor_api::{
     Access, History, MakeBody, MindStatus, PAGE, Problem, PromptBody, PromptReply, ReleaseBody,
     Token, Writing, local,
 };
-use mensor_mind::{Item, StoreError};
+use mensor_mind::{Item, MindSettings, StoreError};
 use mensor_protocol::{FromHand, Hello, MAX_FRAME_BYTES, NOT_LOCAL, Name, Refusal};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -151,7 +152,12 @@ async fn minds(
     let mut minds = host.minds().await?;
     minds.retain(|status| access.reaches(&status.mind.name));
     for status in &mut minds {
-        status.mind.settings.system = None;
+        let settings = &status.mind.settings;
+        status.mind.settings = Arc::new(MindSettings {
+            system: None,
+            model: settings.model.clone(),
+            effort: settings.effort.clone(),
+        });
     }
     Ok(Json(minds))
 }

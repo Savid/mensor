@@ -16,15 +16,17 @@
 //! Beside the item itself a row holds when it was stored, its type, and the
 //! key of a prompt that has one. Those are what a reader of the file asks
 //! by, and how the store finds a history's last summary and a prompt's key
-//! without reading the history. A mind's row holds its whole record as
-//! JSON, and beside it the mind whose items it shares and how many, which
-//! a read walks up by.
+//! without reading the history. A mind's row holds its record as JSON,
+//! beside it the mind whose items it shares and how many, which a read
+//! walks up by, and the digest of its settings: those are a row of their
+//! own, kept once however many minds share them.
 
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use mensor_mind::{Item, MindRecord, Store, StoreError};
+use mensor_mind::{Item, MindRecord, MindSettings, Store, StoreError};
 use mensor_protocol::Name;
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -42,8 +44,13 @@ const SCHEMA: &str = "
         name      TEXT NOT NULL UNIQUE,
         parent    TEXT REFERENCES minds (name), -- whose items it shares
         inherited INTEGER NOT NULL,             -- and how many
-        record    TEXT NOT NULL                 -- the mind's record, as JSON
+        record    TEXT NOT NULL,                -- the mind's record, as JSON, without
+        settings  TEXT NOT NULL REFERENCES settings (digest) -- its settings
     ) STRICT;
+    CREATE TABLE settings (
+        digest   TEXT PRIMARY KEY, -- MindSettings::digest
+        settings TEXT NOT NULL     -- as JSON
+    ) STRICT, WITHOUT ROWID;
     CREATE TABLE items (
         mind TEXT NOT NULL REFERENCES minds (name),
         at   INTEGER NOT NULL,
@@ -138,9 +145,9 @@ impl SqliteStore {
                 .map_err(backend)
         };
         let tables = count("SELECT COUNT(*) FROM sqlite_schema")?;
-        let records =
-            count("SELECT COUNT(*) FROM pragma_table_info('minds') WHERE name = 'record'")?;
-        match (tables, records) {
+        let settings =
+            count("SELECT COUNT(*) FROM pragma_table_info('minds') WHERE name = 'settings'")?;
+        match (tables, settings) {
             (0, _) => connection.execute_batch(SCHEMA).map_err(backend)?,
             (_, 1) => {}
             _ => {
@@ -267,17 +274,27 @@ fn shares(connection: &Connection, name: &Name) -> Result<Option<(Name, u64)>, S
 
 /// A mind's record, if the store holds the mind.
 fn record(connection: &Connection, name: &Name) -> Result<Option<MindRecord>, StoreError> {
-    let record: Option<String> = connection
+    let stored: Option<(String, String)> = connection
         .query_row(
-            "SELECT record FROM minds WHERE name = ?1",
+            "SELECT minds.record, settings.settings FROM minds \
+             JOIN settings ON settings.digest = minds.settings WHERE minds.name = ?1",
             params![name.as_str()],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .map_err(backend)?;
-    record
-        .map(|record| serde_json::from_str(&record).map_err(backend))
+    stored
+        .map(|(record, settings)| {
+            let settings = serde_json::from_str(&settings).map_err(backend)?;
+            with_settings(&record, Arc::new(settings))
+        })
         .transpose()
+}
+
+/// A record as stored, with the settings it was stored apart from.
+fn with_settings(record: &str, settings: Arc<MindSettings>) -> Result<MindRecord, StoreError> {
+    let record: MindRecord = serde_json::from_str(record).map_err(backend)?;
+    Ok(MindRecord { settings, ..record })
 }
 
 /// How many items a mind's history holds, shared ones included.
@@ -438,11 +455,30 @@ impl Store for SqliteStore {
                 (Some(parent.as_str()), inherited)
             }
         };
-        let written = serde_json::to_string(mind).map_err(backend)?;
+        let digest = mind.settings.digest();
+        let settings = serde_json::to_string(&mind.settings).map_err(backend)?;
         transaction
             .execute(
-                "INSERT INTO minds (name, parent, inherited, record) VALUES (?1, ?2, ?3, ?4)",
-                params![mind.name.as_str(), parent, signed(inherited)?, written],
+                "INSERT OR IGNORE INTO settings (digest, settings) VALUES (?1, ?2)",
+                params![digest, settings],
+            )
+            .map_err(backend)?;
+        let bare = MindRecord {
+            settings: Arc::default(),
+            ..mind.clone()
+        };
+        let written = serde_json::to_string(&bare).map_err(backend)?;
+        transaction
+            .execute(
+                "INSERT INTO minds (name, parent, inherited, record, settings) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    mind.name.as_str(),
+                    parent,
+                    signed(inherited)?,
+                    written,
+                    digest
+                ],
             )
             .map_err(backend)?;
         {
@@ -558,15 +594,35 @@ impl Store for SqliteStore {
 
     fn minds(&self) -> Result<Vec<MindRecord>, StoreError> {
         let connection = self.reading();
+        // Each settings once, shared by every mind made with them.
+        let mut shared = HashMap::new();
         let mut select = connection
-            .prepare_cached("SELECT record FROM minds ORDER BY made")
+            .prepare_cached("SELECT digest, settings FROM settings")
             .map_err(backend)?;
         let rows = select
-            .query_map([], |row| row.get::<_, String>(0))
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(backend)?;
+        for row in rows {
+            let (digest, settings) = row.map_err(backend)?;
+            let settings: MindSettings = serde_json::from_str(&settings).map_err(backend)?;
+            shared.insert(digest, Arc::new(settings));
+        }
+        let mut select = connection
+            .prepare_cached("SELECT record, settings FROM minds ORDER BY made")
+            .map_err(backend)?;
+        let rows = select
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
             .map_err(backend)?;
         let mut minds = Vec::new();
         for row in rows {
-            minds.push(serde_json::from_str(&row.map_err(backend)?).map_err(backend)?);
+            let (record, digest) = row.map_err(backend)?;
+            let settings = shared.get(&digest).cloned();
+            let settings = settings.ok_or_else(|| backend("a mind's settings are missing"))?;
+            minds.push(with_settings(&record, settings)?);
         }
         Ok(minds)
     }
@@ -590,7 +646,7 @@ fn unsigned(index: i64) -> Result<u64, StoreError> {
 
 #[cfg(test)]
 mod tests {
-    use mensor_mind::{KNOWING, MindSettings, Origin};
+    use mensor_mind::{KNOWING, Origin};
 
     use super::*;
 
@@ -620,7 +676,7 @@ mod tests {
         MindRecord {
             name: name(mind),
             origin,
-            settings: MindSettings::default(),
+            settings: std::sync::Arc::default(),
         }
     }
 

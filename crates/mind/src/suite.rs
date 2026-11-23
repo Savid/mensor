@@ -5,6 +5,7 @@
 //! for each, so a store's crate runs them all with one line.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use mensor_protocol::Name;
 use serde_json::json;
@@ -367,11 +368,11 @@ pub fn a_mind_made_from_another_shares_its_first_items_and_keeps_its_record(stor
                 hand: name("vm"),
             },
         },
-        settings: MindSettings {
+        settings: Arc::new(MindSettings {
             model: Some("claude-haiku-5-5".into()),
             effort: Some("low".into()),
             system: Some("Play on.".into()),
-        },
+        }),
     };
     store.create(&made, &[prompt("r2")]).unwrap();
     store.create(&made, &[prompt("r2")]).unwrap();
@@ -385,7 +386,7 @@ pub fn a_mind_made_from_another_shares_its_first_items_and_keeps_its_record(stor
     );
 
     let other = MindRecord {
-        settings: MindSettings::default(),
+        settings: Arc::default(),
         ..made.clone()
     };
     let again = store.create(&other, &[]);
@@ -640,7 +641,7 @@ fn record(mind: &str, origin: Origin) -> MindRecord {
     MindRecord {
         name: name(mind),
         origin,
-        settings: MindSettings::default(),
+        settings: Arc::default(),
     }
 }
 

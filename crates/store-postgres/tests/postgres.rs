@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use mensor_mind::{Item, MindRecord, MindSettings, Origin, Store, StoreError};
+use mensor_mind::{Item, MindRecord, Origin, Store, StoreError};
 use mensor_protocol::Name;
 use mensor_store_postgres::PostgresStore;
 use postgres::{Client, NoTls};
@@ -113,7 +113,7 @@ fn a_fork_stores_only_its_own_rows() {
             parent: name("a1"),
             inherited: 2,
         },
-        settings: MindSettings::default(),
+        settings: Arc::default(),
     };
     store.create(&child, &[prompt("b2")]).unwrap();
     let own: i64 = connect(&database)

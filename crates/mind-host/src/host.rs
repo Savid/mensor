@@ -688,7 +688,7 @@ impl Host {
             None => MindRecord {
                 name: name.clone(),
                 origin: Origin::Root,
-                settings,
+                settings: Arc::new(settings),
             },
             Some(from) => {
                 let keeper = minds.get(&from.mind);
@@ -696,7 +696,7 @@ impl Host {
                 // An effort is in its model's words, so it goes with the
                 // model: one that names another model takes none from the
                 // keeper.
-                let mut kept = keeper.record.settings.clone();
+                let mut kept = MindSettings::clone(&keeper.record.settings);
                 let keepers = kept.model.as_deref().unwrap_or(self.inner.model.name());
                 if settings
                     .model
@@ -705,10 +705,16 @@ impl Host {
                 {
                     kept.effort = None;
                 }
+                // Made as its keeper was, it shares its keeper's settings.
+                let settings = settings.or(&kept);
                 MindRecord {
                     name: name.clone(),
                     origin: Origin::From { from: from.clone() },
-                    settings: settings.or(&kept),
+                    settings: if settings == *keeper.record.settings {
+                        Arc::clone(&keeper.record.settings)
+                    } else {
+                        Arc::new(settings)
+                    },
                 }
             }
         };
@@ -973,7 +979,7 @@ mod tests {
             let record = MindRecord {
                 name: name(mind),
                 origin: Origin::Root,
-                settings: with(Some(model), effort),
+                settings: Arc::new(with(Some(model), effort)),
             };
             let joined = Item::Attached {
                 hand: name("vm"),
@@ -990,7 +996,9 @@ mod tests {
                 hand: name("vm"),
             })
         };
-        let settings = async |mind: &str| host.mind(&name(mind)).await.unwrap().mind.settings;
+        let settings = async |mind: &str| {
+            MindSettings::clone(&host.mind(&name(mind)).await.unwrap().mind.settings)
+        };
 
         // GPT's effort is checked as GPT's, on GPT.
         let made = host

@@ -24,7 +24,8 @@ The Postgres `Store` (`crates/mind/src/store.rs`), behind `mensor`'s
   and `tcp_user_timeout` itself, as libpq means them: TLS 1.3, checked as
   `verify-full`, unless `disable` or a Unix socket. No error quotes the URL,
   which holds the password.
-- A mind's row holds its record in a `json` column, as the SQLite store's
-  does, and a schema whose minds have none is refused.
+- A mind's row holds its record in a `json` column, and its settings once
+  in `settings` by digest, as the SQLite store's does. A schema without
+  those is refused.
 - Tests that need Postgres are `#[ignore]`d, and `make test-postgres` runs
   them against Postgres in Docker, a database each.

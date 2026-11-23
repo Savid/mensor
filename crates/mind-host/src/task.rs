@@ -118,7 +118,7 @@ struct Task {
     name: Name,
     mind: Mind,
     /// What the mind was made with, which its fork children are made with.
-    made: MindSettings,
+    made: Arc<MindSettings>,
     /// What it is told when it is loaded: the host's settings, with its own
     /// over them.
     settings: Settings,

@@ -19,9 +19,9 @@ target/release/mensor serve
 
 - Reach Postgres itself, or a pooler in session mode: transaction mode
   breaks the lock below.
-- It must be UTF8. On its first start the host creates its tables (`minds`,
-  `items`, `hold`) in the role's current schema, so the role needs to
-  create tables there. The schema must hold no others: to share a database,
+- It must be UTF8. On its first start the host creates its tables
+  (`minds`, `settings`, `items`, `hold`) in the role's current schema, so
+  the role needs to create tables there. The schema must hold no others: to share a database,
   `CREATE SCHEMA mensor` and add `?options=-c%20search_path%3Dmensor` to the
   URL.
 - Items are JSON, so SQL reads them:

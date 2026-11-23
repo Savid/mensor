@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use mensor_protocol::Name;
 use serde::{Deserialize, Serialize};
@@ -57,7 +57,7 @@ impl Origin {
 
 /// What a mind is made with, beyond what its host gives every mind. A
 /// setting left out is the host's.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MindSettings {
     /// The model it asks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -80,6 +80,27 @@ impl MindSettings {
             system: self.system.or_else(|| under.system.clone()),
         }
     }
+
+    /// What a store keeps these under, once however many minds share
+    /// them: a SHA-256 of them, in hex.
+    pub fn digest(&self) -> String {
+        use sha2::Digest;
+        use std::fmt::Write;
+        let mut hash = sha2::Sha256::new();
+        // Whether each is set, and its length, so that no two settings
+        // are hashed alike.
+        for part in [&self.model, &self.effort, &self.system] {
+            hash.update([u8::from(part.is_some())]);
+            let part = part.as_deref().unwrap_or_default().as_bytes();
+            hash.update(u64::try_from(part.len()).unwrap_or(u64::MAX).to_le_bytes());
+            hash.update(part);
+        }
+        let mut digest = String::with_capacity(64);
+        for byte in hash.finalize() {
+            let _ = write!(digest, "{byte:02x}");
+        }
+        digest
+    }
 }
 
 /// A mind as a store knows it: its name, where its history begins, and what
@@ -91,9 +112,9 @@ pub struct MindRecord {
     /// Where its history begins.
     #[serde(flatten)]
     pub origin: Origin,
-    /// What it was made with.
+    /// What it was made with, shared with every mind made the same way.
     #[serde(flatten)]
-    pub settings: MindSettings,
+    pub settings: Arc<MindSettings>,
 }
 
 impl MindRecord {
@@ -102,7 +123,7 @@ impl MindRecord {
         Self {
             name,
             origin: Origin::Root,
-            settings: MindSettings::default(),
+            settings: Arc::default(),
         }
     }
 }
@@ -405,7 +426,7 @@ mod tests {
                 parent: name("a1"),
                 inherited: 4,
             },
-            settings: MindSettings::default(),
+            settings: Arc::default(),
         };
         let made = MindRecord {
             name: name("r2"),
@@ -416,11 +437,11 @@ mod tests {
                     hand: name("vm"),
                 },
             },
-            settings: MindSettings {
+            settings: Arc::new(MindSettings {
                 model: Some("claude-haiku-5-5".into()),
                 effort: None,
                 system: Some("Play.".into()),
-            },
+            }),
         };
         let cases = [
             (

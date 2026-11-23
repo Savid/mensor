@@ -2582,7 +2582,7 @@ async fn a_fork_child_is_made_with_its_parents_settings() {
     })
     .await;
     for status in server.host.minds().await.unwrap() {
-        let model = status.mind.settings.model;
+        let model = &status.mind.settings.model;
         assert_eq!(model.as_deref(), Some("claude-haiku-5-5"));
     }
     let asked = server.model.requests();
