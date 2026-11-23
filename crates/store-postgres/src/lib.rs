@@ -28,7 +28,7 @@ mod worker;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use mensor_mind::{Item, Latest, MindRecord, Store, StoreError};
+use mensor_mind::{Item, Latest, MindRecord, MindSettings, Store, StoreError};
 use mensor_protocol::Name;
 
 use crate::connect::Target;
@@ -36,12 +36,17 @@ use crate::worker::{Append, Reader, Session, Writer, backend};
 
 /// The tables of a new database.
 const SCHEMA: &str = "
+    CREATE TABLE settings (
+        digest   text PRIMARY KEY, -- MindSettings::digest
+        settings json NOT NULL
+    );
     CREATE TABLE minds (
         made      bigint GENERATED ALWAYS AS IDENTITY,
         name      text PRIMARY KEY,
         parent    text REFERENCES minds (name), -- whose items it shares
         inherited bigint NOT NULL,             -- and how many
-        record    json NOT NULL                -- the mind's record
+        record    json NOT NULL,               -- the mind's record, without
+        settings  text NOT NULL REFERENCES settings (digest) -- its settings
     );
     CREATE TABLE items (
         mind text        NOT NULL REFERENCES minds (name),
@@ -132,20 +137,21 @@ const KNOWN: &str = lineage_rows!(
      'branched', 'ended') ORDER BY items.at"
 );
 
-const MINDS: &str = "SELECT record::text FROM minds ORDER BY made";
+const SETTINGS: &str = "SELECT digest, settings::text FROM settings";
+const MINDS: &str = "SELECT record::text, settings FROM minds ORDER BY made";
 const LIVE: &str = "SELECT name FROM minds WHERE NOT EXISTS (SELECT 1 FROM items \
      WHERE items.mind = minds.name AND items.kind = 'ended') ORDER BY made";
-const RECORD: &str = "SELECT record::text FROM minds WHERE name = $1";
-/// Whether the minds in the schema have records: an older mensor's had none.
-const RECORDS: &str = "SELECT count(*) FROM information_schema.columns \
-     WHERE table_schema = current_schema() AND table_name = 'minds' AND column_name = 'record'";
+const RECORD: &str = "SELECT minds.record::text, settings.settings::text FROM minds \
+     JOIN settings ON settings.digest = minds.settings WHERE minds.name = $1";
 /// How long each of the minds `$1` is: each one's name, the items it
 /// shares, and the index of its last own item.
 const LENGTHS: &str = "SELECT minds.name, minds.inherited, \
      (SELECT max(at) FROM items WHERE items.mind = minds.name) \
      FROM minds WHERE minds.name = ANY($1)";
-const INSERT_MIND: &str =
-    "INSERT INTO minds (name, parent, inherited, record) VALUES ($1, $2, $3, $4::text::json)";
+const INSERT_SETTINGS: &str =
+    "INSERT INTO settings (digest, settings) VALUES ($1, $2::text::json) ON CONFLICT DO NOTHING";
+const INSERT_MIND: &str = "INSERT INTO minds (name, parent, inherited, record, settings) \
+     VALUES ($1, $2, $3, $4::text::json, $5)";
 const INSERT_ITEMS: &str = "INSERT INTO items (mind, at, kind, key, item) \
      SELECT mind, at, kind, key, item::json \
      FROM unnest($1::text[], $2::bigint[], $3::text[], $4::bytea[], $5::text[]) \
@@ -203,7 +209,7 @@ fn prepare(session: &mut Session) -> Result<(), StoreError> {
         .iter()
         .map(|row| row.get(0))
         .collect();
-    let ours = ["hold", "items", "minds"];
+    let ours = ["hold", "items", "minds", "settings"];
     let mut sorted: Vec<&str> = tables.iter().map(String::as_str).collect();
     sorted.sort_unstable();
     if sorted.is_empty() {
@@ -212,17 +218,12 @@ fn prepare(session: &mut Session) -> Result<(), StoreError> {
             transaction.batch_execute(SCHEMA)?;
             transaction.commit()
         })?;
-    } else {
-        let records: i64 = session
-            .with(|client| client.query_one(RECORDS, &[]))?
-            .get(0);
-        if sorted != ours || records != 1 {
-            return Err(StoreError::Backend(
-                "the Postgres schema holds tables this store does not: give it a database, or a \
-                 schema, of its own"
-                    .into(),
-            ));
-        }
+    } else if sorted != ours {
+        return Err(StoreError::Backend(
+            "the Postgres schema holds tables this store does not: give it a database, or a \
+             schema, of its own"
+                .into(),
+        ));
     }
     session.take()
 }
@@ -321,18 +322,24 @@ impl<'a> Rows<'a> {
 fn create(session: &mut Session, mind: &MindRecord, own: &[Row]) -> Result<(), StoreError> {
     let record = session.statement(RECORD)?;
     let lengths = session.statement(LENGTHS)?;
+    let insert_settings = session.statement(INSERT_SETTINGS)?;
     let insert_mind = session.statement(INSERT_MIND)?;
     let insert = session.statement(INSERT_ITEMS)?;
-    let written = serde_json::to_string(mind).map_err(backend)?;
+    let digest = mind.settings.digest();
+    let settings = serde_json::to_string(&mind.settings).map_err(backend)?;
+    let bare = MindRecord {
+        settings: Arc::default(),
+        ..mind.clone()
+    };
+    let written = serde_json::to_string(&bare).map_err(backend)?;
     session.with(|client| {
         let mut transaction = client.transaction()?;
         let found = transaction.query_opt(&record, &[&mind.name.as_str()])?;
         if let Some(found) = found {
-            let found: Result<MindRecord, _> = serde_json::from_str(found.get(0));
-            return Ok(match found {
+            return Ok(match stored(found.get(0), found.get(1)) {
                 Ok(found) if found == *mind => Ok(()),
                 Ok(_) => Err(StoreError::Exists(mind.name.clone())),
-                Err(error) => Err(backend(error)),
+                Err(error) => Err(error),
             });
         }
         let (parent, inherited) = match mind.origin.shares() {
@@ -354,8 +361,9 @@ fn create(session: &mut Session, mind: &MindRecord, own: &[Row]) -> Result<(), S
                 (Some(parent.as_str()), inherited)
             }
         };
-        let row: [&(dyn postgres::types::ToSql + Sync); 4] =
-            [&mind.name.as_str(), &parent, &inherited, &written];
+        transaction.execute(&insert_settings, &[&digest, &settings])?;
+        let row: [&(dyn postgres::types::ToSql + Sync); 5] =
+            [&mind.name.as_str(), &parent, &inherited, &written, &digest];
         transaction.execute(&insert_mind, &row)?;
         let mut rows = Rows::default();
         for (at, row) in (inherited..).zip(own) {
@@ -555,13 +563,40 @@ impl Store for PostgresStore {
 
     fn minds(&self) -> Result<Vec<MindRecord>, StoreError> {
         self.reader.run(|session| {
+            // The minds first: their settings were stored with them, so
+            // all are there when read after.
             let statement = session.statement(MINDS)?;
+            let minds = session.with(|client| client.query(&statement, &[]))?;
+            // Each settings once, shared by every mind made with them.
+            let statement = session.statement(SETTINGS)?;
             let rows = session.with(|client| client.query(&statement, &[]))?;
-            rows.iter()
-                .map(|row| serde_json::from_str(row.get(0)).map_err(backend))
+            let mut shared = HashMap::new();
+            for row in rows {
+                let settings: MindSettings = serde_json::from_str(row.get(1)).map_err(backend)?;
+                shared.insert(row.get::<_, String>(0), Arc::new(settings));
+            }
+            minds
+                .iter()
+                .map(|row| {
+                    let settings = shared.get(row.get::<_, &str>(1)).cloned();
+                    let settings =
+                        settings.ok_or_else(|| backend("a mind's settings are missing"))?;
+                    let record: MindRecord = serde_json::from_str(row.get(0)).map_err(backend)?;
+                    Ok(MindRecord { settings, ..record })
+                })
                 .collect()
         })
     }
+}
+
+/// A record as stored, with the settings it was stored apart from.
+fn stored(record: &str, settings: &str) -> Result<MindRecord, StoreError> {
+    let record: MindRecord = serde_json::from_str(record).map_err(backend)?;
+    let settings: MindSettings = serde_json::from_str(settings).map_err(backend)?;
+    Ok(MindRecord {
+        settings: Arc::new(settings),
+        ..record
+    })
 }
 
 /// The rows `items` are stored as.

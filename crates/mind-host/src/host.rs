@@ -1,8 +1,8 @@
 use std::collections::btree_map::Entry;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use mensor_api::{Made, MindStatus, PAGE, Prompted, Token};
@@ -82,6 +82,9 @@ pub(crate) struct Inner {
     /// The `wait` of each mind that waits, by its name. Kept in memory
     /// alone: a mind that waits watches again when it wakes.
     waits: std::sync::Mutex<BTreeMap<Name, Wait>>,
+    /// The settings minds were made with, by their digest, so that minds
+    /// made the same way share one.
+    shared: std::sync::Mutex<HashMap<String, Weak<MindSettings>>>,
     /// Whether the host has stopped: every mind's task and hand's
     /// connection ends once it has.
     pub(crate) stopped: watch::Sender<bool>,
@@ -263,6 +266,16 @@ impl Host {
                 (record.name, slot)
             })
             .collect();
+        // The store gives minds made the same way one settings: each is
+        // shared from here.
+        let mut shared = HashMap::new();
+        let mut seen = HashSet::new();
+        for slot in minds.values() {
+            if seen.insert(Arc::as_ptr(&slot.record.settings)) {
+                let settings = &slot.record.settings;
+                shared.insert(settings.digest(), Arc::downgrade(settings));
+            }
+        }
         tracing::info!(minds = minds.len(), "the host is open");
         let inner = Inner {
             store,
@@ -271,6 +284,7 @@ impl Host {
             minds: Mutex::new(minds),
             links: AtomicU64::new(1),
             waits: std::sync::Mutex::default(),
+            shared: std::sync::Mutex::new(shared),
             stopped: watch::Sender::new(false),
         };
         let host = Self {
@@ -688,7 +702,7 @@ impl Host {
             None => MindRecord {
                 name: name.clone(),
                 origin: Origin::Root,
-                settings,
+                settings: self.share(settings),
             },
             Some(from) => {
                 let keeper = minds.get(&from.mind);
@@ -696,7 +710,7 @@ impl Host {
                 // An effort is in its model's words, so it goes with the
                 // model: one that names another model takes none from the
                 // keeper.
-                let mut kept = keeper.record.settings.clone();
+                let mut kept = MindSettings::clone(&keeper.record.settings);
                 let keepers = kept.model.as_deref().unwrap_or(self.inner.model.name());
                 if settings
                     .model
@@ -708,7 +722,7 @@ impl Host {
                 MindRecord {
                     name: name.clone(),
                     origin: Origin::From { from: from.clone() },
-                    settings: settings.or(&kept),
+                    settings: self.share(settings.or(&kept)),
                 }
             }
         };
@@ -755,6 +769,19 @@ impl Host {
             },
         );
         Ok(Made::Made)
+    }
+
+    /// `settings`, as shared by every mind made with them.
+    fn share(&self, settings: MindSettings) -> Arc<MindSettings> {
+        let shared = self.inner.shared.lock();
+        let mut shared = shared.unwrap_or_else(std::sync::PoisonError::into_inner);
+        let digest = settings.digest();
+        if let Some(settings) = shared.get(&digest).and_then(Weak::upgrade) {
+            return settings;
+        }
+        let settings = Arc::new(settings);
+        shared.insert(digest, Arc::downgrade(&settings));
+        settings
     }
 
     /// Refuses settings the host cannot ask with: a model it does not
@@ -973,7 +1000,7 @@ mod tests {
             let record = MindRecord {
                 name: name(mind),
                 origin: Origin::Root,
-                settings: with(Some(model), effort),
+                settings: Arc::new(with(Some(model), effort)),
             };
             let joined = Item::Attached {
                 hand: name("vm"),
@@ -990,7 +1017,9 @@ mod tests {
                 hand: name("vm"),
             })
         };
-        let settings = async |mind: &str| host.mind(&name(mind)).await.unwrap().mind.settings;
+        let settings = async |mind: &str| {
+            MindSettings::clone(&host.mind(&name(mind)).await.unwrap().mind.settings)
+        };
 
         // GPT's effort is checked as GPT's, on GPT.
         let made = host

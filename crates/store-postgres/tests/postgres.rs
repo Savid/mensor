@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use mensor_mind::{Item, MindRecord, MindSettings, Origin, Store, StoreError};
+use mensor_mind::{Item, MindRecord, Origin, Store, StoreError};
 use mensor_protocol::Name;
 use mensor_store_postgres::PostgresStore;
 use postgres::{Client, NoTls};
@@ -113,7 +113,7 @@ fn a_fork_stores_only_its_own_rows() {
             parent: name("a1"),
             inherited: 2,
         },
-        settings: MindSettings::default(),
+        settings: Arc::default(),
     };
     store.create(&child, &[prompt("b2")]).unwrap();
     let own: i64 = connect(&database)
@@ -163,21 +163,6 @@ fn a_schema_that_holds_other_tables_is_refused() {
     let database = database();
     connect(&database)
         .batch_execute("CREATE TABLE notes (text text)")
-        .unwrap();
-    let refused = PostgresStore::open(&plain(&database)).unwrap_err();
-    assert!(refused.to_string().contains("of its own"), "{refused}");
-}
-
-#[test]
-#[ignore = "needs Postgres: make test-postgres"]
-fn a_schema_an_older_mensor_made_is_refused() {
-    let database = database();
-    connect(&database)
-        .batch_execute(
-            "CREATE TABLE minds (name text PRIMARY KEY, parent text, inherited bigint NOT NULL);
-             CREATE TABLE items (mind text, at bigint, item json);
-             CREATE TABLE hold (taken bigint NOT NULL)",
-        )
         .unwrap();
     let refused = PostgresStore::open(&plain(&database)).unwrap_err();
     assert!(refused.to_string().contains("of its own"), "{refused}");

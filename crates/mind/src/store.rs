@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use mensor_protocol::Name;
 use serde::{Deserialize, Serialize};
@@ -80,6 +80,23 @@ impl MindSettings {
             system: self.system.or_else(|| under.system.clone()),
         }
     }
+
+    /// What a store keeps these under, once however many minds share
+    /// them: the SHA-256 of their JSON, in hex.
+    ///
+    /// # Panics
+    ///
+    /// Never: settings are strings, which JSON always holds.
+    pub fn digest(&self) -> String {
+        use sha2::Digest;
+        use std::fmt::Write;
+        let written = serde_json::to_vec(self).expect("settings are always written");
+        let mut digest = String::with_capacity(64);
+        for byte in sha2::Sha256::digest(written) {
+            let _ = write!(digest, "{byte:02x}");
+        }
+        digest
+    }
 }
 
 /// A mind as a store knows it: its name, where its history begins, and what
@@ -91,9 +108,9 @@ pub struct MindRecord {
     /// Where its history begins.
     #[serde(flatten)]
     pub origin: Origin,
-    /// What it was made with.
+    /// What it was made with, shared with every mind made the same way.
     #[serde(flatten)]
-    pub settings: MindSettings,
+    pub settings: Arc<MindSettings>,
 }
 
 impl MindRecord {
@@ -102,7 +119,7 @@ impl MindRecord {
         Self {
             name,
             origin: Origin::Root,
-            settings: MindSettings::default(),
+            settings: Arc::default(),
         }
     }
 }
@@ -405,7 +422,7 @@ mod tests {
                 parent: name("a1"),
                 inherited: 4,
             },
-            settings: MindSettings::default(),
+            settings: Arc::default(),
         };
         let made = MindRecord {
             name: name("r2"),
@@ -416,11 +433,11 @@ mod tests {
                     hand: name("vm"),
                 },
             },
-            settings: MindSettings {
+            settings: Arc::new(MindSettings {
                 model: Some("claude-haiku-5-5".into()),
                 effort: None,
                 system: Some("Play.".into()),
-            },
+            }),
         };
         let cases = [
             (

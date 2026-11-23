@@ -292,10 +292,10 @@ mod tests {
                         hand: Name::new("vm").unwrap(),
                     },
                 },
-                settings: MindSettings {
+                settings: std::sync::Arc::new(MindSettings {
                     model: Some("claude-haiku-5-5".into()),
                     ..MindSettings::default()
-                },
+                }),
             },
             state: State::Ended,
             hands: Vec::new(),
