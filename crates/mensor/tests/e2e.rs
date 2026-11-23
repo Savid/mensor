@@ -409,7 +409,7 @@ async fn a_prompt_runs_a_command_on_the_hand_and_is_answered() {
         matches!(&told.content[0], Content::ToolResult { text, error: false, .. } if text.contains("hello"))
     );
 
-    let minds = server.host.minds().await;
+    let minds = server.host.minds().await.unwrap();
     assert_eq!(minds.len(), 1);
     assert_eq!(minds[0].mind.origin, Origin::Root);
 }
@@ -541,7 +541,7 @@ async fn a_fork_makes_a_child_that_works_in_a_copy_of_the_hand() {
 
     server.prompt("m", "write a note, then fork").await;
     eventually("the child exists and is done", || async {
-        let minds = server.host.minds().await;
+        let minds = server.host.minds().await.unwrap();
         minds.len() == 2
             && minds
                 .iter()
@@ -549,7 +549,7 @@ async fn a_fork_makes_a_child_that_works_in_a_copy_of_the_hand() {
     })
     .await;
 
-    let minds = server.host.minds().await;
+    let minds = server.host.minds().await.unwrap();
     let child = minds
         .iter()
         .find(|status| status.mind.name != name("m"))
@@ -674,7 +674,7 @@ async fn only_a_parent_makes_a_mind_with_a_child_name() {
         "{error}"
     );
     assert!(started.elapsed() >= Duration::from_millis(500));
-    assert!(server.host.minds().await.is_empty());
+    assert!(server.host.minds().await.unwrap().is_empty());
 
     // A name too long to have children is refused for good.
     let long = "x".repeat(Name::ROOT_MAX_LEN + 1);
@@ -937,7 +937,7 @@ async fn a_host_with_a_token_serves_only_those_who_hold_it() {
     let (_stranger, refused) = server.hand_with(fresh("x", "a1"), dir.path(), Some("wrong"));
     let error = ended(refused).await.unwrap_err();
     assert!(matches!(error, Error::Unauthorized), "{error}");
-    assert!(server.host.minds().await.is_empty());
+    assert!(server.host.minds().await.unwrap().is_empty());
 
     let (_hand, _task) = server.hand_with(fresh("m", "a1"), dir.path(), Some("secret"));
     server.settled("m").await;
@@ -1050,7 +1050,7 @@ async fn a_fork_child_joins_with_its_parents_token() {
     eventually(
         "the child's hand has joined it, and both are done",
         || async {
-            let minds = server.host.minds().await;
+            let minds = server.host.minds().await.unwrap();
             minds.len() == 2
                 && minds
                     .iter()
@@ -1181,7 +1181,7 @@ async fn a_host_without_a_token_serves_only_its_own_machine() {
             .await
             .contains(" 403 ")
     );
-    assert!(server.host.minds().await.is_empty());
+    assert!(server.host.minds().await.unwrap().is_empty());
 }
 
 /// The address of something that answers every request 403, with `body`.
@@ -1368,7 +1368,7 @@ async fn a_mind_with_nothing_to_do_rests_in_the_store_and_wakes_when_needed() {
         (status.state, status.hands.len(), status.length),
         (State::Idle, 0, 3)
     );
-    assert_eq!(server.host.minds().await.len(), 1);
+    assert_eq!(server.host.minds().await.unwrap().len(), 1);
     assert_eq!(server.history("m").len(), 3);
     assert_eq!(server.host.awake().await, 0);
 
@@ -1890,6 +1890,10 @@ impl Store for StopsAfterFork {
         self.inner.prompt(name, key)
     }
 
+    fn live(&self) -> Result<Vec<Name>, StoreError> {
+        self.inner.live()
+    }
+
     fn minds(&self) -> Result<Vec<MindRecord>, StoreError> {
         self.inner.minds()
     }
@@ -1925,7 +1929,7 @@ async fn a_fork_its_host_stopped_in_is_made_once() {
     // result once more.
     server.prompt("m", "fork").await;
     eventually("both minds are done", || async {
-        let minds = server.host.minds().await;
+        let minds = server.host.minds().await.unwrap();
         minds.len() == 2 && minds.iter().all(|status| status.state == State::Idle)
     })
     .await;
@@ -1936,7 +1940,7 @@ async fn a_fork_its_host_stopped_in_is_made_once() {
         .filter(|item| matches!(item, Item::Forked { .. }))
         .count();
     assert_eq!(forks, 1);
-    let minds = server.host.minds().await;
+    let minds = server.host.minds().await.unwrap();
     let child = &minds
         .iter()
         .find(|status| status.mind.name != name("m"))
@@ -2077,7 +2081,7 @@ async fn waits_through_a_restart(open: impl Fn() -> Arc<dyn Store>, root: &Path)
     eventually(
         "the parent waits for a child that runs a command",
         || async {
-            let minds = first.host.minds().await;
+            let minds = first.host.minds().await.unwrap();
             let parent = minds.iter().find(|status| status.mind.name == name("m"));
             let working = minds
                 .iter()
@@ -2186,7 +2190,7 @@ async fn a_parent_that_rests_while_it_waits_hears_from_its_child() {
     // The parent lets its hand go, and rests while its child works. Told
     // from the store, it still says whom it waits for.
     server.host.release(&name("m"), name("a1")).await.unwrap();
-    let minds = server.host.minds().await;
+    let minds = server.host.minds().await.unwrap();
     let child = &minds
         .iter()
         .find(|status| status.mind.name != name("m"))
@@ -2573,11 +2577,11 @@ async fn a_fork_child_is_made_with_its_parents_settings() {
     server.settled("m").await;
     server.prompt("m", "write a note, then fork").await;
     eventually("the child is done", || async {
-        let minds = server.host.minds().await;
+        let minds = server.host.minds().await.unwrap();
         minds.len() == 2 && minds.iter().all(|status| status.state == State::Idle)
     })
     .await;
-    for status in server.host.minds().await {
+    for status in server.host.minds().await.unwrap() {
         let model = status.mind.settings.model;
         assert_eq!(model.as_deref(), Some("claude-haiku-5-5"));
     }
@@ -2613,11 +2617,11 @@ async fn a_message_to_a_parent_that_has_ended_does_not_run() {
     server.settled("m").await;
     server.prompt("m", "write a note, then fork").await;
     eventually("the child is done", || async {
-        let minds = server.host.minds().await;
+        let minds = server.host.minds().await.unwrap();
         minds.len() == 2 && minds.iter().all(|status| status.state == State::Idle)
     })
     .await;
-    let child = server.host.minds().await[1].mind.name.clone();
+    let child = server.host.minds().await.unwrap()[1].mind.name.clone();
 
     assert_eq!(end(&server, "m").await.0, 200);
     server.prompt(child.as_str(), "tell your parent").await;

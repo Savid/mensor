@@ -98,15 +98,29 @@ const READ: &str = lineage_rows!(
     "items.item::text",
     "items.at >= $4 ORDER BY items.at LIMIT $5"
 );
-const LAST: &str = lineage_rows!(
-    "items.item::text",
-    "items.kind = $4 ORDER BY items.at DESC LIMIT 1"
-);
+/// The last item of a lineage that `$filter` holds for. Each mind of the
+/// lineage is searched back from its end, which stops at the first match,
+/// and the youngest of those is the one: a join over the whole lineage
+/// would read every match to keep one.
+macro_rules! lineage_last {
+    ($filter:literal) => {
+        concat!(
+            "SELECT last.item FROM unnest($1::text[], $2::bigint[], $3::bigint[]) \
+             AS lineage (mind, low, high) CROSS JOIN LATERAL ( \
+             SELECT items.at, items.item::text AS item FROM items \
+             WHERE items.mind = lineage.mind AND items.at >= lineage.low \
+             AND items.at < lineage.high AND ",
+            $filter,
+            " ORDER BY items.at DESC LIMIT 1) AS last ORDER BY last.at DESC LIMIT 1"
+        )
+    };
+}
+
+const LAST: &str = lineage_last!("items.kind = $4");
 /// The last summary, which the index of them finds however long the history.
-const LAST_SUMMARY: &str = lineage_rows!(
-    "items.item::text",
-    "items.kind = 'summary' ORDER BY items.at DESC LIMIT 1"
-);
+const LAST_SUMMARY: &str = lineage_last!("items.kind = 'summary'");
+/// A keyed prompt, which the index of keys finds: searched back from each
+/// mind's end it would read every item, as a new key matches none.
 const KEYED: &str = lineage_rows!(
     "items.item::text",
     "items.key = $4 ORDER BY items.at DESC LIMIT 1"
@@ -119,6 +133,8 @@ const KNOWN: &str = lineage_rows!(
 );
 
 const MINDS: &str = "SELECT record::text FROM minds ORDER BY made";
+const LIVE: &str = "SELECT name FROM minds WHERE NOT EXISTS (SELECT 1 FROM items \
+     WHERE items.mind = minds.name AND items.kind = 'ended') ORDER BY made";
 const RECORD: &str = "SELECT record::text FROM minds WHERE name = $1";
 /// Whether the minds in the schema have records: an older mensor's had none.
 const RECORDS: &str = "SELECT count(*) FROM information_schema.columns \
@@ -524,6 +540,16 @@ impl Store for PostgresStore {
                 Some(Item::Prompt { text, .. }) => Some(text),
                 _ => None,
             })
+        })
+    }
+
+    fn live(&self) -> Result<Vec<Name>, StoreError> {
+        self.reader.run(|session| {
+            let statement = session.statement(LIVE)?;
+            let rows = session.with(|client| client.query(&statement, &[]))?;
+            rows.iter()
+                .map(|row| Name::new(row.get::<_, &str>(0)).map_err(backend))
+                .collect()
         })
     }
 

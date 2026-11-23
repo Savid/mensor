@@ -141,18 +141,19 @@ impl<S: Send + Sync> FromRequestParts<S> for Reached {
     }
 }
 
-/// Every mind the request reaches. Each is listed without its system
-/// prompt, which a fork's children share with it: `GET` one mind for that.
+/// Every mind the request reaches that has not ended. Each is listed
+/// without its system prompt, which a fork's children share with it: `GET`
+/// one mind for that.
 async fn minds(
     State(host): State<Host>,
     Extension(access): Extension<Access>,
-) -> Json<Vec<MindStatus>> {
-    let mut minds = host.minds().await;
+) -> Result<Json<Vec<MindStatus>>, HostError> {
+    let mut minds = host.minds().await?;
     minds.retain(|status| access.reaches(&status.mind.name));
     for status in &mut minds {
         status.mind.settings.system = None;
     }
-    Json(minds)
+    Ok(Json(minds))
 }
 
 async fn mind(

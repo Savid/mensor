@@ -286,10 +286,11 @@ impl Host {
     fn resume(&self) {
         let host = self.clone();
         tokio::spawn(async move {
-            let names: Vec<Name> = host.inner.minds.lock().await.keys().cloned().collect();
             let store = Arc::clone(&host.inner.store);
             let working = blocking(move || {
-                let working = names.into_iter().filter(|name| match store.recent(name) {
+                // A mind that has ended has nothing to do.
+                let live = store.live()?;
+                let working = live.into_iter().filter(|name| match store.recent(name) {
                     Ok(latest) => {
                         let status = Mind::status(name.clone(), latest);
                         matches!(status.state, State::Thinking | State::Working)
@@ -302,7 +303,10 @@ impl Host {
                 Ok(working.collect::<Vec<_>>())
             })
             .await
-            .unwrap_or_default();
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "the minds that have not ended could not be read");
+                Vec::new()
+            });
             let mut minds = host.inner.minds.lock().await;
             for name in working {
                 if let Some(slot) = minds.get_mut(&name) {
@@ -349,11 +353,17 @@ impl Host {
         minds.values().filter(|slot| slot.awake.is_some()).count()
     }
 
-    /// Every mind, in the order of their names.
-    pub async fn minds(&self) -> Vec<MindStatus> {
+    /// Every mind that has not ended, in the order of their names.
+    pub async fn minds(&self) -> Result<Vec<MindStatus>, HostError> {
+        let store = Arc::clone(&self.inner.store);
+        let live = blocking(move || store.live())
+            .await
+            .map_err(HostError::Store)?;
+        let live: BTreeSet<Name> = live.into_iter().collect();
         let known: Vec<Known> = {
             let minds = self.inner.minds.lock().await;
-            minds.values().map(Known::of).collect()
+            let live = live.iter().filter_map(|name| minds.get(name));
+            live.map(Known::of).collect()
         };
         let mut statuses = Vec::with_capacity(known.len());
         for known in known {
@@ -361,7 +371,7 @@ impl Host {
                 statuses.push(status);
             }
         }
-        statuses
+        Ok(statuses)
     }
 
     /// One mind.
