@@ -997,7 +997,8 @@ mod tests {
                 input: 12,
                 cache_read: 90,
                 cache_written: 5,
-                output: 7
+                output: 7,
+                ..Usage::default()
             }
         );
     }
@@ -1161,7 +1162,8 @@ mod tests {
                 input: 20,
                 cache_read: 80,
                 cache_written: 0,
-                output: 7
+                output: 7,
+                ..Usage::default()
             }
         );
 

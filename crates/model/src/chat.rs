@@ -351,6 +351,7 @@ pub(crate) fn reply(body: &str) -> Result<ModelReply, String> {
             cache_read: read,
             cache_written: written,
             output: usage.completion_tokens,
+            ..Usage::default()
         }
     });
     Ok(ModelReply {
@@ -716,7 +717,8 @@ mod tests {
                 input: 5,
                 cache_read: 80,
                 cache_written: 15,
-                output: 7
+                output: 7,
+                ..Usage::default()
             }
         );
         // A server whose prompt count leaves the cache out, or that writes

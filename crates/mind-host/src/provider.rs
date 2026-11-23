@@ -4,6 +4,8 @@
 //! the sending: one HTTP request per attempt, read as it streams, with the
 //! waits it asks for.
 
+use std::time::{Duration, Instant};
+
 use mensor_mind::{ModelReply, ModelRequest};
 use mensor_model::{Answer, Config, Exchange, Next};
 use reqwest::Client;
@@ -37,10 +39,18 @@ impl Provider {
         wrote: &mut Wrote,
     ) -> Result<ModelReply, ModelError> {
         let mut exchange = Exchange::new(&self.config, request);
+        let asked = Instant::now();
         loop {
-            let answer = self.send(&exchange, wrote).await?;
+            let (answer, first) = self.send(&exchange, wrote).await?;
             match exchange.answered(answer) {
-                Next::Done(done) => return done,
+                Next::Done(done) => {
+                    return done.map(|mut reply| {
+                        let ms = |took: Duration| u64::try_from(took.as_millis()).ok();
+                        reply.usage.first_ms = first.and_then(ms);
+                        reply.usage.took_ms = ms(asked.elapsed());
+                        reply
+                    });
+                }
                 Next::Again { wait, why } => {
                     tracing::warn!(error = %why, ?wait, "the model request failed: trying again");
                     tokio::time::sleep(wait).await;
@@ -50,8 +60,15 @@ impl Provider {
     }
 
     /// Sends one request and reads what comes back: a stream of events as
-    /// it arrives, and anything else whole.
-    async fn send(&self, exchange: &Exchange<'_>, wrote: &mut Wrote) -> Result<Answer, ModelError> {
+    /// it arrives, and anything else whole. Says too how long a stream's
+    /// first bytes took to come.
+    async fn send(
+        &self,
+        exchange: &Exchange<'_>,
+        wrote: &mut Wrote,
+    ) -> Result<(Answer, Option<Duration>), ModelError> {
+        let sent = Instant::now();
+        let mut first = None;
         let post = exchange.post();
         let mut sending = self
             .http
@@ -67,7 +84,7 @@ impl Provider {
         let lost = |error: reqwest::Error| error.without_url().to_string();
         let mut response = match sending.send().await {
             Ok(response) => response,
-            Err(error) => return Ok(Answer::Unreachable(lost(error))),
+            Err(error) => return Ok((Answer::Unreachable(lost(error)), None)),
         };
         let status = response.status();
         let header = |name: &str| {
@@ -81,7 +98,10 @@ impl Provider {
             let mut reading = exchange.reading();
             loop {
                 match response.chunk().await {
-                    Ok(Some(bytes)) => reading.read(&bytes, wrote),
+                    Ok(Some(bytes)) => {
+                        first.get_or_insert_with(|| sent.elapsed());
+                        reading.read(&bytes, wrote);
+                    }
                     Ok(None) => break reading.finish(),
                     Err(error) => break Err(lost(error)),
                 }
@@ -89,7 +109,7 @@ impl Provider {
         } else {
             response.text().await.map_err(lost)
         };
-        Ok(match body {
+        let answer = match body {
             Ok(body) => Answer::Response {
                 status: status.as_u16(),
                 retry_after,
@@ -97,7 +117,8 @@ impl Provider {
                 body,
             },
             Err(lost) => Answer::Unreachable(lost),
-        })
+        };
+        Ok((answer, first))
     }
 }
 

@@ -223,6 +223,7 @@ pub(crate) fn reply(body: &str) -> Result<ModelReply, String> {
         cache_read: reply.usage.cache_read.unwrap_or(0),
         cache_written: reply.usage.cache_written.unwrap_or(0),
         output: reply.usage.output.unwrap_or(0),
+        ..Usage::default()
     };
     Ok(ModelReply {
         model: reply.model,
@@ -534,7 +535,8 @@ mod tests {
                 input: 10,
                 cache_read: 90,
                 cache_written: 5,
-                output: 7
+                output: 7,
+                ..Usage::default()
             }
         );
     }
