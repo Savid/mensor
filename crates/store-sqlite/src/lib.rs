@@ -542,8 +542,12 @@ impl Store for SqliteStore {
         let connection = self.reading();
         let mut select = connection
             .prepare_cached(
-                "SELECT name FROM minds WHERE NOT EXISTS (SELECT 1 FROM items \
-                 WHERE items.mind = minds.name AND items.kind = 'ended') ORDER BY made",
+                // Searched in the index of what minds know, not every item:
+                // its kinds are said again so that SQLite may use it.
+                "SELECT name FROM minds WHERE NOT EXISTS (SELECT 1 FROM items INDEXED BY knowing \
+                 WHERE items.mind = minds.name AND items.kind = 'ended' \
+                 AND items.kind IN ('summary', 'attached', 'cloned', 'released', 'forked', \
+                 'parted', 'branched', 'ended')) ORDER BY made",
             )
             .map_err(backend)?;
         let rows = select

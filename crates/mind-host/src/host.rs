@@ -303,7 +303,10 @@ impl Host {
                 Ok(working.collect::<Vec<_>>())
             })
             .await
-            .unwrap_or_default();
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "the minds that have not ended could not be read");
+                Vec::new()
+            });
             let mut minds = host.inner.minds.lock().await;
             for name in working {
                 if let Some(slot) = minds.get_mut(&name) {
@@ -351,15 +354,12 @@ impl Host {
     }
 
     /// Every mind that has not ended, in the order of their names.
-    pub async fn minds(&self) -> Vec<MindStatus> {
+    pub async fn minds(&self) -> Result<Vec<MindStatus>, HostError> {
         let store = Arc::clone(&self.inner.store);
-        let live = match blocking(move || store.live()).await {
-            Ok(live) => live.into_iter().collect::<BTreeSet<_>>(),
-            Err(error) => {
-                tracing::warn!(%error, "the minds that have not ended could not be read");
-                return Vec::new();
-            }
-        };
+        let live = blocking(move || store.live())
+            .await
+            .map_err(HostError::Store)?;
+        let live: BTreeSet<Name> = live.into_iter().collect();
         let known: Vec<Known> = {
             let minds = self.inner.minds.lock().await;
             let live = live.iter().filter_map(|name| minds.get(name));
@@ -371,7 +371,7 @@ impl Host {
                 statuses.push(status);
             }
         }
-        statuses
+        Ok(statuses)
     }
 
     /// One mind.

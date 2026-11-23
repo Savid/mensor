@@ -119,7 +119,12 @@ macro_rules! lineage_last {
 const LAST: &str = lineage_last!("items.kind = $4");
 /// The last summary, which the index of them finds however long the history.
 const LAST_SUMMARY: &str = lineage_last!("items.kind = 'summary'");
-const KEYED: &str = lineage_last!("items.key = $4");
+/// A keyed prompt, which the index of keys finds: searched back from each
+/// mind's end it would read every item, as a new key matches none.
+const KEYED: &str = lineage_rows!(
+    "items.item::text",
+    "items.key = $4 ORDER BY items.at DESC LIMIT 1"
+);
 const KNOWN: &str = lineage_rows!(
     "items.at, items.item::text",
     "items.at >= $4 \
