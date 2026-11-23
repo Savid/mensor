@@ -221,28 +221,27 @@ impl Task {
         let outputs = self.mind.start();
         self.perform(outputs).await?;
         loop {
-            let resting =
-                self.links.is_empty() && self.asking.is_none() && self.told.receiver_count() == 0;
-            let command = if resting {
-                tokio::select! {
-                    received = timeout(self.rest_after, self.commands.recv()) => match received {
-                        Ok(command) => command,
-                        Err(_) if self.rest().await => return Ok(()),
-                        Err(_) => continue,
-                    },
-                    () = stopped(&mut self.stopped) => return Ok(()),
-                }
-            } else {
-                tokio::select! {
-                    command = self.commands.recv() => command,
-                    () = stopped(&mut self.stopped) => return Ok(()),
-                }
+            // A follower that leaves sends no command, so whether the mind
+            // may rest is asked again each time it has had none for a while.
+            let command = tokio::select! {
+                received = timeout(self.rest_after, self.commands.recv()) => match received {
+                    Ok(command) => command,
+                    Err(_) if self.idle() && self.rest().await => return Ok(()),
+                    Err(_) => continue,
+                },
+                () = stopped(&mut self.stopped) => return Ok(()),
             };
             let Some(command) = command else {
                 return Ok(());
             };
             self.handle(command).await?;
         }
+    }
+
+    /// Whether nothing keeps the mind awake: no hand, no model asked and
+    /// nobody following it.
+    fn idle(&self) -> bool {
+        self.links.is_empty() && self.asking.is_none() && self.told.receiver_count() == 0
     }
 
     /// Leaves the host's memory, unless someone is on their way here.
