@@ -301,7 +301,7 @@ impl From<Reply> for Outcome {
     }
 }
 
-/// What one step cost, in tokens, each kind priced on its own.
+/// What one step cost: in tokens, each kind priced on its own, and in time.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Usage {
@@ -317,6 +317,18 @@ pub struct Usage {
     /// Tokens written.
     #[serde(default)]
     pub output: u64,
+    /// Milliseconds from sending the request that was answered to the
+    /// first of the reply in its streamed answer: when the model began to
+    /// answer, reasoning included. Absent for an answer that did not
+    /// stream, and where the host measures nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_token_ms: Option<u64>,
+    /// Milliseconds from sending the request that was answered to the end
+    /// of its answer, so that less `firstTokenMs` is the time the model
+    /// spent writing. Failed attempts before it are not counted. Absent
+    /// where the host measures nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub took_ms: Option<u64>,
 }
 
 impl Usage {
@@ -390,13 +402,16 @@ mod tests {
                         cache_read: 90,
                         cache_written: 5,
                         output: 2,
+                        first_token_ms: Some(800),
+                        took_ms: Some(2100),
                     },
                     model: Some("claude-sonnet-5-5".into()),
                     under: Some("0123456789abcdef".into()),
                 },
                 json!({"type": "step", "seen": 1, "content": [{"type": "text", "text": "ok"}],
                        "stop": "end_turn",
-                       "usage": {"input": 10, "cacheRead": 90, "cacheWritten": 5, "output": 2},
+                       "usage": {"input": 10, "cacheRead": 90, "cacheWritten": 5, "output": 2,
+                                 "firstTokenMs": 800, "tookMs": 2100},
                        "model": "claude-sonnet-5-5", "under": "0123456789abcdef"}),
             ),
         ];

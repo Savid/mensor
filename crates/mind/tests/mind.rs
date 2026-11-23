@@ -864,8 +864,8 @@ fn costing(read: u64, output: u64) -> Usage {
     Usage {
         input: 1,
         cache_read: read - 1,
-        cache_written: 0,
         output,
+        ..Usage::default()
     }
 }
 

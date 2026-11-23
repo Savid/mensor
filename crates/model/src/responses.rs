@@ -387,6 +387,7 @@ pub(crate) fn reply(body: &str) -> Result<ModelReply, String> {
             cache_read: read,
             cache_written: written,
             output: usage.output_tokens.unwrap_or(0),
+            ..Usage::default()
         }
     });
     Ok(ModelReply {
@@ -418,6 +419,8 @@ pub(crate) struct Parts {
     done: BTreeMap<u64, Value>,
     /// The index of the message whose text came last.
     writing: Option<u64>,
+    /// Whether an output item has begun.
+    began: bool,
     error: Option<String>,
 }
 
@@ -426,6 +429,8 @@ pub(crate) struct Parts {
 enum Event {
     #[serde(rename = "response.output_text.delta")]
     Text { output_index: u64, delta: String },
+    #[serde(rename = "response.output_item.added")]
+    ItemAdded,
     #[serde(rename = "response.output_item.done")]
     ItemDone { output_index: u64, item: Value },
     #[serde(rename = "response.completed")]
@@ -465,9 +470,12 @@ impl Parts {
                     text.push_str("\n\n");
                 }
                 self.writing = Some(output_index);
+                self.began = true;
                 text.push_str(&delta);
             }
+            Event::ItemAdded => self.began = true,
             Event::ItemDone { output_index, item } => {
+                self.began = true;
                 self.done.insert(output_index, item);
             }
             Event::Completed { response } => self.response = Some(response),
@@ -486,6 +494,11 @@ impl Parts {
             }
             Event::Other => {}
         }
+    }
+
+    /// Whether the model has begun to answer: an output item has begun.
+    pub(crate) fn began(&self) -> bool {
+        self.began
     }
 
     pub(crate) fn finish(self) -> Result<String, String> {
@@ -738,7 +751,8 @@ mod tests {
                 input: 10,
                 cache_read: 60,
                 cache_written: 30,
-                output: 2
+                output: 2,
+                ..Usage::default()
             }
         );
 

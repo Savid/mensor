@@ -351,6 +351,7 @@ pub(crate) fn reply(body: &str) -> Result<ModelReply, String> {
             cache_read: read,
             cache_written: written,
             output: usage.completion_tokens,
+            ..Usage::default()
         }
     });
     Ok(ModelReply {
@@ -509,6 +510,15 @@ impl Parts {
         if let Some(arguments) = function.arguments {
             call.function.arguments.push_str(&arguments);
         }
+    }
+
+    /// Whether the model has begun to answer: some of its content, refusal,
+    /// tool calls or reasoning has come.
+    pub(crate) fn began(&self) -> bool {
+        !(self.content.is_empty()
+            && self.refusal.is_empty()
+            && self.calls.is_empty()
+            && self.reasoning.is_empty())
     }
 
     pub(crate) fn finish(self) -> Result<String, String> {
@@ -716,7 +726,8 @@ mod tests {
                 input: 5,
                 cache_read: 80,
                 cache_written: 15,
-                output: 7
+                output: 7,
+                ..Usage::default()
             }
         );
         // A server whose prompt count leaves the cache out, or that writes

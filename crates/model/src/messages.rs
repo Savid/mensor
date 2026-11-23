@@ -223,6 +223,7 @@ pub(crate) fn reply(body: &str) -> Result<ModelReply, String> {
         cache_read: reply.usage.cache_read.unwrap_or(0),
         cache_written: reply.usage.cache_written.unwrap_or(0),
         output: reply.usage.output.unwrap_or(0),
+        ..Usage::default()
     };
     Ok(ModelReply {
         model: reply.model,
@@ -386,6 +387,12 @@ impl Parts {
         }
     }
 
+    /// Whether the model has begun to answer: a block of its reply has
+    /// begun.
+    pub(crate) fn began(&self) -> bool {
+        !self.content.is_empty()
+    }
+
     pub(crate) fn finish(mut self) -> Result<String, String> {
         if let Some(error) = self.error {
             return Err(error);
@@ -534,7 +541,8 @@ mod tests {
                 input: 10,
                 cache_read: 90,
                 cache_written: 5,
-                output: 7
+                output: 7,
+                ..Usage::default()
             }
         );
     }

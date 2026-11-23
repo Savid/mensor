@@ -462,6 +462,16 @@ impl Reading {
         }
     }
 
+    /// Whether the model has begun to answer: some of its reply, of any
+    /// kind, has come, beyond the events that only open the stream.
+    pub fn began(&self) -> bool {
+        match &self.parts {
+            Parts::Messages(parts) => parts.began(),
+            Parts::Chat(parts) => parts.began(),
+            Parts::Responses(parts) => parts.began(),
+        }
+    }
+
     /// The body the stream amounts to, as an API that does not stream
     /// would have sent it, for [`Answer::Response`]. An error is a reply
     /// that never ended, which is told as [`Answer::Unreachable`].
@@ -997,7 +1007,8 @@ mod tests {
                 input: 12,
                 cache_read: 90,
                 cache_written: 5,
-                output: 7
+                output: 7,
+                ..Usage::default()
             }
         );
     }
@@ -1161,7 +1172,8 @@ mod tests {
                 input: 20,
                 cache_read: 80,
                 cache_written: 0,
-                output: 7
+                output: 7,
+                ..Usage::default()
             }
         );
 
