@@ -39,15 +39,14 @@ impl Provider {
         wrote: &mut Wrote,
     ) -> Result<ModelReply, ModelError> {
         let mut exchange = Exchange::new(&self.config, request);
-        let asked = Instant::now();
         loop {
-            let (answer, first) = self.send(&exchange, wrote).await?;
+            let (answer, (first, took)) = self.send(&exchange, wrote).await?;
             match exchange.answered(answer) {
                 Next::Done(done) => {
                     return done.map(|mut reply| {
-                        let ms = |took: Duration| u64::try_from(took.as_millis()).ok();
-                        reply.usage.first_ms = first.and_then(ms);
-                        reply.usage.took_ms = ms(asked.elapsed());
+                        let ms = |time: Duration| u64::try_from(time.as_millis()).ok();
+                        reply.usage.first_token_ms = first.and_then(ms);
+                        reply.usage.took_ms = ms(took);
                         reply
                     });
                 }
@@ -60,14 +59,13 @@ impl Provider {
     }
 
     /// Sends one request and reads what comes back: a stream of events as
-    /// it arrives, and anything else whole. Says too how long a stream's
-    /// first bytes took to come.
+    /// it arrives, and anything else whole. Says too how long the model
+    /// took to begin its streamed answer, and how long the request took.
     async fn send(
         &self,
         exchange: &Exchange<'_>,
         wrote: &mut Wrote,
-    ) -> Result<(Answer, Option<Duration>), ModelError> {
-        let sent = Instant::now();
+    ) -> Result<(Answer, (Option<Duration>, Duration)), ModelError> {
         let mut first = None;
         let post = exchange.post();
         let mut sending = self
@@ -82,9 +80,10 @@ impl Provider {
             sending = sending.header(*name, value);
         }
         let lost = |error: reqwest::Error| error.without_url().to_string();
+        let sent = Instant::now();
         let mut response = match sending.send().await {
             Ok(response) => response,
-            Err(error) => return Ok((Answer::Unreachable(lost(error)), None)),
+            Err(error) => return Ok((Answer::Unreachable(lost(error)), (None, sent.elapsed()))),
         };
         let status = response.status();
         let header = |name: &str| {
@@ -99,8 +98,10 @@ impl Provider {
             loop {
                 match response.chunk().await {
                     Ok(Some(bytes)) => {
-                        first.get_or_insert_with(|| sent.elapsed());
                         reading.read(&bytes, wrote);
+                        if reading.began() {
+                            first.get_or_insert_with(|| sent.elapsed());
+                        }
                     }
                     Ok(None) => break reading.finish(),
                     Err(error) => break Err(lost(error)),
@@ -118,7 +119,7 @@ impl Provider {
             },
             Err(lost) => Answer::Unreachable(lost),
         };
-        Ok((answer, first))
+        Ok((answer, (first, sent.elapsed())))
     }
 }
 
@@ -315,6 +316,7 @@ mod tests {
             }]
         );
         assert_eq!((reply.usage.input, reply.usage.output), (9, 2));
+        assert!(reply.usage.first_token_ms.is_some());
     }
 
     #[tokio::test]

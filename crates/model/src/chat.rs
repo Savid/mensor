@@ -512,6 +512,15 @@ impl Parts {
         }
     }
 
+    /// Whether the model has begun to answer: some of its content, refusal,
+    /// tool calls or reasoning has come.
+    pub(crate) fn began(&self) -> bool {
+        !(self.content.is_empty()
+            && self.refusal.is_empty()
+            && self.calls.is_empty()
+            && self.reasoning.is_empty())
+    }
+
     pub(crate) fn finish(self) -> Result<String, String> {
         if let Some(error) = self.error {
             return Err(error);

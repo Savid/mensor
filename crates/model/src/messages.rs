@@ -387,6 +387,12 @@ impl Parts {
         }
     }
 
+    /// Whether the model has begun to answer: a block of its reply has
+    /// begun.
+    pub(crate) fn began(&self) -> bool {
+        !self.content.is_empty()
+    }
+
     pub(crate) fn finish(mut self) -> Result<String, String> {
         if let Some(error) = self.error {
             return Err(error);
