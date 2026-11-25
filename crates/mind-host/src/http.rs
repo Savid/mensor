@@ -16,7 +16,7 @@ use futures_util::stream::{self, Stream};
 use futures_util::{SinkExt, StreamExt};
 use mensor_api::{
     Access, History, MakeBody, MindStatus, PAGE, Problem, PromptBody, PromptReply, ReleaseBody,
-    Token, Writing, local,
+    Token, TrimBody, Writing, local,
 };
 use mensor_mind::{Item, MindSettings, StoreError};
 use mensor_protocol::{FromHand, Hello, MAX_FRAME_BYTES, NOT_LOCAL, Name, Refusal};
@@ -38,6 +38,7 @@ impl Host {
             .route("/v1/minds/{name}/prompt", post(prompt))
             .route("/v1/minds/{name}/interrupt", post(interrupt))
             .route("/v1/minds/{name}/release", post(release))
+            .route("/v1/minds/{name}/trim", post(trim))
             .route("/v1/minds/{name}/end", post(end))
             .route("/v1/minds/{name}/history", get(history))
             .route("/v1/minds/{name}/events", get(events))
@@ -157,6 +158,7 @@ async fn minds(
             system: None,
             model: settings.model.clone(),
             effort: settings.effort.clone(),
+            trim: settings.trim,
         });
     }
     Ok(Json(minds))
@@ -220,6 +222,14 @@ async fn release(
     Body(body): Body<ReleaseBody>,
 ) -> Result<Json<MindStatus>, HostError> {
     Ok(Json(host.release(&name, body.hand).await?))
+}
+
+async fn trim(
+    State(host): State<Host>,
+    Reached(name): Reached,
+    Body(body): Body<TrimBody>,
+) -> Result<Json<MindStatus>, HostError> {
+    Ok(Json(host.trim(&name, body.keep).await?))
 }
 
 #[derive(Deserialize)]

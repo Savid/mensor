@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use crate::fork::{Fork, child_name, shares};
 use crate::tools::{CLONE, Does, HAND, MAX_CHILDREN, MindTool, Table, split, wait_time};
-use crate::window::{to_summarise, window};
+use crate::window::{sent, to_summarise, trimmed, window};
 use crate::{
     Block, Content, HandRecord, Item, Latest, MadeFrom, Message, MindSettings, ModelReply,
     ModelRequest, Outcome, Stop,
@@ -1360,6 +1360,9 @@ impl Mind {
                     self.append(item, outputs);
                 }
                 Next::Ask if self.asking.is_none() && self.may_ask() => {
+                    if let Some(before) = self.due_trim() {
+                        self.append(Item::Trimmed { before }, outputs);
+                    }
                     let (request, under) = self.request();
                     self.asking = Some(Asking {
                         seen: request.seen,
@@ -2182,26 +2185,101 @@ impl Mind {
     }
 
     /// Whether the request `messages` make would hold `compact_at` tokens
-    /// or more: those the last step read and wrote, and the results that
-    /// have followed it, which no model has counted yet. Nothing is full
-    /// that a summary has just replaced.
-    ///
-    /// Not every server says what a step read. The mind then counts the
-    /// whole request itself, as it counts results: a token for every two
-    /// bytes.
+    /// or more, as [`counted`](Self::counted). Nothing is full that a
+    /// summary has just replaced, or a trim has just cut down.
     fn is_full(&self, messages: &[Message]) -> bool {
         let Some(limit) = self.settings.compact_at else {
             return false;
         };
-        let round = self.round();
-        let Some(Item::Step { usage, .. }) = round.first() else {
-            return false;
-        };
-        if round
-            .iter()
-            .any(|item| matches!(item, Item::Summary { .. }))
+        self.counted(messages)
+            .is_some_and(|counted| counted >= limit)
+    }
+
+    /// Where the mind's settings have it trim before its next request, if
+    /// they do: once the request would hold their `at` tokens, or
+    /// `compact_at` if that comes sooner, every result but the newest
+    /// `keep` is left out, as long as that at least halves what the
+    /// conversation sends. The system prompt and tools are not counted:
+    /// the cache keeps them apart. A trim rewrites the cache from the first
+    /// result it leaves out, which a small one does not pay back.
+    fn due_trim(&self) -> Option<u64> {
+        let trim = self.settings.own.trim?;
+        let at = trim.at.or(self.settings.compact_at)?;
+        let at = self.settings.compact_at.map_or(at, |limit| limit.min(at));
+        let max = self.settings.max_results;
+        if self.counted(&window(&self.items, self.before, max, ""))? < at {
+            return None;
+        }
+        let before = self.trim_point(trim.keep)?;
+        let sent = |trimmed| sent(&self.items, self.before, max, trimmed);
+        (sent(before) * 2 <= sent(trimmed(&self.items))).then_some(before)
+    }
+
+    /// Leaves out of every request from now on each result but the newest
+    /// `keep`, as a trim the mind's settings call for does, however long
+    /// its requests are: the `keep` of those settings, or none, when it is
+    /// not given. A result the model has not been shown yet stays. A mind
+    /// that has ended, or has nothing to leave out, does nothing.
+    pub fn trim(&mut self, keep: Option<u64>) -> Vec<Output> {
+        let mut outputs = Vec::new();
+        if self.ended {
+            return outputs;
+        }
+        let own = self.settings.own.trim.map_or(0, |trim| trim.keep);
+        let keep = keep.unwrap_or(own);
+        let max = self.settings.max_results;
+        let sent = |trimmed| sent(&self.items, self.before, max, trimmed);
+        if let Some(before) = self.trim_point(keep)
+            && sent(before) < sent(trimmed(&self.items))
         {
-            return false;
+            self.append(Item::Trimmed { before }, &mut outputs);
+        }
+        outputs
+    }
+
+    /// The index a trim that keeps the newest `keep` results whole names:
+    /// that of the oldest it keeps, and never past the last step, whose
+    /// results the model has not been shown. `None` with no step, or with
+    /// `keep` results or fewer.
+    fn trim_point(&self, keep: u64) -> Option<u64> {
+        let (step, _) = self.last_step()?;
+        let outcomes: Vec<usize> = (self.items.iter().enumerate())
+            .filter(|(_, item)| matches!(item, Item::Outcome { .. }))
+            .map(|(at, _)| at)
+            .collect();
+        let keep = usize::try_from(keep).unwrap_or(usize::MAX);
+        let kept = match keep {
+            0 => self.items.len(),
+            keep => *outcomes.get(outcomes.len().checked_sub(keep)?)?,
+        };
+        Some(self.before + index(kept.min(step)))
+    }
+
+    /// How many tokens the request `messages` make would hold, as the mind
+    /// counts them: those the last step read and wrote, and the results
+    /// that have followed it, which no model has counted yet. `None` with
+    /// nothing to count from: no step, or a summary or a trim since the
+    /// last step was asked for, which its count no longer describes.
+    ///
+    /// Not every server says what a step read. The mind then counts the
+    /// whole request itself, as it counts results: a token for every two
+    /// bytes.
+    fn counted(&self, messages: &[Message]) -> Option<u64> {
+        let (step, usage, seen) =
+            self.items
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(at, item)| match item {
+                    Item::Step { usage, seen, .. } => Some((at, usage, *seen)),
+                    _ => None,
+                })?;
+        let since = &self.items[self.local(seen).min(step)..];
+        if since
+            .iter()
+            .any(|item| matches!(item, Item::Summary { .. } | Item::Trimmed { .. }))
+        {
+            return None;
         }
         let results = |content: &Content| match content {
             Content::ToolResult { text, .. } => text.len(),
@@ -2212,15 +2290,14 @@ impl Mind {
             Content::ToolUse { input, .. } => input.to_string().len(),
             Content::Other(value) => value.to_string().len(),
         };
-        let counted = if usage.read() == 0 {
+        Some(if usage.read() == 0 {
             let said = messages.iter().flat_map(|message| &message.content);
             index(said.map(everything).sum::<usize>() / 2)
         } else {
             let last = messages.last().into_iter();
             let added: usize = last.flat_map(|message| &message.content).map(results).sum();
             usage.read() + usage.output + index(added / 2)
-        };
-        counted >= limit
+        })
     }
 
     /// The round in progress: the last step and everything after it. A tool

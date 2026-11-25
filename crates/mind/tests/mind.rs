@@ -6,7 +6,7 @@ use std::time::Duration;
 use mensor_mind::{
     Block, CLONE, Conflict, Content, Fork, HandRecord, Item, MadeFrom, MemoryStore, Message, Mind,
     MindRecord, MindSettings, MindTool, ModelReply, ModelRequest, Outcome, Output, Report, Role,
-    Settings, State, Status, Stop, Store, Unbranched, Untold, Usage, tail_from,
+    Settings, State, Status, Stop, Store, Trim, Unbranched, Untold, Usage, tail_from,
 };
 use mensor_protocol::{
     Call, CallId, CallResult, CapabilityDecl, FromMind, Hello, Name, OperationDecl, Refusal, Reply,
@@ -1070,6 +1070,139 @@ fn a_mind_loaded_from_a_history_with_a_summary_starts_from_it() {
             hands_line(),
             Content::Text("again".into())
         ]
+    );
+}
+
+/// A host whose mind trims every result but its newest once a request
+/// would hold 1,000 tokens, and sums up there when trimming cannot help.
+fn trimming() -> Host {
+    let mut host = Host::with(Settings {
+        compact_at: Some(1_000),
+        own: MindSettings {
+            trim: Some(Trim { keep: 1, at: None }),
+            ..MindSettings::default()
+        },
+        ..Settings::default()
+    });
+    host.attach(&hello("boot-1"));
+    host
+}
+
+/// What the model is shown of a result a trim left out.
+fn left_out(tool_use: &str) -> Content {
+    told(
+        tool_use,
+        "(An older result, left out to keep the conversation short.)",
+    )
+}
+
+/// A thousand bytes of result, which the mind counts as 500 tokens.
+fn screen(n: u64) -> String {
+    n.to_string().repeat(1_000)
+}
+
+/// Has the model take a step that moves, after reading `read` tokens, and
+/// the hand answer it with a screen.
+fn moved(host: &mut Host, n: u64, read: u64) {
+    let tool_use = format!("tu_{n}");
+    let step = vec![text(&format!("move {n}")), bash(&tool_use, "move")];
+    host.reply_costing(step, costing(read, 10));
+    host.result(n, json!(screen(n)));
+}
+
+#[test]
+fn a_mind_that_trims_shows_older_results_as_notes_and_sums_up_only_when_trimming_cannot_help() {
+    let mut host = trimming();
+    host.prompt("play");
+    for n in 1..=3 {
+        moved(&mut host, n, 300);
+    }
+    // 600 read, 10 written and 500 of a new screen: past 1,000. Leaving out
+    // the three older screens more than halves the conversation.
+    moved(&mut host, 4, 600);
+    let step = 11;
+    assert!(
+        matches!(&host.stored[step], Item::Step { content, .. } if content[0] == text("move 4"))
+    );
+    assert_eq!(host.stored.last(), Some(&Item::Trimmed { before: 11 }));
+    let asked = host.asked.last().unwrap().clone();
+    assert!(!asked.text_only, "the mind summed up");
+    // What the model said and asked for stays. Only the newest screen,
+    // which it has not seen, is shown whole.
+    assert_eq!(
+        asked.messages[1].content,
+        vec![
+            Content::Text("move 1".into()),
+            Content::ToolUse {
+                id: "tu_1".into(),
+                name: "bash".into(),
+                input: json!({"command": "move"}),
+            }
+        ]
+    );
+    let results: Vec<&Content> = (asked.messages.iter().skip(2).step_by(2))
+        .map(|message| &message.content[0])
+        .collect();
+    let whole = told("tu_4", &screen(4));
+    assert_eq!(
+        results,
+        [
+            &left_out("tu_1"),
+            &left_out("tu_2"),
+            &left_out("tu_3"),
+            &whole
+        ]
+    );
+
+    // The model says more than two screens hold.
+    let said = "thinking aloud, ".repeat(150);
+    host.reply_costing(vec![text(&said), bash("tu_5", "move")], costing(400, 10));
+    host.result(5, json!(screen(5)));
+    assert!(!host.asked.last().unwrap().text_only);
+    // Past 1,000 again, but leaving out two screens would not halve what
+    // the model has said and been shown: the mind sums up, and trims
+    // nothing.
+    let stored = host.stored.len();
+    moved(&mut host, 6, 1_200);
+    assert!(host.asked.last().unwrap().text_only);
+    let trims = host.stored[stored..].iter();
+    assert!(
+        !trims
+            .into_iter()
+            .any(|item| matches!(item, Item::Trimmed { .. }))
+    );
+}
+
+#[test]
+fn a_mind_trimmed_on_demand_keeps_short_results_and_what_its_model_has_not_seen() {
+    let mut host = Host::new();
+    host.attach(&hello("boot-1"));
+    host.prompt("look around");
+    host.reply(vec![bash("tu_1", "look")]);
+    host.result(1, json!("a long view of the room, ".repeat(10)));
+    host.reply(vec![bash("tu_2", "true")]);
+    host.result(2, json!("ok"));
+    host.reply(vec![bash("tu_3", "look")]);
+    host.result(3, json!("another long view, ".repeat(10)));
+
+    // The model is being asked about the third result: it stays whole.
+    let outputs = host.mind.trim(Some(0));
+    host.perform(outputs);
+    assert_eq!(host.stored.last(), Some(&Item::Trimmed { before: 8 }));
+    assert!(
+        host.mind.trim(Some(0)).is_empty(),
+        "nothing more to leave out"
+    );
+
+    host.reply(vec![text("A room.")]);
+    host.prompt("and now?");
+    let asked = host.asked.last().unwrap();
+    assert!(!asked.text_only);
+    assert_eq!(asked.messages[2].content, vec![left_out("tu_1")]);
+    assert_eq!(asked.messages[4].content, vec![told("tu_2", "ok")]);
+    assert_eq!(
+        asked.messages[6].content,
+        vec![told("tu_3", &"another long view, ".repeat(10))]
     );
 }
 

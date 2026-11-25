@@ -506,6 +506,22 @@ impl Host {
         self.mind(name).await
     }
 
+    /// Leaves older results out of a mind's requests from now on: each but
+    /// the newest `keep`, or as many as its own trim keeps, or none. The
+    /// trim is stored when this returns, if the mind had a result to leave
+    /// out.
+    pub async fn trim(&self, name: &Name, keep: Option<u64>) -> Result<MindStatus, HostError> {
+        let commands = self.reach(name).await?;
+        let (reply, answer) = oneshot::channel();
+        let stopped = || HostError::Stopped(name.clone());
+        commands
+            .send(Command::Trim { keep, reply })
+            .map_err(|_| stopped())?;
+        drop(commands);
+        answer.await.map_err(|_| stopped())?;
+        self.mind(name).await
+    }
+
     /// A mind's history from index `from`, [`PAGE`] items of it at the
     /// most. This reads the store on the calling thread, so an async
     /// caller runs it where blocking is allowed.
@@ -937,7 +953,7 @@ mod tests {
         MindSettings {
             model: model.map(Into::into),
             effort: effort.map(Into::into),
-            system: None,
+            ..MindSettings::default()
         }
     }
 

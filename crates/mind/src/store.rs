@@ -68,6 +68,26 @@ pub struct MindSettings {
     /// The system prompt it gives its model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system: Option<String>,
+    /// When it leaves older results out of its requests, before it sums
+    /// the conversation up. Without it, it never does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trim: Option<Trim>,
+}
+
+/// When a mind leaves older results out of its requests: once a request
+/// would hold `at` tokens, it shows every result but the newest `keep` as a
+/// one-line note, if that at least halves what the conversation sends
+/// beyond the system prompt and tools. A mind sums the conversation up only
+/// once trimming cannot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Trim {
+    /// How many of the newest results stay whole.
+    pub keep: u64,
+    /// How many tokens a request may hold before the mind trims, counted
+    /// as for a summary. Left out, it trims where it would sum up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<u64>,
 }
 
 impl MindSettings {
@@ -78,6 +98,7 @@ impl MindSettings {
             model: self.model.or_else(|| under.model.clone()),
             effort: self.effort.or_else(|| under.effort.clone()),
             system: self.system.or_else(|| under.system.clone()),
+            trim: self.trim.or(under.trim),
         }
     }
 
@@ -86,7 +107,7 @@ impl MindSettings {
     ///
     /// # Panics
     ///
-    /// Never: settings are strings, which JSON always holds.
+    /// Never: settings are strings and numbers, which JSON always holds.
     pub fn digest(&self) -> String {
         use sha2::Digest;
         use std::fmt::Write;
@@ -437,6 +458,10 @@ mod tests {
                 model: Some("claude-haiku-5-5".into()),
                 effort: None,
                 system: Some("Play.".into()),
+                trim: Some(Trim {
+                    keep: 2,
+                    at: Some(60_000),
+                }),
             }),
         };
         let cases = [
@@ -448,7 +473,8 @@ mod tests {
                 made,
                 serde_json::json!({"name": "r2", "origin": "from",
                                    "from": {"mind": "k", "at": 40, "hand": "vm"},
-                                   "model": "claude-haiku-5-5", "system": "Play."}),
+                                   "model": "claude-haiku-5-5", "system": "Play.",
+                                   "trim": {"keep": 2, "at": 60000}}),
             ),
         ];
         for (mind, expected) in cases {
@@ -464,10 +490,12 @@ mod tests {
             model: Some("a".into()),
             ..MindSettings::default()
         };
+        let trim = Some(Trim { keep: 0, at: None });
         let under = MindSettings {
             model: Some("b".into()),
             effort: Some("high".into()),
             system: None,
+            trim,
         };
         assert_eq!(
             own.or(&under),
@@ -475,6 +503,7 @@ mod tests {
                 model: Some("a".into()),
                 effort: Some("high".into()),
                 system: None,
+                trim,
             }
         );
     }

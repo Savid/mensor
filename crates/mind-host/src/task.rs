@@ -68,6 +68,10 @@ pub(crate) enum Command {
         hand: Name,
         reply: oneshot::Sender<Result<(), NoHand>>,
     },
+    Trim {
+        keep: Option<u64>,
+        reply: oneshot::Sender<()>,
+    },
     End {
         reply: oneshot::Sender<()>,
     },
@@ -347,6 +351,14 @@ impl Task {
                     let _ = reply.send(Err(error));
                 }
             },
+            Command::Trim { keep, reply } => {
+                let outputs = self.mind.trim(keep);
+                if !outputs.is_empty() {
+                    tracing::info!(mind = %self.name, "older results were trimmed");
+                }
+                self.perform(outputs).await?;
+                let _ = reply.send(());
+            }
             Command::Status { reply } => {
                 let _ = reply.send(Status {
                     status: self.mind.status_now(),

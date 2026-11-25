@@ -36,7 +36,11 @@ forks, and the `Store` trait (`src/store.rs`).
 - What the window writes for an item depends on that item and those before
   it, never on later ones or on who reads it: names, not "your parent", and
   a summary's hands and kin as it stored them. A child sends its parent's
-  last request as the start of its own.
+  last request as the start of its own. The two exceptions are items too:
+  the last summary replaces what came before it, and the last trim after it
+  (`Item::Trimmed`) shows older results as a note, so a request still
+  depends only on the items before it, and changes once per summary or
+  trim.
 - A step's `under` is the fingerprint of the request that brought it
   (`ModelRequest::fingerprint`, taken from the request as sent). Its
   reasoning (`Block::Other`) goes back only to a request with the same.
