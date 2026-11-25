@@ -80,6 +80,8 @@ struct Said<'a> {
 enum Part<'a> {
     Text {
         text: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<&'static Value>,
     },
     ToolUse {
         id: &'a str,
@@ -91,6 +93,8 @@ enum Part<'a> {
         content: &'a str,
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         is_error: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<&'static Value>,
     },
     /// A block of the model's own, written as it came.
     #[serde(untagged)]
@@ -118,10 +122,10 @@ fn body<'a>(config: &'a Config, request: &'a ModelRequest, drop_reasoning: bool)
                 input_schema: &tool.input,
             })
             .collect(),
-        messages: request.messages.iter().filter_map(said).collect(),
+        messages: conversation(&request.messages),
         // A history only grows, so each request extends the last one's
-        // prefix.
-        cache_control: json!({"type": "ephemeral"}),
+        // prefix, up to the thinking it leaves out.
+        cache_control: BREAKPOINT.clone(),
         output_config: request
             .effort
             .as_ref()
@@ -142,8 +146,57 @@ fn thinking(drop_reasoning: bool) -> Value {
     thinking
 }
 
-fn said(message: &Message) -> Option<Said<'_>> {
-    let content: Vec<Part<'_>> = message.content.iter().filter_map(part).collect();
+/// Where the prompt's cache is written: up to the block that carries it.
+static BREAKPOINT: LazyLock<Value> = LazyLock::new(|| json!({"type": "ephemeral"}));
+
+/// The conversation as sent. Only the newest assistant message that holds
+/// thinking sends it: Claude takes the newest thinking without the older,
+/// and a tool loop's older thinking is a large share of its history. A
+/// message whose thinking is left out changes the prefix of every request
+/// after it, so the message before the newest thinking carries a breakpoint:
+/// the next request, which leaves that thinking out too, reads the cache up
+/// to there.
+fn conversation(messages: &[Message]) -> Vec<Said<'_>> {
+    let thought = messages.iter().rposition(|message| {
+        message.role == Role::Assistant && message.content.iter().any(is_thinking)
+    });
+    let mut conversation: Vec<Said<'_>> = Vec::new();
+    for (at, message) in messages.iter().enumerate() {
+        let thinks = Some(at) == thought;
+        if thinks && let Some(before) = conversation.last_mut() {
+            mark(&mut before.content);
+        }
+        conversation.extend(said(message, thinks));
+    }
+    conversation
+}
+
+fn is_thinking(content: &Content) -> bool {
+    let Content::Other(block) = content else {
+        return false;
+    };
+    matches!(
+        block.get("type").and_then(Value::as_str),
+        Some("thinking" | "redacted_thinking")
+    )
+}
+
+/// Puts a breakpoint on a message's last block, if it is one that takes it.
+fn mark(content: &mut [Part<'_>]) {
+    if let Some(Part::Text { cache_control, .. } | Part::ToolResult { cache_control, .. }) =
+        content.last_mut()
+    {
+        *cache_control = Some(&BREAKPOINT);
+    }
+}
+
+fn said(message: &Message, thinks: bool) -> Option<Said<'_>> {
+    let content: Vec<Part<'_>> = message
+        .content
+        .iter()
+        .filter(|content| thinks || !is_thinking(content))
+        .filter_map(part)
+        .collect();
     let role = match message.role {
         Role::User => "user",
         Role::Assistant => "assistant",
@@ -158,7 +211,10 @@ fn part(content: &Content) -> Option<Part<'_>> {
     Some(match content {
         // The API refuses a text block with nothing in it.
         Content::Text(text) if text.is_empty() => return None,
-        Content::Text(text) => Part::Text { text },
+        Content::Text(text) => Part::Text {
+            text,
+            cache_control: None,
+        },
         // The API takes only an object, where another API's model may have
         // written any JSON, or text that is not JSON.
         Content::ToolUse { id, name, input } => Part::ToolUse {
@@ -181,6 +237,7 @@ fn part(content: &Content) -> Option<Part<'_>> {
             tool_use_id: tool_use,
             content: if text.is_empty() { "(no output)" } else { text },
             is_error: *error,
+            cache_control: None,
         },
     })
 }
@@ -443,7 +500,8 @@ mod tests {
                 "system": "Be brief.",
                 "tools": [{"name": "bash", "description": "Run a command.", "input_schema": {"type": "object"}}],
                 "messages": [
-                    {"role": "user", "content": [{"type": "text", "text": "list the files"}]},
+                    {"role": "user", "content": [{"type": "text", "text": "list the files",
+                                                  "cache_control": {"type": "ephemeral"}}]},
                     {"role": "assistant", "content": [
                         {"type": "thinking", "thinking": "", "signature": "s"},
                         {"type": "tool_use", "id": "tu_1", "name": "bash", "input": {"command": "ls"}},
@@ -459,6 +517,68 @@ mod tests {
                 "thinking": {"type": "adaptive", "display": "summarized"},
             })
         );
+    }
+
+    #[test]
+    fn only_the_newest_thinking_goes_back_and_the_cache_is_read_up_to_it() {
+        let step = |n: u32, thinking: Vec<Value>| {
+            let mut content: Vec<Content> = thinking.into_iter().map(Content::Other).collect();
+            content.push(Content::ToolUse {
+                id: format!("tu_{n}"),
+                name: "bash".into(),
+                input: json!({"command": "ls"}),
+            });
+            [
+                Message {
+                    role: Role::Assistant,
+                    content,
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![Content::ToolResult {
+                        tool_use: format!("tu_{n}"),
+                        text: format!("out {n}"),
+                        error: false,
+                    }],
+                },
+            ]
+        };
+        let thinking =
+            |signature: &str| json!({"type": "thinking", "thinking": "", "signature": signature});
+        let fallback = json!({"type": "fallback", "model": "claude-sonnet-5-5"});
+        let mut request = request();
+        request.messages.truncate(1);
+        request.messages.extend(step(
+            1,
+            vec![
+                thinking("s1"),
+                json!({"type": "redacted_thinking", "data": "r1"}),
+                fallback.clone(),
+            ],
+        ));
+        request.messages.extend(step(2, vec![thinking("s2")]));
+        // The newest step did not think: the one before it keeps its thinking.
+        request.messages.extend(step(3, Vec::new()));
+
+        let messages = written(&config(), &request, false)["messages"].clone();
+        assert_eq!(messages[1]["content"][0], fallback);
+        assert_eq!(messages[3]["content"][0], thinking("s2"));
+        let sent: Vec<&Value> = messages
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|message| message["content"].as_array().unwrap())
+            .collect();
+        let kinds = |kind: &str| sent.iter().filter(|block| block["type"] == kind).count();
+        assert_eq!((kinds("thinking"), kinds("redacted_thinking")), (1, 0));
+        // Only the result before the kept thinking marks where the next
+        // request, which leaves that thinking out, reads the cache to.
+        let marked: Vec<&Value> = sent
+            .iter()
+            .filter(|block| block.get("cache_control").is_some())
+            .map(|block| &block["content"])
+            .collect();
+        assert_eq!(marked, [&json!("out 1")]);
     }
 
     #[test]
