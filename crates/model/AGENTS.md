@@ -10,3 +10,5 @@ Responses API.
   through a `serde_json::Value`.
 - Every request streams, and `Reading` turns the events back into one
   answer.
+- Claude is sent only the newest assistant message's thinking, and a cache
+  breakpoint on the message before it, which the next request repeats.
