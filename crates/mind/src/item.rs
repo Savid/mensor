@@ -153,6 +153,13 @@ pub enum Item {
         /// What went wrong.
         error: String,
     },
+    /// Older results were left out to keep requests short: from here on,
+    /// each result of an outcome before `before` is shown to the model as
+    /// a one-line note. The steps, and what the model said in them, stay.
+    Trimmed {
+        /// The index of the first outcome whose result is still shown.
+        before: u64,
+    },
     /// The conversation so far, as the model summed it up once it had grown
     /// past what the mind lets one request hold. The model is shown this in
     /// place of everything the steps before it had seen.
@@ -223,6 +230,7 @@ impl Item {
             Self::Ended => "ended",
             Self::Paused { .. } => "paused",
             Self::Failed { .. } => "failed",
+            Self::Trimmed { .. } => "trimmed",
             Self::Summary { .. } => "summary",
         }
     }
@@ -501,6 +509,10 @@ mod tests {
                     last_call: 17,
                 },
                 json!({"type": "branched", "from": "k", "at": 40, "left": 64, "lastCall": 17}),
+            ),
+            (
+                Item::Trimmed { before: 52 },
+                json!({"type": "trimmed", "before": 52}),
             ),
             (Item::Ended, json!({"type": "ended"})),
         ];

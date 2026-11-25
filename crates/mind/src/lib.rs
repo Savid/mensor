@@ -50,6 +50,6 @@ pub use mind::{
 pub use model::{Content, Message, ModelError, ModelReply, ModelRequest, Role, Tool};
 pub use store::{
     KNOWING, Latest, MadeFrom, MemoryStore, MindRecord, MindSettings, Origin, Store, StoreError,
-    prompt_under, tail_from,
+    Trim, prompt_under, tail_from,
 };
 pub use tools::{CLONE, MAX_CHILDREN, MindTool, NoMindTool};

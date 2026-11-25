@@ -11,6 +11,9 @@ use crate::{Block, Content, HandRecord, Item, Message, Outcome, Role};
 const SUMMARISED: &str =
     "This conversation grew too long to keep, and was replaced by this summary of it:";
 
+/// What the model is shown in place of a result a trim left out.
+const LEFT_OUT: &str = "(An older result, left out to keep the conversation short.)";
+
 /// The conversation a history amounts to, as a model reads it.
 ///
 /// Each step is one assistant message. The user message after it carries the
@@ -23,7 +26,9 @@ const SUMMARISED: &str =
 ///
 /// A history that holds a summary starts at its last one: the summary, the
 /// hands the mind has and the minds it is kin to, then every prompt no step
-/// had seen when it was written.
+/// had seen when it was written. After that summary, the last trim shows
+/// each result before the index it names as a one-line note, unless the
+/// result is no longer than the note.
 ///
 /// `items` are the end of a history, and `before` is how many items of it
 /// come before them: none, or those a summary replaced. The results of one
@@ -31,7 +36,36 @@ const SUMMARISED: &str =
 /// between them. A step's reasoning is shown only if it was asked `under`
 /// the fingerprint of the request this is for.
 pub(crate) fn window(items: &[Item], before: u64, max_results: usize, under: &str) -> Vec<Message> {
-    conversation(items, before, None, max_results, under)
+    conversation(items, before, None, max_results, under, None)
+}
+
+/// The index before which the window of `items` shows no result whole:
+/// the one the last trim after the last summary names, or 0.
+pub(crate) fn trimmed(items: &[Item]) -> u64 {
+    items
+        .iter()
+        .rev()
+        .take_while(|item| !matches!(item, Item::Summary { .. }))
+        .find_map(|item| match item {
+            Item::Trimmed { before } => Some(*before),
+            _ => None,
+        })
+        .unwrap_or(0)
+}
+
+/// How many bytes of the conversation of `items` a request would send if
+/// every result before `trimmed` were left out, in place of what its trims
+/// say: its text, tool uses and results, but not its reasoning, of which a
+/// request sends little.
+pub(crate) fn sent(items: &[Item], before: u64, max_results: usize, trimmed: u64) -> usize {
+    let window = conversation(items, before, None, max_results, "", Some(trimmed));
+    let said = window.iter().flat_map(|message| &message.content);
+    said.map(|content| match content {
+        Content::Text(text) | Content::ToolResult { text, .. } => text.len(),
+        Content::ToolUse { name, input, .. } => name.len() + input.to_string().len(),
+        Content::Other(_) => 0,
+    })
+    .sum()
 }
 
 /// The request for a summary: everything the steps have seen, then `ask`.
@@ -44,16 +78,20 @@ pub(crate) fn to_summarise(
     max_results: usize,
     under: &str,
 ) -> Vec<Message> {
-    conversation(items, before, Some(ask), max_results, under)
+    conversation(items, before, Some(ask), max_results, under, None)
 }
 
+/// The conversation of `items`, with every result before `left_out` shown
+/// as a note, or before the index the last trim names when it is `None`.
 fn conversation(
     items: &[Item],
     before: u64,
     ask: Option<&str>,
     max_results: usize,
     under: &str,
+    left_out: Option<u64>,
 ) -> Vec<Message> {
+    let left_out = left_out.unwrap_or_else(|| trimmed(items));
     let summary = items
         .iter()
         .enumerate()
@@ -91,8 +129,9 @@ fn conversation(
 
     let mut messages = Vec::new();
     let mut prompts: VecDeque<(u64, Cow<'_, str>)> = VecDeque::new();
-    // The tool asked of the last step, each with its outcome once one is read.
-    let mut asked: Vec<(&str, Option<&Outcome>)> = Vec::new();
+    // The tool asked of the last step, each with its outcome once one is
+    // read, and whether a trim left that outcome's result out.
+    let mut asked: Vec<(&str, Option<(&Outcome, bool)>)> = Vec::new();
     for (at, (index, item)) in (before..).zip(items).enumerate().skip(prompts_from) {
         let counted = at >= steps_from;
         if let Some(said) = among_prompts(item, counted, &mut told) {
@@ -135,7 +174,7 @@ fn conversation(
                     .iter_mut()
                     .find(|(id, ended)| *id == tool_use && ended.is_none());
                 if let Some((_, ended)) = open {
-                    *ended = Some(outcome);
+                    *ended = Some((outcome, index < left_out));
                 }
             }
             _ => {}
@@ -241,13 +280,13 @@ fn can(capabilities: &[CapabilityDecl]) -> String {
 /// The results of a step's tool asked that have ended, in the step's order,
 /// each within its share of `max` bytes.
 fn results<'a>(
-    asked: &'a [(&str, Option<&Outcome>)],
+    asked: &'a [(&str, Option<(&Outcome, bool)>)],
     max: usize,
 ) -> impl Iterator<Item = Content> + 'a {
     let share = max / asked.len().max(1);
-    asked
-        .iter()
-        .filter_map(move |(id, outcome)| outcome.map(|outcome| result(id, outcome, share)))
+    asked.iter().filter_map(move |(id, ended)| {
+        ended.map(|(outcome, left_out)| result(id, outcome, share, left_out))
+    })
 }
 
 fn push_user(messages: &mut Vec<Message>, content: Vec<Content>) {
@@ -291,7 +330,9 @@ fn said(block: &Block) -> Content {
     }
 }
 
-fn result(tool_use: &str, outcome: &Outcome, max: usize) -> Content {
+/// An outcome as the model is shown it: within `max` bytes, or as a note
+/// if it is `left_out` and longer than the note.
+fn result(tool_use: &str, outcome: &Outcome, max: usize, left_out: bool) -> Content {
     let (text, error) = match outcome {
         Outcome::Output(Value::String(text)) => (text.clone(), false),
         Outcome::Output(output) => (output.to_string(), false),
@@ -305,9 +346,14 @@ fn result(tool_use: &str, outcome: &Outcome, max: usize) -> Content {
             true,
         ),
     };
+    let text = if left_out && text.len() > LEFT_OUT.len() {
+        LEFT_OUT.to_owned()
+    } else {
+        fitted(text, max)
+    };
     Content::ToolResult {
         tool_use: tool_use.to_owned(),
-        text: fitted(text, max),
+        text,
         error,
     }
 }

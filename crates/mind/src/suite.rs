@@ -372,6 +372,10 @@ pub fn a_mind_made_from_another_shares_its_first_items_and_keeps_its_record(stor
             model: Some("claude-haiku-5-5".into()),
             effort: Some("low".into()),
             system: Some("Play on.".into()),
+            trim: Some(crate::Trim {
+                keep: 2,
+                at: Some(60_000),
+            }),
         }),
     };
     store.create(&made, &[prompt("r2")]).unwrap();

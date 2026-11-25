@@ -118,7 +118,7 @@ released every hand: release a dead one with `POST /v1/minds/{m}/release`.
 | `--effort` | the model's | For `--model` and the models behind its API: `low`, `medium`, `high`, `xhigh` or `max` for Claude. |
 | `--system-file` | none | The system prompt. |
 | `--max-tokens` | `16000` | Caps one Messages reply, reasoning included: that API needs a cap. Chat and Responses are sent none, so a server's own limit applies. |
-| `--compact-at` | `150000` | Tokens before the mind summarises the conversation and carries on. `0` never does. |
+| `--compact-at` | `150000` | Tokens before the mind summarises the conversation and carries on, unless a [trim](#making-a-mind) is enough. `0` never does. |
 | `--no-fallbacks` | off | Turns off the API's fallback model for a request Claude declines. |
 | `--mind-tools` | all five | A comma list of the mind's own tools to offer. `''` offers none. |
 | `--max-forks` | `64` | Total forks under one root; each fork splits what's left between parent and children. `0` none; `unlimited` leaves it to the hand's `clone`. |
@@ -154,6 +154,7 @@ whole.
 | `POST /v1/minds/{m}/prompt` | `{"text", "key"?}`: 202 stored, 409 if `m` ended. A `key` makes retries safe: 200 if stored already, 409 if with other text. |
 | `POST /v1/minds/{m}/interrupt` | Stops the turn. |
 | `POST /v1/minds/{m}/release` | `{"hand"}`: releases that hand. |
+| `POST /v1/minds/{m}/trim` | `{"keep"?}`: from now on, shows every result but the newest `keep` (its own `trim`'s, or none) as a one-line note. One the model has not seen stays whole. |
 | `POST /v1/minds/{m}/end` | Stops the turn, releases every hand and takes no new prompt. Ending a fork's child deletes its copy of the directory. The history stays. |
 | `GET /v1/minds/{m}/history?after=` | Up to 512 items from index `after`, and the next cursor. |
 | `GET /v1/minds/{m}/events?after=` | The same as server-sent events, live, plus `writing` events that stream each reply. Resume with `after` as the last id plus one. |
@@ -176,6 +177,7 @@ settings. `PUT` first to give it its own, fixed from then on:
 | `model` | `--model` or one of `--models`, without its API prefix. |
 | `effort` | For the Messages API `low` to `max`; for the others any the server takes. |
 | `system` | The system prompt. |
+| `trim` | `{"keep", "at"?}`: once a request would hold `at` tokens (`--compact-at` if that is sooner or `at` is left out), every result but the newest `keep` is shown as a one-line note from then on, if that at least halves the conversation (the system prompt and tools aside). The mind's own words and tool calls stay. It summarises only when a trim cannot. Off unless given. |
 | `from` | `{"mind", "at", "hand"}`: start from `mind`'s first `at` items, keeping its hand `hand`, such as a VM restored from a snapshot taken then. The other hands stay behind. Its model may be behind another API than that mind's. |
 
 A setting left out is the host's, or with `from`, that mind's, except an

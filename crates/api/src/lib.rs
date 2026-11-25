@@ -11,7 +11,7 @@
 pub mod access;
 
 pub use access::{Access, NotRoot, Token, authorized, local, mind_token};
-use mensor_mind::{Item, MadeFrom, MindRecord, MindSettings, State};
+use mensor_mind::{Item, MadeFrom, MindRecord, MindSettings, State, Trim};
 use mensor_protocol::Name;
 use serde::{Deserialize, Serialize};
 
@@ -90,6 +90,9 @@ pub struct MakeBody {
     /// The system prompt it gives its model.
     #[serde(default)]
     pub system: Option<String>,
+    /// When it leaves older results out of its requests.
+    #[serde(default)]
+    pub trim: Option<Trim>,
     /// Another mind's history to start from: the first `at` items of
     /// `mind`'s, keeping its hand `hand`. Without it, the mind starts from
     /// nothing. Each setting the body leaves out is then that mind's.
@@ -104,6 +107,7 @@ impl MakeBody {
             model: self.model.clone(),
             effort: self.effort.clone(),
             system: self.system.clone(),
+            trim: self.trim,
         }
     }
 }
@@ -145,6 +149,16 @@ pub struct MindStatus {
     pub watching: Vec<Name>,
     /// How many items its history holds.
     pub length: u64,
+}
+
+/// The body of `POST /v1/minds/{name}/trim`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrimBody {
+    /// How many of the newest results stay whole: the `keep` of the mind's
+    /// own trim, or none, when left out.
+    #[serde(default)]
+    pub keep: Option<u64>,
 }
 
 /// The body of `POST /v1/minds/{name}/release`.
@@ -275,6 +289,19 @@ mod tests {
         );
         let plain: MakeBody = serde_json::from_value(json!({})).unwrap();
         assert_eq!(plain.settings(), MindSettings::default());
+        let trimming: MakeBody =
+            serde_json::from_value(json!({"trim": {"keep": 2, "at": 60000}})).unwrap();
+        assert_eq!(
+            trimming.settings().trim,
+            Some(Trim {
+                keep: 2,
+                at: Some(60_000)
+            })
+        );
+        assert!(serde_json::from_value::<MakeBody>(json!({"trim": {"at": 60000}})).is_err());
+        assert!(
+            serde_json::from_value::<MakeBody>(json!({"trim": {"keep": 2, "after": 1}})).is_err()
+        );
         // A word misspelt is refused, not left out.
         assert!(serde_json::from_value::<MakeBody>(json!({"modle": "x"})).is_err());
         assert!(
@@ -320,6 +347,10 @@ mod tests {
         assert!(serde_json::from_value::<PromptBody>(json!({"key": "k"})).is_err());
         let misspelt = json!({"text": "hi", "kye": "k"});
         assert!(serde_json::from_value::<PromptBody>(misspelt).is_err());
+        let trim: TrimBody = serde_json::from_value(json!({"keep": 3})).unwrap();
+        assert_eq!(trim.keep, Some(3));
+        let trim: TrimBody = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(trim.keep, None);
         let released: ReleaseBody = serde_json::from_value(json!({"hand": "a1"})).unwrap();
         assert_eq!(released.hand.as_str(), "a1");
         let misspelt = json!({"hand": "a1", "why": "done"});

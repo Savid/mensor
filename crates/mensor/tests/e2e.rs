@@ -2292,6 +2292,38 @@ async fn a_mind_made_with_settings_of_its_own_asks_with_them_and_is_made_once() 
 }
 
 #[tokio::test]
+async fn a_mind_trimmed_through_the_api_shows_its_older_results_as_notes() {
+    let server = Server::start(Config::default()).await;
+    let (status, made) = make(&server, "p1", json!({"trim": {"keep": 1}})).await;
+    assert_eq!((status, &made["trim"]), (201, &json!({"keep": 1})));
+    server.model.then(vec![bash("tu_1", "seq 100 199")]);
+    server.model.then(vec![bash("tu_2", "seq 200 299")]);
+    server.model.then(vec![text("Counted.")]);
+    let dir = tempfile::tempdir().unwrap();
+    let (_handle, _task) = server.hand(fresh("p1", "a1"), dir.path());
+    server.settled("p1").await;
+    server.prompt("p1", "count").await;
+    server.settled("p1").await;
+
+    // Its own trim keeps one result: the newest.
+    let path = server.api("/minds/p1/trim");
+    let answer = client().post(&path).json(&json!({})).send().await.unwrap();
+    assert_eq!(answer.status(), 200);
+    let trimmed = server.history("p1").into_iter().last();
+    assert!(matches!(trimmed, Some(Item::Trimmed { .. })), "{trimmed:?}");
+
+    server.model.then(vec![text("Still counted.")]);
+    server.prompt("p1", "again").await;
+    server.settled("p1").await;
+    let told = told(&server.model.requests()[3]);
+    assert!(
+        !told.contains(r"150\n") && told.contains("left out"),
+        "{told}"
+    );
+    assert!(told.contains(r"250\n"), "{told}");
+}
+
+#[tokio::test]
 async fn a_mind_that_ends_lets_its_hands_go_and_takes_nothing_more() {
     let server = Server::start(Config::default()).await;
     let dir = tempfile::tempdir().unwrap();
