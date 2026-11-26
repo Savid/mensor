@@ -10,13 +10,13 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use futures_util::stream::{self, Stream};
 use futures_util::{SinkExt, StreamExt};
 use mensor_api::{
     Access, History, MakeBody, MindStatus, PAGE, Problem, PromptBody, PromptReply, ReleaseBody,
-    Token, TrimBody, Writing, local,
+    SwitchBody, Token, TrimBody, Writing, local,
 };
 use mensor_mind::{Item, MindSettings, StoreError};
 use mensor_protocol::{FromHand, Hello, MAX_FRAME_BYTES, NOT_LOCAL, Name, Refusal};
@@ -39,6 +39,7 @@ impl Host {
             .route("/v1/minds/{name}/interrupt", post(interrupt))
             .route("/v1/minds/{name}/release", post(release))
             .route("/v1/minds/{name}/trim", post(trim))
+            .route("/v1/minds/{name}/model", put(switch))
             .route("/v1/minds/{name}/end", post(end))
             .route("/v1/minds/{name}/history", get(history))
             .route("/v1/minds/{name}/events", get(events))
@@ -230,6 +231,14 @@ async fn trim(
     Body(body): Body<TrimBody>,
 ) -> Result<Json<MindStatus>, HostError> {
     Ok(Json(host.trim(&name, body.keep).await?))
+}
+
+async fn switch(
+    State(host): State<Host>,
+    Reached(name): Reached,
+    Body(body): Body<SwitchBody>,
+) -> Result<Json<MindStatus>, HostError> {
+    Ok(Json(host.switch(&name, body.model, body.effort).await?))
 }
 
 #[derive(Deserialize)]

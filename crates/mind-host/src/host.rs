@@ -8,7 +8,7 @@ use std::time::Duration;
 use mensor_api::{Made, MindStatus, PAGE, Prompted, Token};
 use mensor_mind::{
     Conflict, Item, MadeFrom, Mind, MindRecord, MindSettings, NoHand, Origin, Report, Settings,
-    State, Store, StoreError, Unbranched,
+    State, Store, StoreError, Switch, Unbranched, in_force,
 };
 use mensor_protocol::{FromHand, Hello, InvalidName, Name, Refusal};
 use tokio::net::TcpListener;
@@ -413,6 +413,7 @@ impl Host {
             waiting: status.waiting,
             watching: status.watching,
             length: status.length,
+            switched: status.switched,
         })
     }
 
@@ -431,11 +432,17 @@ impl Host {
             return answer.await.map_err(|_| stopped());
         }
         // The latest of its history says what a mind is doing: far less
-        // than it would be loaded with.
+        // than it would be loaded with. The model it asks is its last
+        // switch's, wherever that is.
         let store = Arc::clone(&self.inner.store);
         let read = blocking(move || {
+            let mut status = Mind::status(name.clone(), store.recent(&name)?);
+            status.switched = match store.last(&name, "switched", u64::MAX)? {
+                Some(Item::Switched(to)) => Some(to),
+                _ => None,
+            };
             Ok(task::Status {
-                status: Mind::status(name.clone(), store.recent(&name)?),
+                status,
                 hands: Vec::new(),
             })
         });
@@ -520,6 +527,47 @@ impl Host {
         drop(commands);
         answer.await.map_err(|_| stopped())?;
         self.mind(name).await
+    }
+
+    /// Has a mind ask `model` at `effort`, or at the host's effort, from its
+    /// next request on: see [`Mind::switch`]. The switch is stored when this
+    /// returns. A mind that asks it already is left as it is.
+    pub async fn switch(
+        &self,
+        name: &Name,
+        model: String,
+        effort: Option<String>,
+    ) -> Result<MindStatus, HostError> {
+        let asked = MindSettings {
+            model: Some(model),
+            effort,
+            ..MindSettings::default()
+        };
+        self.offers(&asked)?;
+        let to = self.asks(&asked);
+        let commands = self.reach(name).await?;
+        let (reply, answer) = oneshot::channel();
+        let stopped = || HostError::Stopped(name.clone());
+        commands
+            .send(Command::Switch { to, reply })
+            .map_err(|_| stopped())?;
+        drop(commands);
+        answer.await.map_err(|_| stopped())??;
+        self.mind(name).await
+    }
+
+    /// The model a mind made with `settings` asks, and how hard: its own
+    /// over the host's.
+    fn asks(&self, settings: &MindSettings) -> Switch {
+        let host = &self.inner.config.mind.own;
+        Switch {
+            model: settings
+                .model
+                .clone()
+                .or_else(|| host.model.clone())
+                .unwrap_or_else(|| self.inner.model.name().to_owned()),
+            effort: settings.effort.clone().or_else(|| host.effort.clone()),
+        }
     }
 
     /// A mind's history from index `from`, [`PAGE`] items of it at the
@@ -703,7 +751,8 @@ impl Host {
     ///
     /// A mind made from another shares its first `at` items, and keeps its
     /// hand `hand`, which says hello as it again: see [`Mind::branch`].
-    /// Each setting it is not given is that mind's.
+    /// Each setting it is not given is that mind's, its model and effort as
+    /// a switch had it ask them at `at`.
     pub async fn make(
         &self,
         name: &Name,
@@ -714,19 +763,39 @@ impl Host {
             return Err(HostError::NotRoot(name.clone()));
         }
         let mut minds = self.inner.minds.lock().await;
-        let record = match &from {
-            None => MindRecord {
-                name: name.clone(),
-                origin: Origin::Root,
-                settings: self.share(settings),
-            },
+        // What a mind made from another starts with: that mind's history
+        // as it was at `at`, and the last call it has made since.
+        let shared = match &from {
+            None => None,
             Some(from) => {
+                if !minds.contains_key(&from.mind) {
+                    return Err(HostError::Missing(from.mind.clone()));
+                }
+                // Its calls are numbered above every one its keeper made, so
+                // a hand restored from later than `at` reads them as new.
+                let (store, of, at) = (Arc::clone(&self.inner.store), from.mind.clone(), from.at);
+                let shared = blocking(move || {
+                    let last = match store.last(&of, "call", u64::MAX)? {
+                        Some(Item::Call { id, .. }) => id,
+                        _ => 0,
+                    };
+                    Ok((store.tail_at(&of, at)?, last))
+                });
+                Some(shared.await.map_err(HostError::Store)?)
+            }
+        };
+        let record = match (&from, &shared) {
+            (Some(from), Some(((_, tail), _))) => {
                 let keeper = minds.get(&from.mind);
                 let keeper = keeper.ok_or_else(|| HostError::Missing(from.mind.clone()))?;
+                let mut kept = MindSettings::clone(&keeper.record.settings);
+                if let Some(asked) = in_force(tail) {
+                    kept.model = Some(asked.model.clone());
+                    kept.effort.clone_from(&asked.effort);
+                }
                 // An effort is in its model's words, so it goes with the
                 // model: one that names another model takes none from the
                 // keeper.
-                let mut kept = MindSettings::clone(&keeper.record.settings);
                 let keepers = kept.model.as_deref().unwrap_or(self.inner.model.name());
                 if settings
                     .model
@@ -741,6 +810,11 @@ impl Host {
                     settings: self.share(settings.or(&kept)),
                 }
             }
+            _ => MindRecord {
+                name: name.clone(),
+                origin: Origin::Root,
+                settings: self.share(settings),
+            },
         };
         if let Some(made) = minds.get(name) {
             return if made.record == record {
@@ -750,23 +824,12 @@ impl Host {
             };
         }
         self.offers(&record.settings)?;
-        let items = match from {
-            None => Vec::new(),
-            Some(from) => {
-                // Its calls are numbered above every one its keeper made, so
-                // a hand restored from later than `at` reads them as new.
-                let (store, of, at) = (Arc::clone(&self.inner.store), from.mind.clone(), from.at);
-                let (tail, last) = blocking(move || {
-                    let last = match store.last(&of, "call", u64::MAX)? {
-                        Some(Item::Call { id, .. }) => id,
-                        _ => 0,
-                    };
-                    Ok((store.tail_at(&of, at)?, last))
-                })
-                .await
-                .map_err(HostError::Store)?;
-                Mind::branch(&from, tail, last, &self.inner.config.mind)?
+        let items = match (from, shared) {
+            (Some(from), Some((tail, last))) => {
+                let asks = self.asks(&record.settings);
+                Mind::branch(&from, tail, last, &self.inner.config.mind, &asks)?
             }
+            _ => Vec::new(),
         };
         let (store, made) = (Arc::clone(&self.inner.store), record.clone());
         blocking(move || store.create(&made, &items))

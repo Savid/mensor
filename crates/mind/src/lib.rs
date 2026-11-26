@@ -43,9 +43,10 @@ mod tools;
 mod window;
 
 pub use fork::Fork;
-pub use item::{Block, HandRecord, Item, Outcome, Stop, Usage};
+pub use item::{Block, HandRecord, Item, Outcome, Stop, Switch, Usage};
 pub use mind::{
     Conflict, Mind, NoHand, Output, Prompted, Report, Settings, State, Status, Unbranched, Untold,
+    in_force,
 };
 pub use model::{Content, Message, ModelError, ModelReply, ModelRequest, Role, Tool};
 pub use store::{

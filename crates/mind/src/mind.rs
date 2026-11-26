@@ -11,7 +11,7 @@ use crate::tools::{CLONE, Does, HAND, MAX_CHILDREN, MindTool, Table, split, wait
 use crate::window::{sent, to_summarise, trimmed, window};
 use crate::{
     Block, Content, HandRecord, Item, Latest, MadeFrom, Message, MindSettings, ModelReply,
-    ModelRequest, Outcome, Stop,
+    ModelRequest, Outcome, Stop, Switch,
 };
 
 /// Something the host of a mind must do. A host performs a mind's outputs in
@@ -139,6 +139,9 @@ pub struct Status {
     pub watching: Vec<Name>,
     /// What it said when it came to rest, while it is at rest.
     pub report: Option<Report>,
+    /// The model it asks, when a switch changed it from the one it was
+    /// made with.
+    pub switched: Option<Switch>,
 }
 
 impl Status {
@@ -331,6 +334,8 @@ pub struct Mind {
     telling: Option<Telling>,
     /// The `wait` in progress, and what the minds it waits for have said.
     watching: Option<Watching>,
+    /// The model it asks, when a switch changed it from its settings'.
+    switched: Option<Switch>,
 }
 
 /// What a history records of the minds a mind is kin to.
@@ -464,6 +469,7 @@ impl Mind {
             waiting: self.waiting(),
             watching: self.watching(),
             report: self.report(),
+            switched: self.switched.clone(),
         }
     }
 
@@ -490,6 +496,12 @@ impl Mind {
     /// are in its host's store alone.
     pub fn starts_at(&self) -> u64 {
         self.before
+    }
+
+    /// The model the mind asks, when a switch changed it from the one its
+    /// settings name: what its host asks with.
+    pub fn switched(&self) -> Option<&Switch> {
+        self.switched.as_ref()
     }
 
     /// How many items the history holds.
@@ -889,6 +901,7 @@ impl Mind {
                     forks_left: self.kin.forks_left,
                     parent: self.kin.parent.clone(),
                     children: self.kin.children.clone(),
+                    switched: self.switched.clone(),
                 }
             }
         } else {
@@ -1124,12 +1137,16 @@ impl Mind {
     /// `from.mind`'s kin: it has no parent and no children, forks from
     /// `settings` as one that starts from nothing, and numbers its calls
     /// above `last_call`, so that a hand restored from later than `at`
-    /// reads them as new.
+    /// reads them as new. When a switch had `from.mind` ask another model
+    /// than `asks`, the model and effort the new mind is made with, a
+    /// switch back to `asks` follows: the new mind asks what it was made
+    /// with.
     pub fn branch(
         from: &MadeFrom,
         (start, items): (u64, Vec<Item>),
         last_call: CallId,
         settings: &Settings,
+        asks: &Switch,
     ) -> Result<Vec<Item>, Unbranched> {
         let MadeFrom { mind: of, at, hand } = from;
         let length = start + index(items.len());
@@ -1198,6 +1215,9 @@ impl Mind {
             last_call: last_call.max(mind.last_call()),
         };
         mind.append(item, &mut outputs);
+        if mind.switched.as_ref().is_some_and(|now| now != asks) {
+            mind.append(Item::Switched(asks.clone()), &mut outputs);
+        }
         Ok(outputs
             .into_iter()
             .filter_map(|output| match output {
@@ -1231,6 +1251,7 @@ impl Mind {
             asking: None,
             telling: None,
             watching: None,
+            switched: None,
         };
         for (at, item) in known {
             note(&mut mind.hands, &mut mind.kin, &mut mind.ended, item, *at);
@@ -1243,7 +1264,17 @@ impl Mind {
         for (at, item) in (mind.before..).zip(&mind.items).skip(summary.unwrap_or(0)) {
             note(&mut mind.hands, &mut mind.kin, &mut mind.ended, item, at);
         }
+        if let Some(to) = in_force(&mind.items).cloned() {
+            mind.ask_with(to);
+        }
         mind
+    }
+
+    /// Asks `to`'s model at its effort from the next request on.
+    fn ask_with(&mut self, to: Switch) {
+        self.settings.own.model = Some(to.model.clone());
+        self.settings.own.effort.clone_from(&to.effort);
+        self.switched = Some(to);
     }
 
     /// Forgets what the last summary replaced: every item before the index
@@ -1272,6 +1303,9 @@ impl Mind {
     fn append(&mut self, item: Item, outputs: &mut Vec<Output>) {
         let at = self.length();
         note(&mut self.hands, &mut self.kin, &mut self.ended, &item, at);
+        if let Item::Switched(to) = &item {
+            self.ask_with(to.clone());
+        }
         self.items.push(item.clone());
         outputs.push(Output::Append(item));
     }
@@ -2215,6 +2249,28 @@ impl Mind {
         (sent(before) * 2 <= sent(trimmed(&self.items))).then_some(before)
     }
 
+    /// Asks `to`'s model at its effort from the next request on, summaries
+    /// included: a request already sent is answered as it was asked. The
+    /// history records the switch, so the mind asks the same once loaded
+    /// again, and so do the children a fork makes from then on. A mind
+    /// that asks `to` already does nothing.
+    ///
+    /// # Errors
+    ///
+    /// A mind that has ended asks no model: [`Conflict::Ended`].
+    pub fn switch(&mut self, to: Switch) -> Result<Vec<Output>, Conflict> {
+        if self.ended {
+            return Err(Conflict::Ended(self.name.clone()));
+        }
+        let own = &self.settings.own;
+        if own.model.as_deref() == Some(to.model.as_str()) && own.effort == to.effort {
+            return Ok(Vec::new());
+        }
+        let mut outputs = Vec::new();
+        self.append(Item::Switched(to), &mut outputs);
+        Ok(outputs)
+    }
+
     /// Leaves out of every request from now on each result but the newest
     /// `keep`, as a trim the mind's settings call for does, however long
     /// its requests are: the `keep` of those settings, or none, when it is
@@ -2418,6 +2474,26 @@ impl Mind {
 
 /// What an item at index `at` changes in what a mind knows of its hands,
 /// its kin, and whether it has ended.
+/// The model a switch left the mind of a history's end asking, `items`
+/// being that end as a store's [`tail`](crate::Store::tail) gives it: its
+/// last switch, or the one its last summary carries from before it. None
+/// when no switch is in force: the mind asks what it was made with.
+pub fn in_force(items: &[Item]) -> Option<&Switch> {
+    let summary = items
+        .iter()
+        .rposition(|item| matches!(item, Item::Summary { .. }));
+    items
+        .iter()
+        .skip(summary.unwrap_or(0))
+        .rev()
+        .find_map(|item| match item {
+            Item::Switched(to) => Some(Some(to)),
+            Item::Summary { switched, .. } => Some(switched.as_ref()),
+            _ => None,
+        })
+        .flatten()
+}
+
 fn note(hands: &mut BTreeMap<Name, Hand>, kin: &mut Kin, ended: &mut bool, item: &Item, at: u64) {
     match item {
         // What a summary carries is what the mind knew when it was written.

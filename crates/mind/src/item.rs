@@ -160,6 +160,11 @@ pub enum Item {
         /// The index of the first outcome whose result is still shown.
         before: u64,
     },
+    /// The mind asks another model from here on: every request after this
+    /// item, a summary's included, goes to that model at that effort. A
+    /// fork's children, and a mind made from this history after it, ask it
+    /// too, unless made with a model of their own.
+    Switched(Switch),
     /// The conversation so far, as the model summed it up once it had grown
     /// past what the mind lets one request hold. The model is shown this in
     /// place of everything the steps before it had seen.
@@ -193,7 +198,23 @@ pub enum Item {
         /// Every mind this one's forks made.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         children: Vec<Name>,
+        /// The model the mind asks, when a switch before the summary
+        /// changed it from the one it was made with.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        switched: Option<Switch>,
     },
+}
+
+/// A model a mind was switched to, and how hard it works: see
+/// [`Item::Switched`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Switch {
+    /// The model, as a mind is made with it.
+    pub model: String,
+    /// How hard it works, in its API's words; without one, as hard as its
+    /// API works by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
 
 /// What a history records of one hand.
@@ -231,6 +252,7 @@ impl Item {
             Self::Paused { .. } => "paused",
             Self::Failed { .. } => "failed",
             Self::Trimmed { .. } => "trimmed",
+            Self::Switched { .. } => "switched",
             Self::Summary { .. } => "summary",
         }
     }
@@ -452,6 +474,7 @@ mod tests {
                     forks_left: Some(20),
                     parent: Some(Name::new("m").unwrap()),
                     children: vec![Name::new("m.d3342iuj").unwrap()],
+                    switched: None,
                 },
                 json!({"type": "summary", "text": "So far.", "usage": {"input": 10, "output": 2},
                        "from": 4, "hands": {"a1": {"boot": "9f3c"}}, "lastCall": 3, "forksLeft": 20,
@@ -497,6 +520,7 @@ mod tests {
                     forks_left: None,
                     parent: None,
                     children: Vec::new(),
+                    switched: None,
                 },
                 json!({"type": "summary", "text": "So far.", "usage": {"input": 0, "output": 0},
                        "from": 0, "lastCall": 0}),
@@ -513,6 +537,13 @@ mod tests {
             (
                 Item::Trimmed { before: 52 },
                 json!({"type": "trimmed", "before": 52}),
+            ),
+            (
+                Item::Switched(Switch {
+                    model: "openai-codex/gpt-6.1-terra".into(),
+                    effort: Some("high".into()),
+                }),
+                json!({"type": "switched", "model": "openai-codex/gpt-6.1-terra", "effort": "high"}),
             ),
             (Item::Ended, json!({"type": "ended"})),
         ];

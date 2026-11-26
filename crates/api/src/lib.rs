@@ -11,7 +11,7 @@
 pub mod access;
 
 pub use access::{Access, NotRoot, Token, authorized, local, mind_token};
-use mensor_mind::{Item, MadeFrom, MindRecord, MindSettings, State, Trim};
+use mensor_mind::{Item, MadeFrom, MindRecord, MindSettings, State, Switch, Trim};
 use mensor_protocol::Name;
 use serde::{Deserialize, Serialize};
 
@@ -149,6 +149,23 @@ pub struct MindStatus {
     pub watching: Vec<Name>,
     /// How many items its history holds.
     pub length: u64,
+    /// The model it asks, and how hard, when a switch changed it from the
+    /// one it was made with.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub switched: Option<Switch>,
+}
+
+/// The body of `PUT /v1/minds/{name}/model`, which has a mind ask another
+/// model from its next request on.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SwitchBody {
+    /// The model it asks: one the host offers.
+    pub model: String,
+    /// How hard that model works, in its API's words: the host's when left
+    /// out, as for a mind made with that model.
+    #[serde(default)]
+    pub effort: Option<String>,
 }
 
 /// The body of `POST /v1/minds/{name}/trim`.
@@ -229,6 +246,7 @@ mod tests {
             waiting: vec![Name::new("b2").unwrap()],
             watching: vec![Name::new("m.d3342iuj").unwrap()],
             length: 3,
+            switched: None,
         };
         assert_eq!(
             serde_json::to_value(status).unwrap(),
@@ -329,13 +347,44 @@ mod tests {
             waiting: Vec::new(),
             watching: Vec::new(),
             length: 44,
+            switched: None,
         };
         assert_eq!(
-            serde_json::to_value(made).unwrap(),
+            serde_json::to_value(&made).unwrap(),
             json!({"name": "r2", "origin": "from", "from": {"mind": "k", "at": 41, "hand": "vm"},
                    "model": "claude-haiku-5-5", "state": "ended", "hands": [], "waiting": [],
                    "watching": [], "length": 44})
         );
+        // A switched mind says what it was made with, and what it asks now.
+        let switched = MindStatus {
+            switched: Some(Switch {
+                model: "openai-codex/gpt-6.1-terra".into(),
+                effort: Some("high".into()),
+            }),
+            ..made
+        };
+        let written = serde_json::to_value(switched).unwrap();
+        assert_eq!(written["model"], "claude-haiku-5-5");
+        assert_eq!(
+            written["switched"],
+            json!({"model": "openai-codex/gpt-6.1-terra", "effort": "high"})
+        );
+    }
+
+    #[test]
+    fn a_switch_names_a_model_and_may_name_an_effort() {
+        let body: SwitchBody =
+            serde_json::from_value(json!({"model": "openai-codex/gpt-6.2-sol", "effort": "high"}))
+                .unwrap();
+        assert_eq!(
+            (body.model.as_str(), body.effort.as_deref()),
+            ("openai-codex/gpt-6.2-sol", Some("high"))
+        );
+        let plain: SwitchBody =
+            serde_json::from_value(json!({"model": "claude-haiku-5-5"})).unwrap();
+        assert_eq!(plain.effort, None);
+        assert!(serde_json::from_value::<SwitchBody>(json!({"effort": "high"})).is_err());
+        assert!(serde_json::from_value::<SwitchBody>(json!({"modle": "x"})).is_err());
     }
 
     #[test]

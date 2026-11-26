@@ -6,7 +6,7 @@ use std::time::Duration;
 use mensor_mind::{
     Block, CLONE, Conflict, Content, Fork, HandRecord, Item, MadeFrom, MemoryStore, Message, Mind,
     MindRecord, MindSettings, MindTool, ModelReply, ModelRequest, Outcome, Output, Report, Role,
-    Settings, State, Status, Stop, Store, Trim, Unbranched, Untold, Usage, tail_from,
+    Settings, State, Status, Stop, Store, Switch, Trim, Unbranched, Untold, Usage, tail_from,
 };
 use mensor_protocol::{
     Call, CallId, CallResult, CapabilityDecl, FromMind, Hello, Name, OperationDecl, Refusal, Reply,
@@ -925,6 +925,7 @@ fn a_conversation_that_grew_too_long_is_summed_up_mid_turn() {
             forks_left: Some(64),
             parent: None,
             children: Vec::new(),
+            switched: None,
         })
     );
     // The mind has let go of what the summary replaced.
@@ -1071,6 +1072,112 @@ fn a_mind_loaded_from_a_history_with_a_summary_starts_from_it() {
             Content::Text("again".into())
         ]
     );
+}
+
+fn haiku() -> Switch {
+    Switch {
+        model: "claude-haiku-5-5".into(),
+        effort: Some("high".into()),
+    }
+}
+
+fn terra() -> Switch {
+    Switch {
+        model: "responses:gpt-6.1-terra".into(),
+        effort: Some("high".into()),
+    }
+}
+
+/// The model the mind's last request went to, and at what effort.
+fn asks(host: &Host) -> (Option<&str>, Option<&str>) {
+    let asked = host.asked.last().expect("the mind asked nothing");
+    (asked.model.as_deref(), asked.effort.as_deref())
+}
+
+#[test]
+fn a_switched_mind_asks_its_new_model_from_its_next_request_on_however_it_is_loaded() {
+    let mut host = compacting();
+    host.prompt("list the files");
+    assert_eq!(asks(&host), (None, None));
+    let outputs = host.mind.switch(terra()).unwrap();
+    host.perform(outputs);
+    assert_eq!(host.stored.last(), Some(&Item::Switched(terra())));
+    // The request already sent is answered as it was asked.
+    assert_eq!(asks(&host), (None, None));
+    host.reply_costing(vec![bash("tu_1", "ls")], costing(30, 5));
+    host.result(1, json!("a.txt"));
+    assert_eq!(asks(&host), (Some("responses:gpt-6.1-terra"), Some("high")));
+    let stored = host.stored.len();
+    assert_eq!(host.mind.switch(terra()), Ok(Vec::new()));
+    assert_eq!(host.stored.len(), stored);
+
+    // A summary is asked of the new model, and carries the switch: a mind
+    // loaded from the history after it, which no longer holds the switch,
+    // asks the new model too.
+    host.reply_costing(vec![bash("tu_2", "cat a.txt")], costing(120, 5));
+    host.result(2, json!("hello"));
+    assert!(host.asked.last().unwrap().text_only);
+    assert_eq!(asks(&host), (Some("responses:gpt-6.1-terra"), Some("high")));
+    host.reply(vec![text("Read a.txt.")]);
+    assert!(
+        matches!(host.stored.last(), Some(Item::Summary { switched: Some(to), .. }) if *to == terra())
+    );
+    let from = host.mind.starts_at();
+    let tail = host.stored[usize::try_from(from).unwrap()..].to_vec();
+    assert!(!tail.contains(&Item::Switched(terra())));
+    let mut loaded = Host::around(
+        Mind::load(name("m"), from, tail, compact_at_100()),
+        host.stored.clone(),
+    );
+    loaded.attach(&hello("boot-1"));
+    loaded.prompt("and now?");
+    assert_eq!(
+        asks(&loaded),
+        (Some("responses:gpt-6.1-terra"), Some("high"))
+    );
+    assert_eq!(loaded.mind.status_now().switched, Some(terra()));
+}
+
+#[test]
+fn a_mind_made_from_a_switched_history_asks_what_it_is_made_with() {
+    let mut host = Host::new();
+    host.attach(&hello("boot-1"));
+    host.prompt("list the files");
+    let outputs = host.mind.switch(terra()).unwrap();
+    host.perform(outputs);
+    host.reply(vec![bash("tu_1", "ls")]);
+    host.result(1, json!("a.txt"));
+    let at = host.stored.len();
+    let from = MadeFrom {
+        mind: name("m"),
+        at: u64::try_from(at).unwrap(),
+        hand: name("a1"),
+    };
+    let settings = Settings::default();
+    for (made_with, switched_back) in [(haiku(), true), (terra(), false)] {
+        let own = Mind::branch(&from, (0, host.stored.clone()), 1, &settings, &made_with).unwrap();
+        assert_eq!(own.last() == Some(&Item::Switched(haiku())), switched_back);
+        let mut history = host.stored.clone();
+        history.extend(own);
+        let mut made = Host::around(
+            Mind::load(name("r2"), 0, history.clone(), settings.clone()),
+            history,
+        );
+        made.attach(&Hello {
+            mind: name("r2"),
+            ..hand("a1", "boot-restored")
+        });
+        made.prompt("go on");
+        assert_eq!(asks(&made).0, Some(made_with.model.as_str()));
+    }
+}
+
+#[test]
+fn a_mind_that_has_ended_is_not_switched() {
+    let mut host = Host::new();
+    let outputs = host.mind.end();
+    host.perform(outputs);
+    assert_eq!(host.mind.switch(terra()), Err(Conflict::Ended(name("m"))));
 }
 
 /// A host whose mind trims every result but its newest once a request
@@ -2870,7 +2977,7 @@ fn branch(
         hand: name(hand),
     };
     let shared = stored[..at.min(stored.len())].to_vec();
-    Mind::branch(&from, (0, shared), last_call, settings)
+    Mind::branch(&from, (0, shared), last_call, settings, &haiku())
 }
 
 /// The mind `r2` made from `stored`'s first `at` items, as its host would
@@ -3278,7 +3385,7 @@ fn a_mind_made_from_a_child_is_no_kin_of_anyone() {
         max_forks: None,
         ..Settings::default()
     };
-    let first = Mind::branch(&from, (0, child.stored.clone()), 1, &unlimited).unwrap();
+    let first = Mind::branch(&from, (0, child.stored.clone()), 1, &unlimited, &haiku()).unwrap();
     let mut stored = child.stored.clone();
     stored.extend(first);
     let mut made = Host::around(

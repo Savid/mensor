@@ -14,7 +14,7 @@ forks, and the `Store` trait (`src/store.rs`).
   again when it loads (`Mind::start`).
 - A mind holds only the end of its history: everything after its last
   summary, which carries what it needs from before (`from`, `hands`,
-  `lastCall`, `forksLeft`, `parent`, `children`). What reaches further back
+  `lastCall`, `forksLeft`, `parent`, `children`, `switched`). What reaches further back
   asks the store, a page at a time.
 - What a mind looks up (a call, an outcome, the last step) is in the round
   in progress. Only a prompt's key and the last call's id are looked for
