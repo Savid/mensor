@@ -154,6 +154,7 @@ whole.
 | `POST /v1/minds/{m}/prompt` | `{"text", "key"?}`: 202 stored, 409 if `m` ended. A `key` makes retries safe: 200 if stored already, 409 if with other text. |
 | `POST /v1/minds/{m}/interrupt` | Stops the turn. |
 | `POST /v1/minds/{m}/release` | `{"hand"}`: releases that hand. |
+| `PUT /v1/minds/{m}/model` | `{"model", "effort"?}`: from its next request on, `m` asks another model the host offers, at that effort or the host's. Its history, hands and turn carry on; a `switched` item records it, so a restart keeps it and a fork's children made after it ask it too. `GET` says it as `switched`. 400 a model or effort not offered, 409 if `m` ended. |
 | `POST /v1/minds/{m}/trim` | `{"keep"?}`: from now on, shows every result but the newest `keep` (its own `trim`'s, or none) as a one-line note. One the model has not seen stays whole. |
 | `POST /v1/minds/{m}/end` | Stops the turn, releases every hand and takes no new prompt. Ending a fork's child deletes its copy of the directory. The history stays. |
 | `GET /v1/minds/{m}/history?after=` | Up to 512 items from index `after`, and the next cursor. |
@@ -170,7 +171,8 @@ whole.
 ### Making a mind
 
 A hand that connects to a root no one made starts it with the host's
-settings. `PUT` first to give it its own, fixed from then on:
+settings. `PUT` first to give it its own, fixed from then on but for a
+[switch](#api) of its model:
 
 | Field | |
 | --- | --- |
@@ -180,8 +182,9 @@ settings. `PUT` first to give it its own, fixed from then on:
 | `trim` | `{"keep", "at"?}`: once a request would hold `at` tokens (`--compact-at` if that is sooner or `at` is left out), every result but the newest `keep` is shown as a one-line note from then on, if that at least halves the conversation (the system prompt and tools aside). The mind's own words and tool calls stay. It summarises only when a trim cannot. Off unless given. |
 | `from` | `{"mind", "at", "hand"}`: start from `mind`'s first `at` items, keeping its hand `hand`, such as a VM restored from a snapshot taken then. The other hands stay behind. Its model may be behind another API than that mind's. |
 
-A setting left out is the host's, or with `from`, that mind's, except an
-effort when the body names another model. It answers
+A setting left out is the host's, or with `from`, that mind's as it asked
+at `at` after any [switch](#api), except an effort when the body names
+another model. It answers
 201 made, 200 made the same way before, 409 made otherwise, 404 no such
 `from`, 403 a `from` the token does not reach, and 400 a bad name (a `.`,
 or over 55 bytes), model, effort or `from`.

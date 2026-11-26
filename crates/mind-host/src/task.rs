@@ -5,7 +5,7 @@ use std::time::Duration;
 use mensor_api::Writing;
 use mensor_mind::{
     Conflict, Fork, Item, Mind, MindRecord, MindSettings, ModelReply, ModelRequest, NoHand, Origin,
-    Output, Report, Settings, Store, StoreError, Untold,
+    Output, Report, Settings, Store, StoreError, Switch, Untold,
 };
 use mensor_protocol::{FromHand, FromMind, Hello, Name, Refusal};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -71,6 +71,10 @@ pub(crate) enum Command {
     Trim {
         keep: Option<u64>,
         reply: oneshot::Sender<()>,
+    },
+    Switch {
+        to: Switch,
+        reply: oneshot::Sender<Result<(), Conflict>>,
     },
     End {
         reply: oneshot::Sender<()>,
@@ -222,6 +226,7 @@ impl Task {
         let (store, name) = (Arc::clone(&self.store), self.name.clone());
         let (from, items) = blocking(move || store.tail(&name)).await?;
         self.mind = Mind::load(self.name.clone(), from, items, self.settings.clone());
+        self.ask_switched();
         let outputs = self.mind.start();
         self.perform(outputs).await?;
         loop {
@@ -351,14 +356,8 @@ impl Task {
                     let _ = reply.send(Err(error));
                 }
             },
-            Command::Trim { keep, reply } => {
-                let outputs = self.mind.trim(keep);
-                if !outputs.is_empty() {
-                    tracing::info!(mind = %self.name, "older results were trimmed");
-                }
-                self.perform(outputs).await?;
-                let _ = reply.send(());
-            }
+            Command::Trim { keep, reply } => self.trim(keep, reply).await?,
+            Command::Switch { to, reply } => self.switch(to, reply).await?,
             Command::Status { reply } => {
                 let _ = reply.send(Status {
                     status: self.mind.status_now(),
@@ -370,6 +369,53 @@ impl Task {
             }
         }
         Ok(())
+    }
+
+    /// Leaves older results out of the mind's requests from now on, and says
+    /// so on `reply` once the trim is stored.
+    async fn trim(
+        &mut self,
+        keep: Option<u64>,
+        reply: oneshot::Sender<()>,
+    ) -> Result<(), StoreError> {
+        let outputs = self.mind.trim(keep);
+        if !outputs.is_empty() {
+            tracing::info!(mind = %self.name, "older results were trimmed");
+        }
+        self.perform(outputs).await?;
+        let _ = reply.send(());
+        Ok(())
+    }
+
+    /// Has the mind ask `to`'s model from its next request on, and says so
+    /// on `reply` once the switch is stored.
+    async fn switch(
+        &mut self,
+        to: Switch,
+        reply: oneshot::Sender<Result<(), Conflict>>,
+    ) -> Result<(), StoreError> {
+        let outputs = match self.mind.switch(to) {
+            Ok(outputs) => outputs,
+            Err(conflict) => {
+                let _ = reply.send(Err(conflict));
+                return Ok(());
+            }
+        };
+        if !outputs.is_empty() {
+            tracing::info!(mind = %self.name, model = ?self.mind.switched(), "the mind asks another model");
+        }
+        self.perform(outputs).await?;
+        self.ask_switched();
+        let _ = reply.send(Ok(()));
+        Ok(())
+    }
+
+    /// Asks with the model a switch has the mind ask, if one does: its own
+    /// API's.
+    fn ask_switched(&mut self) {
+        if let (Some(to), Some(host)) = (self.mind.switched(), self.host.upgrade()) {
+            self.model = Arc::clone(host.asking(Some(&to.model)));
+        }
     }
 
     /// Performs what stopping the mind's turn gave, saying `what` happened

@@ -326,6 +326,7 @@ impl Mind {
             waiting: Vec::new(),
             watching: Vec::new(),
             length: object.length(),
+            switched: None,
         };
         Ok(json(200, &status)?)
     }

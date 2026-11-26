@@ -628,6 +628,7 @@ fn summary(from: u64) -> Item {
         forks_left: Some(64),
         parent: None,
         children: Vec::new(),
+        switched: None,
     }
 }
 

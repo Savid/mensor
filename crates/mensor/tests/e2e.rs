@@ -2502,6 +2502,90 @@ async fn a_mind_made_from_another_may_ask_another_model() {
     server.stop().await;
 }
 
+/// Has `mind` ask another model: the answer's status, and what it said.
+async fn switch(server: &Server, mind: &str, body: Value) -> (u16, Value) {
+    let path = format!("/minds/{mind}/model");
+    let answer = client().put(server.api(&path)).json(&body).send().await;
+    let answer = answer.unwrap();
+    let status = answer.status().as_u16();
+    (status, answer.json().await.unwrap_or_default())
+}
+
+#[tokio::test]
+async fn a_switched_mind_asks_its_new_model_from_then_on_and_after_a_restart() {
+    let other = Arc::new(Scripted::new());
+    let config = || Config {
+        models: [("other".to_owned(), other.clone() as Arc<dyn Model>)].into(),
+        ..Config::default()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mensor.sqlite");
+    let open = || -> Arc<dyn Store> { Arc::new(SqliteStore::open(&path).unwrap()) };
+    let listener = loopback();
+    let kept = listener.try_clone().unwrap();
+    let first = Server::over(open(), config(), listener).await;
+    first.model.then(vec![text("One.")]);
+    let (hand, _task) = first.hand(fresh("m", "a1"), dir.path());
+    first.settled("m").await;
+    first.prompt("m", "count").await;
+    first.settled("m").await;
+
+    assert_eq!(switch(&first, "m", json!({"model": "gpt-9"})).await.0, 400);
+    let (status, switched) = switch(&first, "m", json!({"model": "other", "effort": "high"})).await;
+    assert_eq!(status, 200);
+    assert_eq!(switched["model"], Value::Null);
+    assert_eq!(
+        switched["switched"],
+        json!({"model": "other", "effort": "high"})
+    );
+    other.then(vec![text("Two.")]);
+    first.prompt("m", "count again").await;
+    first.settled("m").await;
+    assert_eq!(said(&first.history("m")), ["One.", "Two."]);
+    let asked = other.requests();
+    assert_eq!(
+        (
+            asked.len(),
+            asked[0].model.as_deref(),
+            asked[0].effort.as_deref()
+        ),
+        (1, Some("other"), Some("high"))
+    );
+
+    // A mind made from it asks what it asked then, unless made with a
+    // model of its own.
+    let at = first.history("m").len();
+    let from = json!({"mind": "m", "at": at, "hand": "a1"});
+    let (_, kept_on) = make(&first, "r1", json!({"from": from})).await;
+    assert_eq!(
+        (&kept_on["model"], &kept_on["effort"]),
+        (&json!("other"), &json!("high"))
+    );
+    let (_, own) = make(&first, "r2", json!({"model": "scripted", "from": from})).await;
+    assert_eq!(own["switched"]["model"], "scripted");
+    first.stop().await;
+
+    // A host over the same store carries the switch on.
+    let second = Server::over(open(), config(), kept).await;
+    assert_eq!(
+        second
+            .status("m")
+            .await
+            .unwrap()
+            .switched
+            .map(|to| to.model),
+        Some("other".to_owned())
+    );
+    hand.redial();
+    second.settled("m").await;
+    other.then(vec![text("Three.")]);
+    second.prompt("m", "and again").await;
+    second.settled("m").await;
+    assert_eq!(said(&second.history("m")), ["One.", "Two.", "Three."]);
+    assert_eq!(other.requests().len(), 2);
+    assert_eq!(second.model.requests().len(), 0);
+}
+
 #[tokio::test]
 async fn a_body_the_api_cannot_read_is_a_problem() {
     let server = Server::start(Config::default()).await;
